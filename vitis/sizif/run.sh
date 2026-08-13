@@ -4,9 +4,20 @@
 # "Run" button does under the hood, no Vivado Hardware Manager or IDE app
 # component needed. Board must be connected/powered.
 #
-# Best-effort standard xsdb sequence for Zynq-7000 without an FSBL, not yet
-# run end-to-end in this repo — if it errors, fall back to the Vitis IDE
-# ("Run As -> Launch on Hardware") described in README.md.
+# Standard xsdb sequence for Zynq-7000 without an FSBL. Target names
+# confirmed on this board's actual `targets` output:
+#   1  APU
+#      2  ARM Cortex-A9 MPCore #0
+#      3  ARM Cortex-A9 MPCore #1
+#   4  xc7z010
+#      5  Legacy Debug Hub
+# `fpga -file` needs the `xc7z*` (PL config) target; `ps7_init`/
+# `ps7_post_config` need the `APU` target (system/SLCR register access via
+# the debug context) -- running them against `xc7z*` instead fails with
+# "Context does not support memory read. Unsupported command". The final
+# `dow`/`con` need a specific core, `*Cortex-A9 MPCore #0*` (not the
+# shorter `*Cortex-A9 #0*`, which doesn't substring-match this target's
+# real name and silently selects nothing / the wrong target).
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -32,10 +43,11 @@ cat > "$TCL_SCRIPT" <<EOF
 connect
 targets -set -filter {name =~ "xc7z*"}
 fpga -file {${BIT}}
+targets -set -filter {name =~ "APU*"}
 source {${PS7_INIT_TCL}}
 ps7_init
 ps7_post_config
-targets -set -filter {name =~ "*Cortex-A9 #0*"}
+targets -set -filter {name =~ "*Cortex-A9 MPCore #0*"}
 rst -processor
 dow {${ELF}}
 con
