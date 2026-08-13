@@ -1,0 +1,20 @@
+# Every <tool>/<name>/build/ is generated locally (Vivado project, Vitis
+# platform+app build, compiled tcp_server_app, Python venv, run/log state).
+# Keep the directory itself tracked via .gitkeep, ignore everything in it.
+**/build/*
+!**/build/.gitkeep
+
+# Editor/backup/autosave junk
+*~
+*.swp
+\#*\#
+.DS_Store
+
+# Python
+__pycache__/
+*.pyc
+
+# Stray Vivado/Vitis run artifacts, in case any ever land outside build/
+*.jou
+*.log
+.Xil/
