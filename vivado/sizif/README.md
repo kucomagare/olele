@@ -26,35 +26,30 @@ This creates `build/tcp_client/tcp_client.xpr` (project name is `tcp_client`
 internally — inherited from the original export, harmless). Nothing is
 synthesized yet at this point.
 
-## 2. Open it and build
+## 2. Build + export hardware (batch, no GUI)
+
+```bash
+./build_bitstream.sh
+```
+
+Runs synthesis, implementation, bitstream generation, and
+`write_hw_platform` (with bitstream included) all in Vivado batch mode —
+not yet run end to end on this machine, so treat it as best-effort until
+confirmed. Output: the existing project's runs get built, plus
+`build/tcp_client/CoraZ7_Eth_wrapper.xsa`, which is what `vitis/sizif/`
+needs next.
+
+### Or, via the GUI
 
 ```bash
 vivado build/tcp_client/tcp_client.xpr
 ```
 
-In the GUI Flow Navigator: **Run Synthesis** → **Run Implementation** →
-**Generate Bitstream**.
+Flow Navigator: **Run Synthesis** → **Run Implementation** →
+**Generate Bitstream**, then **File → Export → Export Hardware…** (check
+"Include bitstream"), export as `CoraZ7_Eth_wrapper.xsa`.
 
-Equivalent from the Tcl console if you'd rather script it:
-
-```tcl
-launch_runs synth_1 -jobs 4
-wait_on_run synth_1
-launch_runs impl_1 -to_step write_bitstream -jobs 4
-wait_on_run impl_1
-```
-
-## 3. Export hardware for Vitis
-
-**File → Export → Export Hardware…**, check "Include bitstream", export
-`CoraZ7_Eth_wrapper.xsa`. This is what the `vitis/sizif/` firmware project
-will need. Tcl equivalent:
-
-```tcl
-write_hw_platform -fixed -include_bit -force -file build/CoraZ7_Eth_wrapper.xsa
-```
-
-## 4. Flash the board (prove the bitstream works)
+## 3. Flash the board (prove the bitstream works)
 
 1. Connect the Cora Z7 to the PC over USB-JTAG and power it on.
 2. **Flow Navigator → Open Hardware Manager → Open Target → Auto Connect.**

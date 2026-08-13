@@ -108,6 +108,14 @@ under the hood. **If this errors:** fall back to the Vitis IDE — right-click
 the `lwip_tcp_perf_client` component → **Run As → Launch on Hardware
 (Single Application Debug)**.
 
-To watch firmware output, open a serial terminal (e.g. PuTTY/`minicom`)
-on the board's UART at 115200 baud — `[STATS]` lines report RX/TX
-packet/sample/MB-per-second counters once the PC app is streaming to it.
+`run.sh` auto-launches a PuTTY serial console (115200 baud) on the board's
+UART before flashing, so firmware output is visible immediately — no
+manual step needed. `[STATS]` lines report RX/TX packet/sample/MB-per-second
+counters once the PC app is streaming to it. Each run also logs the full
+session to `build/putty_logs/session_<timestamp>.log` (via PuTTY's `-log`
+flag, one file per run so nothing gets overwritten) — useful for comparing
+a good boot against a bad one after the fact. If PuTTY or the UART device
+isn't found, `run.sh` just warns and continues (JTAG flashing still
+works); in that case open one yourself, e.g.
+`putty -serial /dev/serial/by-id/usb-Digilent_..._if01-port0 -sercfg 115200,8,n,1,N`
+(or `minicom`).

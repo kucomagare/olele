@@ -11,7 +11,7 @@ matplotlib.use("TkAgg")
 import matplotlib.pyplot as plt
 
 
-BOARD_CONNECTED = False  # True: connect over the real board network (192.168.1.100)
+BOARD_CONNECTED = True  # True: connect over the real board network (192.168.1.100)
                         # False: loop back to the C++ server on this machine, no board needed
 
 HOST = "192.168.1.100" if BOARD_CONNECTED else "127.0.0.1"
