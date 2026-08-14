@@ -15,6 +15,9 @@
 #   VIVADO_SETTINGS / VITIS_SETTINGS - sourced if present, so vivado/vitis/
 #                             xsct/xsdb land on PATH
 #
+# Also defines navigation aliases: cdrepo, cdvivado, cdvitis, cdpcapp
+# (jump to the repo root / vivado/sizif / vitis/sizif / pc_app/sizif).
+#
 # Adjust XILINX_VERSION / XILINX_INSTALL_DIR below if your install differs.
 
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
@@ -39,5 +42,13 @@ export ARM_GNU_TOOLCHAIN_BIN="$XILINX_INSTALL_DIR/Vitis/$XILINX_VERSION/gnu/aarc
 [[ -f "$VITIS_SETTINGS" ]] && source "$VITIS_SETTINGS"
 [[ -d "$ARM_GNU_TOOLCHAIN_BIN" ]] && export PATH="$ARM_GNU_TOOLCHAIN_BIN:$PATH"
 
+# Navigation aliases for the "sizif" variant. If a new variant is ever
+# added as a sibling (e.g. vivado/<other-name>/), update/duplicate these.
+alias cdrepo="cd \"\$REPO_PATH\""
+alias cdvivado="cd \"\$REPO_PATH/vivado/sizif\""
+alias cdvitis="cd \"\$REPO_PATH/vitis/sizif\""
+alias cdpcapp="cd \"\$REPO_PATH/pc_app/sizif\""
+
 echo "bootenv: REPO_PATH=$REPO_PATH"
 echo "bootenv: SYSTEM_CMAKE=$SYSTEM_CMAKE"
+echo "bootenv: aliases: cdrepo, cdvivado, cdvitis, cdpcapp"

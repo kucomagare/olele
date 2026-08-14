@@ -1,0 +1,84 @@
+olele — dependencies and tool versions
+=======================================
+Snapshot taken 2026-08-14 on the dev machine this repo is built/run from.
+Versions below are what was actually detected on this machine; treat them
+as the known-good baseline, not hard minimums, unless noted.
+
+HOST OS
+-------
+Ubuntu 24.04.4 LTS (noble), kernel 7.0.0-28-generic
+
+XILINX TOOLCHAIN (required)
+----------------------------
+Vivado 2023.2         install dir: /tools/Xilinx/Vivado/2023.2
+Vitis 2023.2          install dir: /tools/Xilinx/Vitis/2023.2
+  - Vitis-bundled ARM toolchain (used for firmware, via bootenv.sh
+    ARM_GNU_TOOLCHAIN_BIN): arm-xilinx-eabi-gcc.real (GCC) 12.2.0
+    path: /tools/Xilinx/Vitis/2023.2/gnu/aarch32/lin/gcc-arm-none-eabi/bin
+  - Vitis-bundled cmake (NOT used — needs libssl.so.10, missing on this
+    host; build_app.sh uses the system cmake instead via $SYSTEM_CMAKE)
+  - lwIP library: lwip213 (Xilinx embeddedsw ThirdParty package), pulled
+    in via domain.set_lib(lib_name="lwip213") in build_platform.sh
+Both must be sourced via bootenv.sh (source bootenv.sh, not executed)
+before running any build/run script — it sources both settings64.sh
+files and puts vivado/vitis/xsct/xsdb on PATH.
+
+BUILD TOOLS (host-installed, required)
+---------------------------------------
+cmake      3.28.3   (system cmake — see note above; bootenv.sh exports
+                      it as $SYSTEM_CMAKE, build_app.sh uses -DNON_YOCTO=ON)
+g++        13.3.0 (Ubuntu 13.3.0-6ubuntu2~24.04.1)
+           used for pc_app/sizif/tcp_server_app.cpp:
+           g++ -std=c++17 -O2 -pthread
+git        2.43.0
+make       (Unix Makefiles generator, used by build_app.sh)
+
+HARDWARE / JTAG-SERIAL (required for run.sh / run_all.sh)
+------------------------------------------------------------
+PuTTY      0.84 (64-bit Unix, GTK + X11)
+           used by vitis/sizif/run.sh to auto-launch a serial console
+           (-serial /dev/serial/by-id/*Digilent*if01*, -sercfg 115200,8,n,1,N,
+            -log session logging)
+Board: Digilent Cora Z7-10 (Xilinx Zynq-7000, xc7z010), board_id "cora-z7-10"
+JTAG/UART: onboard Digilent USB-JTAG+UART combo chip
+           (if00 = JTAG, if01 = UART; enumerates under /dev/serial/by-id/)
+xsct / xsdb (bundled with Vitis 2023.2) — used by run.sh for JTAG
+           flash+run (fpga -file / ps7_init / dow / con); the classic
+           xsct "setws" platform-creation flow is broken on this Vitis
+           install (hangs) — platform/app creation instead goes through
+           the Vitis Python automation API (vitis -s script.py).
+
+PYTHON (host, for pc_app/sizif)
+---------------------------------
+python3    3.12.3 (system) — pc_app/sizif/build.sh creates a venv with
+           plain `python3 -m venv`, not pinned to a specific minor version
+venv packages (installed via pip into pc_app/sizif/build/venv):
+  numba
+  numpy
+  matplotlib
+  scipy
+  pyqt5        (matplotlib Qt backend; also needs a real $DISPLAY /
+                desktop session — plotting will not work over plain SSH)
+Exact pinned versions are not recorded anywhere in the repo (build.sh
+installs latest at setup time, no requirements.txt) — recreate the venv
+the same way if versions ever need to be reproduced exactly.
+
+PYTHON STDLIB (no separate install needed)
+---------------------------------------------
+socket, struct, select, time, threading, queue — used by python_client.py
+
+C/C++ STANDARD LIBRARY / SYSTEM HEADERS (host, for tcp_server_app.cpp)
+--------------------------------------------------------------------------
+Standard POSIX sockets: arpa/inet.h, sys/socket.h, sys/time.h, unistd.h
+Standard C++17: iostream, cstring, cerrno, csignal, atomic, mutex, vector,
+thread
+No third-party C++ libraries required — g++ -std=c++17 alone is sufficient.
+
+NETWORK CONVENTIONS (fixed, not package dependencies, but required to
+match for the system to talk to itself)
+--------------------------------------------------------------------------
+Board IP:  192.168.1.10
+PC IP:     192.168.1.100
+Relay TCP port: 5001
+MAX_SAMPLES / MAX_PAYLOAD_SAMPLES must match between tcp_server_app.cpp
+and the firmware (currently 2000 on both sides).
