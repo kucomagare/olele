@@ -31,5 +31,7 @@ echo "=== [5/5] PC app: relay server + venv ==="
 
 echo
 echo "All builds complete."
-echo "  Flash + run firmware on hardware: vitis/sizif/run.sh"
+echo "  Flash + run firmware on hardware: ./run_all.sh (or vitis/sizif/run.sh)"
 echo "  Start the PC app:                 pc_app/sizif/system.sh start"
+echo "  Changed only firmware C / relay C++ since? Use ./compile_all.sh"
+echo "  instead of rerunning this script (skips the slow Vivado/platform steps)."

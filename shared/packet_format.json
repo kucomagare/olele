@@ -1,0 +1,20 @@
+{
+  "packet_types": {
+    "0": {
+      "name": "data",
+      "description": "Streamed samples; 'length' in the wire header [type:u16][length:u16] is the number of repeats of this field group.",
+      "fields": [
+        { "name": "ts",  "bits": 16, "signed": false },
+        { "name": "ch1", "bits": 16, "signed": false },
+        { "name": "ch2", "bits": 16, "signed": false }
+      ]
+    },
+    "1": {
+      "name": "config",
+      "description": "Placeholder -- not yet acted on by the firmware, just a reserved shape for future use. 'length' is always 1 (one record).",
+      "fields": [
+        { "name": "reserved", "bits": 16, "signed": false }
+      ]
+    }
+  }
+}

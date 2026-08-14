@@ -17,6 +17,12 @@ if [[ ! -f "$XPR" ]]; then
     exit 1
 fi
 
+# cd into build/ first so vivado's own cwd-relative artifacts (vivado.jou,
+# vivado.log, .Xil/) land there (gitignored, wiped by clean.sh) instead of
+# wherever this script happened to be invoked from -- e.g. the repo root
+# when run via build_all.sh, or vivado/sizif/ when run directly.
+cd "$BUILD_DIR"
+
 TCL_SCRIPT="$(mktemp --suffix=.tcl)"
 trap 'rm -f "$TCL_SCRIPT"' EXIT
 

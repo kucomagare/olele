@@ -6,6 +6,7 @@
 #include <stdarg.h>
 #include "xil_printf.h"
 #include "sleep.h"
+#include "packet_format.h"
 
 /* ============================================================
    LOGGING SYSTEM
@@ -57,7 +58,7 @@ static err_t tcp_client_connected(void *arg, struct tcp_pcb *tpcb, err_t err);
 static err_t tcp_client_recv(void *arg, struct tcp_pcb *tpcb, struct pbuf *p, err_t err);
 static void tcp_client_error(void *arg, err_t err);
 static err_t tcp_client_sent(void *arg, struct tcp_pcb *tpcb, u16_t len);
-static void tcp_client_send(struct tcp_pcb *tpcb, uint16_t type, uint16_t length, uint16_t *payload);
+static void tcp_client_send(struct tcp_pcb *tpcb, uint16_t type, uint16_t length, uint8_t *payload_bytes);
 
 /* ============================================================
    THROUGHPUT STATISTICS
@@ -182,31 +183,6 @@ void lwip_comm_client_thread(void *arg)
 }
 
 /* ============================================================
-   OPTIONAL PERIODIC SENDER
-   ============================================================ */
-
-void send_periodic(void *arg)
-{
-    struct tcp_pcb *tpcb = (struct tcp_pcb *)arg;
-
-    static uint8_t toggle = 0;
-
-    uint16_t length = 100;
-    uint16_t payload[100];
-
-    uint16_t a = 1000;
-    uint16_t b = 3000;
-
-    toggle = !toggle;
-    uint16_t v = toggle ? a : b;
-
-    for (int i = 0; i < length; i++)
-        payload[i] = v;
-
-    tcp_client_send(tpcb, 2, length, payload);
-}
-
-/* ============================================================
    CONNECTED CALLBACK
    ============================================================ */
 
@@ -283,6 +259,33 @@ static err_t tcp_client_recv(void *arg, struct tcp_pcb *tpcb,
     return ERR_OK;
 }
 
+/* Reverse the byte order of every field in one record, in place, per the
+   field-width table in packet_format.h -- generalizes the old fixed
+   2-byte-per-sample swap so widths can change (16/32 bit) without this
+   code changing, only packet_format.json + a rebuild. Self-inverse, so
+   the same call converts wire (big-endian) -> host and host -> wire. */
+static void swap_be_fields(uint8_t *record, uint16_t type)
+{
+    uint32_t n_fields;
+    const uint8_t *field_bytes = packet_field_bytes(type, &n_fields);
+    uint32_t off = 0;
+
+    for (uint32_t i = 0; i < n_fields; i++) {
+        uint8_t w = field_bytes[i];
+        for (uint8_t a = 0, b = (uint8_t)(w - 1); a < b; a++, b--) {
+            uint8_t tmp = record[off + a];
+            record[off + a] = record[off + b];
+            record[off + b] = tmp;
+        }
+        off += w;
+    }
+}
+
+/* Largest record size we accept, sized off the biggest packet type known
+   to packet_format.h -- currently "data" (ts+ch1+ch2). Bounds the static
+   buffers below regardless of which type actually arrives. */
+#define MAX_PAYLOAD_BYTES (MAX_PAYLOAD_SAMPLES * sizeof(packet_data_t))
+
 /* ============================================================
    PROCESSING FUNCTION (called from main loop)
    ============================================================ */
@@ -301,14 +304,18 @@ void comm_process(void)
         uint16_t type   = ((uint16_t)hdr[0] << 8) | hdr[1];
         uint16_t length = ((uint16_t)hdr[2] << 8) | hdr[3];
 
-        /* =====================================================
-           DEBUG: PRINT HEADER
-           ===================================================== */
-        //comm_log("\r[DBG] RAW HEADER: %02X %02X %02X %02X\r\n",
-        //         h0, h1, h2, h3);
-        //comm_log("[DBG] type=%u length=%u\r\n", type, length);
+        uint32_t record_size = packet_record_size(type);
+        if (record_size == 0) {
+            /* Unknown type -- we have no way to know how many body bytes
+               belong to it. Drop just the header and hope the stream
+               resyncs on its own (mirrors the "payload too large" recovery
+               below); a real TCP error will fully reset the ring anyway. */
+            comm_log("\r[PCB] unknown packet type %u, dropping header\r\n", type);
+            rx_ring_advance(4);
+            continue;
+        }
 
-        uint32_t body_bytes = length * 2;
+        uint32_t body_bytes = length * record_size;
         uint32_t total_needed = 4 + body_bytes;
 
         /* Not enough data yet */
@@ -320,7 +327,7 @@ void comm_process(void)
            would silently lose data instead of just waiting for the peer's
            window to free up. */
         if (client_pcb && connected) {
-            uint16_t need = 4 + (uint16_t)(length * sizeof(uint16_t));
+            uint16_t need = 4 + (uint16_t)body_bytes;
             if (tcp_sndbuf(client_pcb) < need)
                 return;
         }
@@ -328,52 +335,43 @@ void comm_process(void)
         /* Now we can safely consume header + body */
         rx_ring_advance(4);
 
-        static uint16_t payload_buf[MAX_PAYLOAD_SAMPLES];
-        uint16_t *payload = payload_buf;
+        static uint8_t payload_buf[MAX_PAYLOAD_BYTES];
 
         if (length > MAX_PAYLOAD_SAMPLES) {
-            comm_log("\r[PCB] payload too large (%u samples), dropping\r\n", length);
+            comm_log("\r[PCB] payload too large (%u records), dropping\r\n", length);
             rx_ring_advance(body_bytes);
             continue;
         }
 
         /* Bulk-copy the body out of the ring (at most one wrap), then
-           byte-swap in place (network byte order: MSB first, matching
-           tcp_client_send) instead of popping byte-by-byte. */
-        rx_ring_peek(0, (uint8_t *)payload, body_bytes);
+           byte-swap each record in place (network byte order: MSB first,
+           matching tcp_client_send) instead of popping byte-by-byte. */
+        rx_ring_peek(0, payload_buf, body_bytes);
         rx_ring_advance(body_bytes);
-        for (uint32_t i = 0; i < length; i++) {
-          uint8_t msb = ((uint8_t *)payload)[i * 2];
-          uint8_t lsb = ((uint8_t *)payload)[i * 2 + 1];
-          payload[i] = ((uint16_t)msb << 8) | lsb;
-        }
-
-
-        /* =====================================================
-           DEBUG: PRINT PAYLOAD
-           ===================================================== */
-        //comm_log("[DBG] first: ");
-        //for (uint32_t i = 0; i < (length < 10 ? length : 10); i++)
-        //    comm_log("%u ", payload[i]);
-        //comm_log("\r\n");
-        
-        //comm_log("[DBG] last: ");
-        //for (uint32_t i = (length > 10 ? length - 10 : 0); i < length; i++)
-        //    comm_log("%u ", payload[i]);
-        //comm_log("\r\n");
+        for (uint32_t i = 0; i < length; i++)
+            swap_be_fields(payload_buf + i * record_size, type);
 
         /* Stats */
         packets_rx++;
         samples_rx += length;
         bytes_rx   += total_needed;
 
-        /* Process */
-        for (uint32_t i = 0; i < length; i++)
-            payload[i] *= 2;
+        /* Process. "config" packets are a placeholder for now -- consumed
+           above but otherwise ignored (no processing, no echo). "data"
+           packets get a different placeholder multiplier per channel
+           (ch1 *2, ch2 *3) so the two are distinguishable on the plot
+           until real differing processing exists; ts is left untouched
+           so the PC can match RX to TX. */
+        if (type == PACKET_TYPE_DATA) {
+            packet_data_t *entries = (packet_data_t *)payload_buf;
+            for (uint32_t i = 0; i < length; i++) {
+                entries[i].ch1 = (uint16_t)(entries[i].ch1 * 2);
+                entries[i].ch2 = (uint16_t)(entries[i].ch2 * 3);
+            }
 
-        /* Send */
-        if (client_pcb && connected)
-            tcp_client_send(client_pcb, type, length, payload);
+            if (client_pcb && connected)
+                tcp_client_send(client_pcb, type, length, payload_buf);
+        }
     }
 }
 
@@ -382,21 +380,24 @@ void comm_process(void)
    SEND RESPONSE
    ============================================================ */
 
-static void tcp_client_send(struct tcp_pcb *tpcb, uint16_t type, uint16_t length, uint16_t *payload)
+static void tcp_client_send(struct tcp_pcb *tpcb, uint16_t type, uint16_t length, uint8_t *payload_bytes)
 {
-    static uint8_t buf[4 + MAX_PAYLOAD_SAMPLES * sizeof(uint16_t)];
-    uint16_t total_bytes = 4 + length * sizeof(uint16_t);
+    static uint8_t buf[4 + MAX_PAYLOAD_BYTES];
+    uint32_t record_size = packet_record_size(type);
+    uint32_t body_bytes = length * record_size;
+    uint16_t total_bytes = (uint16_t)(4 + body_bytes);
 
     buf[0] = (type >> 8) & 0xFF;
     buf[1] = (type     ) & 0xFF;
     buf[2] = (length >> 8) & 0xFF;
     buf[3] = (length     ) & 0xFF;
 
-    for (int i = 0; i < length; i++) {
-        uint16_t v = payload[i];
-        buf[4 + i*2] = (v >> 8) & 0xFF;
-        buf[5 + i*2] = (v     ) & 0xFF;
-    }
+    /* payload_bytes is host-order (already byte-swapped on the way in by
+       comm_process); swap each record back to wire order (big-endian) on
+       the way out -- swap_be_fields is its own inverse. */
+    memcpy(buf + 4, payload_bytes, body_bytes);
+    for (uint32_t i = 0; i < length; i++)
+        swap_be_fields(buf + 4 + i * record_size, type);
 
     err_t err = tcp_write(tpcb, buf, total_bytes, TCP_WRITE_FLAG_COPY);
     if (err == ERR_OK) {

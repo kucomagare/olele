@@ -9,9 +9,6 @@ extern struct tcp_pcb *client_pcb;
 /* Thread entry */
 void lwip_comm_client_thread(void *arg);
 
-/* Optional periodic sender */
-void send_periodic(struct tcp_pcb *tpcb);
-
 /* Logging */
 void comm_log(const char *fmt, ...);
 void comm_log_flush(void);

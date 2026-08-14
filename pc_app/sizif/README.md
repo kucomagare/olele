@@ -30,10 +30,19 @@ Open `python_client.py` and check `BOARD_CONNECTED`:
 - `True` → connects over the real board network (`192.168.1.100`)
 - `False` → loops back to `tcp_server_app` on this machine, no board needed
 
-Confirmed-good defaults already in the file: `SEND_RATE=220`,
+Confirmed-good defaults for the old single-channel protocol: `SEND_RATE=220`,
 `CHUNK_SIZE=2000` (see repo history/notes for why — this was the stable
 operating point found during hardware-in-the-loop testing of the previous
-version of this system).
+version of this system). Since the ts+ch1+ch2 sample structure tripled
+bytes/sample (2 -> 6), `CHUNK_SIZE=2000` now produces an echo packet
+(12004 bytes) bigger than lwIP's `TCP_SND_BUF` (8192, see `lwipopts.h` in
+the built BSP) and permanently stalls `comm_process()`'s backpressure
+check, desyncing the stream. `CHUNK_SIZE` is provisionally lowered to
+`500` (3004 bytes, safe margin) to unblock testing the new packet logic —
+still needs re-tuning for throughput once that's the focus again, either
+by raising `CHUNK_SIZE` further (must stay under `(TCP_SND_BUF-4)/6` ≈
+1364) or by increasing `TCP_SND_BUF`/`TCP_WND` in the platform's lwIP
+config instead.
 
 Run from a real desktop session (not plain SSH without X forwarding) —
 matplotlib needs `$DISPLAY`.
@@ -54,6 +63,24 @@ Closing the plot window does not stop the script — use
 ## Wire protocol reminder
 
 Every message: 4-byte big-endian header `[type:u16][length:u16]` followed
-by `length` big-endian `uint16` samples. `type` is opaque/forwarded as-is.
-`tcp_server_app.cpp`'s `MAX_SAMPLES` must match the firmware's
-`MAX_PAYLOAD_SAMPLES` (currently 2000 on both sides).
+by `length` repeats of a fixed record whose shape depends on `type`.
+`type` and each type's record fields (name, bit width, signed/unsigned)
+are defined once in `../../shared/packet_format.json` -- edit that file to
+change them, not this doc or the source directly. Currently:
+
+- `type 0` ("data"): one record per sample, fields `ts, ch1, ch2` (16-bit
+  unsigned each). `ts` is a monotonic counter set by the sender and echoed
+  back unchanged by the firmware, so a received sample can be matched back
+  to the transmitted one it came from.
+- `type 1` ("config"): placeholder, not yet acted on by the firmware --
+  reserved for future use.
+
+`python_client.py` reads `packet_format.json` directly at runtime. The
+firmware (`vitis/sizif/app/lwip_comm_client_raw.c`) and this relay
+(`tcp_server_app.cpp`) can't -- being compiled, bare-metal C has no
+filesystem -- so `../../shared/gen_packet_header.py` generates a C header
+from the same JSON, run automatically by `build.sh` and
+`vitis/sizif/build_app.sh` before each compile. `tcp_server_app.cpp`'s
+`MAX_SAMPLES` must still match the firmware's `MAX_PAYLOAD_SAMPLES`
+(currently 2000 on both sides) -- it bounds record *count*, not bytes; the
+per-record byte size now comes from the generated header.

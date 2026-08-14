@@ -20,6 +20,8 @@ clean_all.sh    wipes build/ in every <tool>/sizif dir
 vivado/sizif/   block design + custom RTL, batch-built bitstream/.xsa
 vitis/sizif/    bare-metal lwIP TCP client firmware
 pc_app/sizif/   Python client + C++ relay server
+shared/         packet_format.json: single source of truth for the wire
+                packet/sample structure, used by both firmware and PC app
 ```
 
 `sizif` is the current hardware/firmware version name — future variants
@@ -38,7 +40,7 @@ automation API, no GUI) + firmware build, then the PC app's relay server
 binary + venv. See each `<tool>/sizif/README.md` for what each step does
 and how to run its pieces individually.
 
-Changed only the firmware C code (`vitis/sizif/app/src/*.c`) or the C++
+Changed only the firmware C code (`vitis/sizif/app/*.c`) or the C++
 relay server (`pc_app/sizif/tcp_server_app.cpp`)? Skip the slow Vivado
 synth/impl and Vitis platform-creation steps and just recompile:
 
@@ -74,6 +76,18 @@ Stops the PC app (server + client) and the PuTTY serial console
 running until reset/reflashed (`./run_all.sh` again) or power-cycled.
 Each piece can still be run/stopped individually: `vitis/sizif/run.sh`,
 `pc_app/sizif/system.sh {start|stop|status|logs}`.
+
+## Wire packet format
+
+`shared/packet_format.json` is the single source of truth for the TCP
+packet/sample structure shared by the board, the C++ relay, and the
+Python client -- field names, bit widths, and signed/unsigned are defined
+there once. `python_client.py` reads it directly at runtime;
+`vitis/sizif/build_app.sh` and `pc_app/sizif/build.sh` generate a matching
+C header via `shared/gen_packet_header.py` before compiling, since neither
+the firmware nor the relay can read JSON at runtime. See
+`pc_app/sizif/README.md`'s "Wire protocol reminder" for the current field
+layout.
 
 ## Clean
 

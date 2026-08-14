@@ -11,10 +11,13 @@
 #include <unistd.h>
 #include <vector>
 #include <thread>
+#include "packet_format.h"
 
 constexpr int SERVER_PORT = 5001;
 constexpr const char *PCB_IP = "192.168.1.10";
-constexpr int MAX_SAMPLES = 2000;     // must match the board's payload_buf[2000] in lwip_comm_client_raw.c
+constexpr int MAX_SAMPLES = 2000;     // must match MAX_PAYLOAD_SAMPLES in lwip_comm_client_raw.c
+                                       // (bounds record count, not bytes -- record size is per-type,
+                                       // see packet_format.h)
 constexpr int RECV_TIMEOUT_SEC = 30;  // reap peers that go silent without closing the TCP connection
 constexpr int SEND_TIMEOUT_SEC = 2;   // cap how long a forward can block on a stalled peer
 
@@ -82,6 +85,13 @@ void handle_client(int client_fd, const std::string &ip, int port)
         type   = ntohs(type);
         length = ntohs(length);
 
+        uint32_t record_size = packet_record_size(type);
+        if (record_size == 0) {
+            std::cerr << "[" << ip << ":" << port << "] unknown packet type "
+                      << type << ", dropping connection\n";
+            break;
+        }
+
         if (length > MAX_SAMPLES) {
             std::cerr << "[" << ip << ":" << port << "] packet exceeds MAX_SAMPLES ("
                       << length << " > " << MAX_SAMPLES << "), dropping connection\n";
@@ -90,7 +100,7 @@ void handle_client(int client_fd, const std::string &ip, int port)
 
         // Kept as raw wire bytes (network/big-endian order) and forwarded verbatim below —
         // both the board and Python already agree on big-endian, so there is nothing to decode.
-        std::vector<uint8_t> raw(static_cast<size_t>(length) * 2);
+        std::vector<uint8_t> raw(static_cast<size_t>(length) * record_size);
         if (!raw.empty()) {
             ssize_t rr = recv(client_fd, raw.data(), raw.size(), MSG_WAITALL);
             if (rr <= 0) {
