@@ -10,6 +10,9 @@ bootenv.sh      source (not execute) once per shell: sets $REPO_PATH,
                 the ARM toolchain to PATH
 build_all.sh    builds vivado -> vitis -> pc_app for the "sizif" version,
                 start to finish, no GUI steps
+compile_all.sh  fast-path recompile: firmware C code + C++ relay only,
+                skips the slow Vivado/platform steps -- use after editing
+                source, once build_all.sh has run at least once
 run_all.sh      starts the PC app and flashes/runs the firmware on the
                 board (opens a PuTTY serial console too)
 stop_all.sh     stops the PC app (server + client)
@@ -35,7 +38,21 @@ automation API, no GUI) + firmware build, then the PC app's relay server
 binary + venv. See each `<tool>/sizif/README.md` for what each step does
 and how to run its pieces individually.
 
-Not run by `build_all.sh` — once builds succeed:
+Changed only the firmware C code (`vitis/sizif/app/src/*.c`) or the C++
+relay server (`pc_app/sizif/tcp_server_app.cpp`)? Skip the slow Vivado
+synth/impl and Vitis platform-creation steps and just recompile:
+
+```bash
+./compile_all.sh
+```
+
+Rebuilds the firmware ELF against the already-built Vitis platform export,
+then rebuilds `tcp_server_app` (skips the Python venv step if it already
+exists). Requires `build_all.sh` to have succeeded at least once already.
+Editing `pc_app/sizif/python_client.py` needs neither script — Python
+isn't compiled, just rerun it.
+
+Not run by `build_all.sh` or `compile_all.sh` — once builds succeed:
 
 ```bash
 ./run_all.sh
