@@ -6,14 +6,36 @@ IP + `system_ila`). This is the only thing tracked in git for this
 version — `build/` is regenerated locally, never committed.
 
 ```
-cora_z7.tcl   regenerates the full Vivado project into ./build/
-hdl/          fpga_top.v, my_axi.v, axi_fir.v
-xdc/          Cora-Z7-10-Master.xdc (pin/clock constraints)
-dcp/          axi_fir.dcp — pre-synthesized checkpoint for the custom axi_fir IP,
-              required by cora_z7.tcl, not regenerable from the .v alone
-build/        empty in git; the actual Vivado project lands here
-build.sh      wrapper that runs cora_z7.tcl with the right paths
+cora_z7.tcl        regenerates the full Vivado project into ./build/ --
+                    project creation, source imports, wrapper generation;
+                    sources bd_CoraZ7_Eth.tcl for the block design itself
+bd_CoraZ7_Eth.tcl   the block design (proc cr_bd_CoraZ7_Eth) -- split into
+                    its own file so re-exporting from the GUI after a
+                    change is a straight overwrite, no manual merge
+hdl/                fpga_top.v, my_axi.v, axi_fir.v
+xdc/                Cora-Z7-10-Master.xdc (pin/clock constraints)
+dcp/                axi_fir.dcp — pre-synthesized checkpoint for the custom axi_fir IP,
+                    required by cora_z7.tcl, not regenerable from the .v alone
+build/              empty in git; the actual Vivado project lands here
+build.sh            wrapper that runs cora_z7.tcl with the right paths
 ```
+
+## Changing the block design
+
+Edit it in the Vivado GUI (`vivado build/tcp_client/tcp_client.xpr`, open
+the block design), then sync the change back to tracked source:
+
+1. Validate Design, then save the block design (Ctrl+S).
+2. **File → Export → Export Block Design...**, pointed at this exact
+   path: `vivado/sizif/bd_CoraZ7_Eth.tcl` (overwrite it).
+3. `./clean.sh && ./build.sh` to confirm the updated file reproduces the
+   design from tracked source alone.
+
+`cora_z7.tcl` itself doesn't need touching — it just `source`s this file
+and calls `cr_bd_CoraZ7_Eth`; wrapper regeneration happens automatically
+right after. The one thing this doesn't cover: changes to the actual RTL
+*inside* `fpga_top.v`/`my_axi.v`/`axi_fir.v` (not just how those modules
+are wired into the BD) still need direct edits under `hdl/`.
 
 ## 1. Recreate the project
 
