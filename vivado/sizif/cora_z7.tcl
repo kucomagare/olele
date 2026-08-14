@@ -26,6 +26,8 @@
 #    "$origin_dir/hdl/fpga_top.v"
 #    "$origin_dir/hdl/my_axi.v"
 #    "$origin_dir/hdl/axi_fir.v"
+#    "$origin_dir/hdl/axi_processing_ch1.vhd"
+#    "$origin_dir/hdl/axi_processing_ch2.vhd"
 #    "$origin_dir/xdc/Cora-Z7-10-Master.xdc"
 #    "$origin_dir/dcp/axi_fir.dcp"
 #
@@ -42,6 +44,8 @@ proc checkRequiredFiles { origin_dir} {
  "[file normalize "$origin_dir/hdl/fpga_top.v"]"\
  "[file normalize "$origin_dir/hdl/my_axi.v"]"\
  "[file normalize "$origin_dir/hdl/axi_fir.v"]"\
+ "[file normalize "$origin_dir/hdl/axi_processing_ch1.vhd"]"\
+ "[file normalize "$origin_dir/hdl/axi_processing_ch2.vhd"]"\
  "[file normalize "$origin_dir/xdc/Cora-Z7-10-Master.xdc"]"\
  "[file normalize "$origin_dir/dcp/axi_fir.dcp"]"\
   ]
@@ -182,6 +186,8 @@ set files [list \
  [file normalize "${origin_dir}/hdl/fpga_top.v" ]\
  [file normalize "${origin_dir}/hdl/my_axi.v" ]\
  [file normalize "${origin_dir}/hdl/axi_fir.v" ]\
+ [file normalize "${origin_dir}/hdl/axi_processing_ch1.vhd" ]\
+ [file normalize "${origin_dir}/hdl/axi_processing_ch2.vhd" ]\
 ]
 set imported_files ""
 foreach f $files {
@@ -267,6 +273,12 @@ if { [get_files [list my_axi.v]] == "" } {
 }
 if { [get_files [list axi_fir.v]] == "" } {
   import_files -quiet -fileset sources_1 $origin_dir/hdl/axi_fir.v
+}
+if { [get_files [list axi_processing_ch1.vhd]] == "" } {
+  import_files -quiet -fileset sources_1 $origin_dir/hdl/axi_processing_ch1.vhd
+}
+if { [get_files [list axi_processing_ch2.vhd]] == "" } {
+  import_files -quiet -fileset sources_1 $origin_dir/hdl/axi_processing_ch2.vhd
 }
 
 

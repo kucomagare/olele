@@ -27,7 +27,7 @@ CHUNK_SIZE = 5  # was 2000 before ts+ch1+ch2 tripled bytes/sample (2 -> 6);
                   # 500*6+4=3004 bytes fits lwIP's TCP_SND_BUF=8192 with
                   # margin. Provisional for testing the new packet logic --
                   # revisit once throughput tuning resumes (see README).
-TRIANGLE_PERIOD = 250
+TRIANGLE_PERIOD = 25
 
 AMP_BASE = 2000
 AMP_OSC  = 500

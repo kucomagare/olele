@@ -5,8 +5,23 @@
 #include <stdio.h>
 #include <stdarg.h>
 #include "xil_printf.h"
+#include "xil_io.h"
 #include "sleep.h"
 #include "packet_format.h"
+
+/* axi_processing_ch1_0/axi_processing_ch2_0 -- each channel's own
+   processing chain, deliberately separate VHDL entities (not one module
+   instantiated twice) so their architectures can diverge and be compared
+   independently -- see vivado/sizif/hdl/axi_processing_ch1.vhd and
+   axi_processing_ch2.vhd. Addresses match the assign_bd_address calls in
+   vivado/sizif/bd_CoraZ7_Eth.tcl. Register layout mirrors axi_fir_0's:
+   reg0 (offset 0x0, write) takes the new input sample, reg3 (offset
+   0xC, read) returns the processed result (routed through my_axi's
+   "fir_result" read-back port). */
+#define AXI_CH1_BASE   0x40001000u
+#define AXI_CH2_BASE   0x40002000u
+#define AXI_PROC_REG_IN  0x0u
+#define AXI_PROC_REG_OUT 0xCu
 
 /* ============================================================
    LOGGING SYSTEM
@@ -358,15 +373,20 @@ void comm_process(void)
 
         /* Process. "config" packets are a placeholder for now -- consumed
            above but otherwise ignored (no processing, no echo). "data"
-           packets get a different placeholder multiplier per channel
-           (ch1 *2, ch2 *3) so the two are distinguishable on the plot
-           until real differing processing exists; ts is left untouched
-           so the PC can match RX to TX. */
+           packets get each channel run through its own AXI-Lite
+           processing chain in the PL (axi_processing_ch1_0 for ch1,
+           axi_processing_ch2_0 for ch2): write the sample to reg0, read
+           the processed result back from reg3 -- synchronous, no polling
+           needed, the filter's internal latency (a couple of AXI clocks)
+           is negligible next to one AXI4-Lite
+           round trip. ts is left untouched so the PC can match RX to TX. */
         if (type == PACKET_TYPE_DATA) {
             packet_data_t *entries = (packet_data_t *)payload_buf;
             for (uint32_t i = 0; i < length; i++) {
-                entries[i].ch1 = (uint16_t)(entries[i].ch1 * 2);
-                entries[i].ch2 = (uint16_t)(entries[i].ch2 * 3);
+                Xil_Out32(AXI_CH1_BASE + AXI_PROC_REG_IN, (u32)entries[i].ch1);
+                Xil_Out32(AXI_CH2_BASE + AXI_PROC_REG_IN, (u32)entries[i].ch2);
+                entries[i].ch1 = (uint16_t)(Xil_In32(AXI_CH1_BASE + AXI_PROC_REG_OUT) & 0xFFFFu);
+                entries[i].ch2 = (uint16_t)(Xil_In32(AXI_CH2_BASE + AXI_PROC_REG_OUT) & 0xFFFFu);
             }
 
             if (client_pcb && connected)

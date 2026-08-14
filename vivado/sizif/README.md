@@ -2,8 +2,9 @@
 
 Hand-written Vivado sources for the "sizif" hardware version (Cora Z7-10,
 PS7 + AXI interconnect + `axi_gpio` x N wired to an ADC + custom `axi_fir`
-IP + `system_ila`). This is the only thing tracked in git for this
-version — `build/` is regenerated locally, never committed.
+IP + two independent per-channel AXI processing chains (`axi_processing_ch1`,
+`axi_processing_ch2`) + `system_ila`). This is the only thing tracked in
+git for this version — `build/` is regenerated locally, never committed.
 
 ```
 cora_z7.tcl        regenerates the full Vivado project into ./build/ --
@@ -12,7 +13,8 @@ cora_z7.tcl        regenerates the full Vivado project into ./build/ --
 bd_CoraZ7_Eth.tcl   the block design (proc cr_bd_CoraZ7_Eth) -- split into
                     its own file so re-exporting from the GUI after a
                     change is a straight overwrite, no manual merge
-hdl/                fpga_top.v, my_axi.v, axi_fir.v
+hdl/                fpga_top.v, my_axi.v, axi_fir.v,
+                    axi_processing_ch1.vhd, axi_processing_ch2.vhd
 xdc/                Cora-Z7-10-Master.xdc (pin/clock constraints)
 dcp/                axi_fir.dcp — pre-synthesized checkpoint for the custom axi_fir IP,
                     required by cora_z7.tcl, not regenerable from the .v alone
@@ -80,3 +82,30 @@ Flow Navigator: **Run Synthesis** → **Run Implementation** →
 4. Once programming reports success, the board is running this hardware
    design — that's the proof point for this step. Firmware (Vitis) is a
    separate follow-up.
+
+## Custom AXI peripherals
+
+Three custom AXI4-Lite slaves, all wrapping the shared `my_axi.v` bus
+interface (which reserves reg3/offset `0xC` on read to return an external
+"result" input instead of its own stored value — the hook each of these
+rides its computed output back to the CPU on):
+
+| Instance                | Base addr    | Logic                                | reg0 (write) | reg3 (read)      |
+|--------------------------|--------------|----------------------------------------|--------------|-------------------|
+| `axi_fir_0`              | `0x40000000` | 29-tap FIR (`hdl/axi_fir.v`)           | input sample | filtered output   |
+| `axi_processing_ch1_0`   | `0x40001000` | ch1's chain (`hdl/axi_processing_ch1.vhd`) | input sample | processed output |
+| `axi_processing_ch2_0`   | `0x40002000` | ch2's chain (`hdl/axi_processing_ch2.vhd`) | input sample | processed output |
+
+`axi_processing_ch1.vhd` and `axi_processing_ch2.vhd` are deliberately
+separate files/entities (not one module instantiated twice), so each
+channel's architecture can diverge and be compared independently rather
+than always running identical processing. Both currently implement the
+same single-pole IIR low-pass filter: `y[n] = y[n-1] + (x[n] - y[n-1]) >>
+SHIFT` (`SHIFT` generic, default 4 -- alpha = 1/16, no multiplier needed
+since it's a power-of-two shift) -- edit one file alone to give that
+channel a different architecture. The firmware
+(`vitis/sizif/app/lwip_comm_client_raw.c`) writes each channel's raw
+sample to its chain's reg0 and reads the processed result back from reg3,
+synchronously, per sample -- see the `AXI_CH1_BASE`/`AXI_CH2_BASE`
+`#define`s there, which must stay in sync with the `assign_bd_address`
+calls in `bd_CoraZ7_Eth.tcl` if either ever changes.
