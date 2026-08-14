@@ -47,6 +47,7 @@ def main():
     lines.append("#define PACKET_FORMAT_H")
     lines.append("")
     lines.append("#include <stdint.h>")
+    lines.append("#include <stddef.h>  /* NULL, used in the default cases below */")
     lines.append("")
 
     for type_id, ptype in packet_types.items():

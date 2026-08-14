@@ -76,6 +76,7 @@ targets -set -filter {name =~ "*Cortex-A9 MPCore #0*"}
 rst -processor
 dow {${ELF}}
 con
+puts "RUN.SH: FLASH+RUN COMPLETE"
 EOF
 
 (cd "$SCRIPT_DIR/build" && xsdb "$TCL_SCRIPT")

@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Wipes ./build/ back to empty (compiled server binary, venv, run/log
 # state) so you can test that everything regenerates cleanly from tracked
-# source files alone (python_client.py + tcp_server_app.cpp + build.sh).
+# source files alone (python_client.py + its config/packet_format/
+# signal_gen/plot/net modules + tcp_server_app.cpp + build.sh).
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"

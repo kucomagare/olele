@@ -2,16 +2,13 @@
 #define LWIP_COMM_CLIENT_RAW_H
 
 #include "lwip/tcp.h"
+#include "comm_log.h"
 
 /* PCB pointer */
 extern struct tcp_pcb *client_pcb;
 
 /* Thread entry */
 void lwip_comm_client_thread(void *arg);
-
-/* Logging */
-void comm_log(const char *fmt, ...);
-void comm_log_flush(void);
 
 /* Throughput statistics (used by main.c) */
 extern uint32_t packets_rx;

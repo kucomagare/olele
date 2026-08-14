@@ -2,63 +2,11 @@
 #include "lwip/ip_addr.h"
 #include <string.h>
 #include <stdint.h>
-#include <stdio.h>
-#include <stdarg.h>
-#include "xil_printf.h"
-#include "xil_io.h"
 #include "sleep.h"
 #include "packet_format.h"
-
-/* axi_processing_ch1_0/axi_processing_ch2_0 -- each channel's own
-   processing chain, deliberately separate VHDL entities (not one module
-   instantiated twice) so their architectures can diverge and be compared
-   independently -- see vivado/sizif/hdl/axi_processing_ch1.vhd and
-   axi_processing_ch2.vhd. Addresses match the assign_bd_address calls in
-   vivado/sizif/bd_CoraZ7_Eth.tcl. Register layout mirrors axi_fir_0's:
-   reg0 (offset 0x0, write) takes the new input sample, reg3 (offset
-   0xC, read) returns the processed result (routed through my_axi's
-   "fir_result" read-back port). */
-#define AXI_CH1_BASE   0x40001000u
-#define AXI_CH2_BASE   0x40002000u
-#define AXI_PROC_REG_IN  0x0u
-#define AXI_PROC_REG_OUT 0xCu
-
-/* ============================================================
-   LOGGING SYSTEM
-   ============================================================ */
-
-#define LOG_BUF_SIZE 2048
-
-static char log_buffer[LOG_BUF_SIZE];
-static int  log_len = 0;
-
-void comm_log(const char *fmt, ...)
-{
-    va_list args;
-    char tmp[256];
-    int n;
-
-    va_start(args, fmt);
-    n = vsnprintf(tmp, sizeof(tmp), fmt, args);
-    va_end(args);
-
-    if (n <= 0)
-        return;
-
-    if (log_len + n < LOG_BUF_SIZE) {
-        memcpy(log_buffer + log_len, tmp, n);
-        log_len += n;
-    }
-}
-
-void comm_log_flush(void)
-{
-    if (log_len > 0) {
-        log_buffer[log_len] = '\0';
-        xil_printf("%s", log_buffer);
-        log_len = 0;
-    }
-}
+#include "comm_log.h"
+#include "rx_ring.h"
+#include "axi_processing.h"
 
 /* ============================================================
    GLOBALS
@@ -86,64 +34,7 @@ uint32_t samples_tx = 0;
 uint32_t bytes_rx   = 0;
 uint32_t bytes_tx   = 0;
 
-/* ============================================================
-   RX RING BUFFER (STREAM)
-   ============================================================ */
-
-#define RX_RING_SIZE 131072   /* 128 KB */
 #define MAX_PAYLOAD_SAMPLES 2000
-
-static uint8_t  rx_ring[RX_RING_SIZE];
-static uint32_t rx_head = 0;  /* write index */
-static uint32_t rx_tail = 0;  /* read index */
-
-static inline uint32_t rx_ring_used(void)
-{
-    if (rx_head >= rx_tail)
-        return rx_head - rx_tail;
-    else
-        return RX_RING_SIZE - (rx_tail - rx_head);
-}
-
-static inline uint32_t rx_ring_free(void)
-{
-    return RX_RING_SIZE - rx_ring_used() - 1;
-}
-
-/* Bulk copy into the ring, wrapping at most once, instead of a per-byte
-   modulo. `len` must not exceed RX_RING_SIZE. */
-static inline void rx_ring_push(const uint8_t *data, uint32_t len)
-{
-    uint32_t first_chunk = RX_RING_SIZE - rx_head;
-    if (first_chunk >= len) {
-        memcpy(&rx_ring[rx_head], data, len);
-        rx_head = (rx_head + len) % RX_RING_SIZE;
-    } else {
-        memcpy(&rx_ring[rx_head], data, first_chunk);
-        memcpy(&rx_ring[0], data + first_chunk, len - first_chunk);
-        rx_head = len - first_chunk;
-    }
-}
-
-/* Copy `len` bytes starting `offset` bytes ahead of rx_tail into dst,
-   without consuming them (peek). */
-static inline void rx_ring_peek(uint32_t offset, uint8_t *dst, uint32_t len)
-{
-    uint32_t start = (rx_tail + offset) % RX_RING_SIZE;
-    uint32_t first_chunk = RX_RING_SIZE - start;
-    if (first_chunk >= len) {
-        memcpy(dst, &rx_ring[start], len);
-    } else {
-        memcpy(dst, &rx_ring[start], first_chunk);
-        memcpy(dst + first_chunk, &rx_ring[0], len - first_chunk);
-    }
-}
-
-/* Consume `len` bytes from the tail (must have been peeked already). */
-static inline void rx_ring_advance(uint32_t len)
-{
-    rx_tail = (rx_tail + len) % RX_RING_SIZE;
-}
 
 /* ============================================================
    START / RESTART TCP CLIENT
@@ -158,11 +49,7 @@ static void tcp_client_start(void)
         client_pcb = NULL;
     }
 
-    /* Discard any bytes left over from a connection that was cut mid-packet,
-       otherwise they get prepended to the next connection's stream and
-       desync framing permanently. */
-    rx_head = 0;
-    rx_tail = 0;
+    rx_ring_reset();
 
     IP4_ADDR(&server_ip, 192,168,1,100);   // PC IP
 
@@ -252,15 +139,10 @@ static err_t tcp_client_recv(void *arg, struct tcp_pcb *tpcb,
 
     struct pbuf *q = p;
     while (q != NULL) {
-        uint32_t free = rx_ring_free();
-        if (q->len > free) {
-            /* Drop oldest data to make room */
-            uint32_t drop = q->len - free;
-            if (drop > rx_ring_used())
-                drop = rx_ring_used();
-            rx_tail = (rx_tail + drop) % RX_RING_SIZE;
+        uint32_t dropped = rx_ring_make_room(q->len);
+        if (dropped > 0) {
             comm_log("\r[PCB] RX ring overflow, dropped %lu bytes\r\n",
-                     (unsigned long)drop);
+                     (unsigned long)dropped);
         }
 
         rx_ring_push((const uint8_t *)q->payload, q->len);
@@ -374,20 +256,11 @@ void comm_process(void)
         /* Process. "config" packets are a placeholder for now -- consumed
            above but otherwise ignored (no processing, no echo). "data"
            packets get each channel run through its own AXI-Lite
-           processing chain in the PL (axi_processing_ch1_0 for ch1,
-           axi_processing_ch2_0 for ch2): write the sample to reg0, read
-           the processed result back from reg3 -- synchronous, no polling
-           needed, the filter's internal latency (a couple of AXI clocks)
-           is negligible next to one AXI4-Lite
-           round trip. ts is left untouched so the PC can match RX to TX. */
+           processing chain in the PL (see axi_processing.c). */
         if (type == PACKET_TYPE_DATA) {
             packet_data_t *entries = (packet_data_t *)payload_buf;
-            for (uint32_t i = 0; i < length; i++) {
-                Xil_Out32(AXI_CH1_BASE + AXI_PROC_REG_IN, (u32)entries[i].ch1);
-                Xil_Out32(AXI_CH2_BASE + AXI_PROC_REG_IN, (u32)entries[i].ch2);
-                entries[i].ch1 = (uint16_t)(Xil_In32(AXI_CH1_BASE + AXI_PROC_REG_OUT) & 0xFFFFu);
-                entries[i].ch2 = (uint16_t)(Xil_In32(AXI_CH2_BASE + AXI_PROC_REG_OUT) & 0xFFFFu);
-            }
+            for (uint32_t i = 0; i < length; i++)
+                axi_process_sample(&entries[i]);
 
             if (client_pcb && connected)
                 tcp_client_send(client_pcb, type, length, payload_buf);

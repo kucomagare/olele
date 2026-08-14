@@ -4,14 +4,15 @@
 # serial console for [STATS] output). Assumes build_all.sh has already
 # been run successfully. Board must be connected/powered.
 set -euo pipefail
+trap 'echo "FAILED: $BASH_COMMAND (line $LINENO)" >&2' ERR
 
 REPO_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$REPO_PATH/bootenv.sh"
 
 exec > >(tee "$REPO_PATH/run_all.log") 2>&1
 
-if grep -q "^BOARD_CONNECTED = False" "$REPO_PATH/pc_app/sizif/python_client.py"; then
-    echo "WARNING: pc_app/sizif/python_client.py has BOARD_CONNECTED = False"
+if grep -q "^BOARD_CONNECTED = False" "$REPO_PATH/pc_app/sizif/config.py"; then
+    echo "WARNING: pc_app/sizif/config.py has BOARD_CONNECTED = False"
     echo "         (PC-only loopback mode) -- it will not talk to the real"
     echo "         board. Edit that line to True if you want to test against"
     echo "         actual hardware. Continuing anyway..."

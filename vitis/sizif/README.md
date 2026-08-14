@@ -2,14 +2,21 @@
 
 Bare-metal firmware for the "sizif" hardware version: an lwIP raw-mode TCP
 client running on the Zynq PS (Cortex-A9), based on the Xilinx
-`lwip_tcp_perf_client` template but heavily customized (`lwip_comm_client_raw.c`
-implements the actual comms/ring-buffer/protocol logic; see `app/main.c`
-for the top-level loop and stats reporting).
+`lwip_tcp_perf_client` template but heavily customized. `lwip_comm_client_raw.c`
+is the TCP protocol state machine (lifecycle callbacks + packet framing);
+it delegates to three small, independently-focused modules rather than
+doing everything itself:
+- `comm_log.{c,h}` — buffered logging (append cheaply, flush once/loop)
+- `rx_ring.{c,h}` — generic circular byte buffer, no protocol knowledge
+- `axi_processing.{c,h}` — pokes/reads the ch1/ch2 AXI-Lite peripherals
+
+See `app/main.c` for the top-level loop and stats reporting.
 
 ```
 app/                  hand-written sources (excludes generated BSP)
-  main.c, lwip_comm_client_raw.{c,h}, platform*.c/h, i2c_access.c, sfp.c,
-  si5324.c, iic_phyreset.c, lscript.ld, CMakeLists.txt, UserConfig.cmake,
+  main.c, lwip_comm_client_raw.{c,h}, comm_log.{c,h}, rx_ring.{c,h},
+  axi_processing.{c,h}, platform*.c/h, i2c_access.c, sfp.c, si5324.c,
+  iic_phyreset.c, lscript.ld, CMakeLists.txt, UserConfig.cmake,
   lwip_tcp_perf_client.cmake, app.yaml, README.txt
 build/                 empty in git; platform + app build output lands here
 build_platform.sh      creates the Vitis platform component from a .xsa

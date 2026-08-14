@@ -6,6 +6,7 @@
 # Does NOT flash/run anything on hardware or start the PC app -- see
 # vitis/sizif/run.sh and pc_app/sizif/system.sh for that, run separately.
 set -euo pipefail
+trap 'echo "FAILED: $BASH_COMMAND (line $LINENO)" >&2' ERR
 
 REPO_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$REPO_PATH/bootenv.sh"

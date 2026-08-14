@@ -14,7 +14,11 @@ exec > >(tee "$REPO_PATH/stop_all.log") 2>&1
 PUTTY_PID_FILE="$REPO_PATH/vitis/sizif/build/putty.pid"
 if [[ -f "$PUTTY_PID_FILE" ]]; then
     PUTTY_PID="$(cat "$PUTTY_PID_FILE")"
-    if [[ -n "$PUTTY_PID" ]] && kill -0 "$PUTTY_PID" 2>/dev/null; then
+    # Verify the PID is actually still putty before signaling it -- a
+    # stale PID file whose PID got reused by an unrelated process is
+    # unlikely but possible (e.g. after a reboot).
+    if [[ -n "$PUTTY_PID" ]] && kill -0 "$PUTTY_PID" 2>/dev/null \
+        && ps -p "$PUTTY_PID" -o args= 2>/dev/null | grep -qF putty; then
         echo "Stopping PuTTY (PID $PUTTY_PID)..."
         kill "$PUTTY_PID" 2>/dev/null || true
     else

@@ -63,7 +63,7 @@ Not run by `build_all.sh` or `compile_all.sh` — once builds succeed:
 Starts the PC app's relay server + Python client (`pc_app/sizif/system.sh
 start`), then flashes and runs the firmware on the board over JTAG
 (`vitis/sizif/run.sh`), which itself opens a PuTTY serial console for
-`[STATS]` output. Requires `pc_app/sizif/python_client.py`'s
+`[STATS]` output. Requires `pc_app/sizif/config.py`'s
 `BOARD_CONNECTED` to be `True` (edit it yourself — `run_all.sh` warns but
 won't flip it for you) and the board connected/powered.
 

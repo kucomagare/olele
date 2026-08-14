@@ -5,14 +5,26 @@ client (synthetic signal generator + live plot) and a small C++ relay
 server that sits between the Python client and the board.
 
 ```
-python_client.py     Python client — generates a test signal, streams it,
-                      plots transmitted vs. received (echoed) data
+python_client.py     entry point -- main() only, wires the pieces below together
+config.py             all tunable knobs (SEND_RATE, CHUNK_SIZE, plot window, ...)
+packet_format.py       loads packet_format.json, builds numpy dtypes, PacketReceiver
+signal_gen.py          synthetic test-signal generation + packet building
+plot.py                DualPlot (matplotlib) -- no networking/parsing here
+net.py                 owns the socket: connect, send/receive loop, auto-reconnect
 tcp_server_app.cpp    C++ relay — forwards raw bytes between whichever two
                       peers are connected (identifies the board by source IP)
 build/                empty in git; venv, compiled binary, run/logs all land here
 build.sh              one-time/incremental setup (compile server, create venv)
 system.sh             day-to-day start/stop/status/logs for both processes
 ```
+
+`net.py`'s `tcp_thread` owns the connection end to end, including
+reconnecting (with a `RECONNECT_DELAY` backoff, see `config.py`) on any
+drop — mirrors the firmware's own `tcp_client_error` → `tcp_client_start()`
+auto-reconnect, so a dropped link doesn't require restarting this app.
+One behavior change from that: the plot window now comes up immediately
+regardless of whether the initial connection succeeds, and just retries
+silently in the background — it used to print an error and exit instead.
 
 ## 1. Set up
 
@@ -26,7 +38,7 @@ skips whatever's already up to date.
 
 ## 2. Before running
 
-Open `python_client.py` and check `BOARD_CONNECTED`:
+Open `config.py` and check `BOARD_CONNECTED`:
 - `True` → connects over the real board network (`192.168.1.100`)
 - `False` → loops back to `tcp_server_app` on this machine, no board needed
 
@@ -50,11 +62,14 @@ matplotlib needs `$DISPLAY`.
 ## 3. Run
 
 ```bash
-./system.sh start     # builds tcp_server_app if stale, starts both in background
+./system.sh start            # builds tcp_server_app if stale, starts both in background
 ./system.sh status
 ./system.sh logs
-./system.sh restart
-./system.sh stop      # SIGINT, escalates to SIGKILL after 5s
+./system.sh restart          # both processes
+./system.sh restart-client   # just the Python client -- after editing config.py or
+                              # another Python module, without touching the relay or the board
+./system.sh restart-server   # just the C++ relay -- after editing tcp_server_app.cpp
+./system.sh stop             # SIGINT, escalates to SIGKILL after 5s
 ```
 
 Closing the plot window does not stop the script — use

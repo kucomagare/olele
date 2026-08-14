@@ -10,6 +10,7 @@
 # Requires build_all.sh to have been run at least once already (needs the
 # Vitis platform export and does not create it).
 set -euo pipefail
+trap 'echo "FAILED: $BASH_COMMAND (line $LINENO)" >&2' ERR
 
 REPO_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$REPO_PATH/bootenv.sh"
