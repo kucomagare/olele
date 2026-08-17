@@ -10,14 +10,49 @@ doing everything itself:
 - `rx_ring.{c,h}` — generic circular byte buffer, no protocol knowledge
 - `axi_processing.{c,h}` — pokes/reads the ch1/ch2 AXI-Lite peripherals
 
+**Framing invariant:** the wire format is length-prefixed with no sync
+marker, so the read position is either exactly right or worthless — there
+is no in-band recovery. Every "we are lost" path (RX ring full, unknown
+packet type, implausible length) therefore funnels into
+`tcp_client_resync()`, which drops the TCP connection and reconnects; the
+PC-side relay reassembles whole packets before forwarding, so a fresh
+connection is guaranteed to start on a packet boundary. Never "recover" by
+discarding a partial run of bytes and continuing — that is precisely what
+turned a transient overload into permanent corruption once already.
+
 See `app/main.c` for the top-level loop and stats reporting.
+
+## This is an SDT-flow build (matters more than it looks)
+
+The platform is created through the Vitis Python API against a System
+Device Tree, so the generated `Xilinx.spec` compiles everything with
+`-DSDT`. Xilinx's template ships two mutually-exclusive copies of the
+platform-init code and picks one on that flag:
+
+- `platform.c` is `#if defined(SDT) || __MICROBLAZE__` — **this is the
+  live one**, despite the generic name.
+- `platform_zynq.c` was `#ifndef SDT` — dead here, so it has been deleted
+  along with the SFP/I2C/PHY-reset sources (`sfp.c`, `si5324.c`,
+  `i2c_access.c`, `iic_phyreset.c`), which were guarded on
+  `XPAR_GIGE_PCS_PMA_*` / `XPS_BOARD_ZCU102` and can never apply to a Cora
+  Z7. None of them contributed a single symbol to the linked ELF.
+
+Consequence worth remembering: under SDT there is no separate
+`platform_enable_interrupts()` call — interrupt setup happens inside
+`init_platform()` via `xinterrupt_wrap`. `platform.h` still declares that
+function and `platform.c` still has a dead `#ifndef SDT` block calling it;
+both are left as-is to stay close to the vendor template.
+
+Getting back to the legacy (non-SDT) flow would mean reinstalling Vitis
+with the full installer, not flipping a flag — this install is the
+"embedded installer", which omits the classic IDE entirely.
 
 ```
 app/                  hand-written sources (excludes generated BSP)
   main.c, lwip_comm_client_raw.{c,h}, comm_log.{c,h}, rx_ring.{c,h},
-  axi_processing.{c,h}, platform*.c/h, i2c_access.c, sfp.c, si5324.c,
-  iic_phyreset.c, lscript.ld, CMakeLists.txt, UserConfig.cmake,
-  lwip_tcp_perf_client.cmake, app.yaml, README.txt
+  axi_processing.{c,h}, platform.{c,h}, platform_config.h.in,
+  lscript.ld, CMakeLists.txt, UserConfig.cmake,
+  lwip_tcp_perf_client.cmake, app.yaml
 build/                 empty in git; platform + app build output lands here
 build_platform.sh      creates the Vitis platform component from a .xsa
 build_app.sh           builds app/ against that platform via CMake
@@ -28,12 +63,13 @@ Phase 2 (app) below is scripted and confirmed working. Phase 1 (platform)
 is scripted via the Vitis Python automation API (`vitis -s`) instead of
 xsct/Tcl -- see the comment header in `build_platform.sh` for why (xsct's
 `setws` hangs on this install's "embedded" Vitis, and the GUI can't import
-an xsct-created platform either). The Python-API version has not yet been
-run end-to-end on this machine; if it fails, the fallback is still a fully
-GUI-native platform+app creation (delete `build/sizif_platform` first,
-then `vitis` with workspace = `build/`, New Component -> Platform from the
-.xsa, New Component -> Application with the Hello World template). Phase 3
-(run on hardware) is best-effort, not yet confirmed end-to-end.
+an xsct-created platform either). If it ever fails, the fallback is still a
+fully GUI-native platform+app creation (delete `build/sizif_platform`
+first, then `vitis` with workspace = `build/`, New Component -> Platform
+from the .xsa, New Component -> Application with the Hello World
+template). Phase 3 (run on hardware) is confirmed working end to end: the
+board connects and streams (`[PCB] RAW TCP connected!` followed by matched
+RX/TX `[STATS]`).
 
 ## 1. Get the .xsa
 
@@ -60,8 +96,8 @@ tree (`Xilinx.spec`, `cortexa9_toolchain.cmake`, `Findcommon.cmake`,
 `include/`, `lib/`) that `build_app.sh` needs; `platform build()` alone
 does not produce them. `tmp_app` itself is never used for anything else.
 
-Not yet confirmed by an actual run on this machine — if it errors out,
-see "Fallback: fully GUI-native" below.
+Confirmed working on this machine. If it ever errors out, see "Fallback:
+fully GUI-native" below.
 
 ### Fallback: fully GUI-native (if the script above fails)
 

@@ -20,6 +20,7 @@ static void tcp_client_start(void);
 static err_t tcp_client_connected(void *arg, struct tcp_pcb *tpcb, err_t err);
 static err_t tcp_client_recv(void *arg, struct tcp_pcb *tpcb, struct pbuf *p, err_t err);
 static void tcp_client_error(void *arg, err_t err);
+static void tcp_client_resync(const char *why);
 static err_t tcp_client_sent(void *arg, struct tcp_pcb *tpcb, u16_t len);
 static void tcp_client_send(struct tcp_pcb *tpcb, uint16_t type, uint16_t length, uint8_t *payload_bytes);
 
@@ -122,6 +123,34 @@ static err_t tcp_client_sent(void *arg, struct tcp_pcb *tpcb, u16_t len)
 }
 
 /* ============================================================
+   RESYNC (framing lost / unrecoverable backlog)
+   ============================================================ */
+
+/* Tear down the connection and start a fresh one, discarding whatever is
+   in the ring.
+
+   This is the only correct response to a lost or hopeless framing state.
+   The stream is length-prefixed with no sync marker, so once the read
+   position is off by even one byte there is no way to recover in-band --
+   every subsequent 4-byte header read is garbage, and a plausible-looking
+   type/length pair can swallow kilobytes of valid data before failing
+   again. The previous code tried to limp on (drop the oldest bytes on
+   overflow, skip 4 bytes on an unknown type) and reliably ended up in an
+   unrecoverable loop under load.
+
+   A reconnect is cheap and *guaranteed* to resync, because the PC-side
+   relay is packet-aware: it reassembles each packet (header + full body)
+   before forwarding, so a new connection always begins on a packet
+   boundary. tcp_client_start() closes the old pcb and calls
+   rx_ring_reset() for us. */
+static void tcp_client_resync(const char *why)
+{
+    comm_log("\r[PCB] %s -- reconnecting to resync\r\n", why);
+    connected = 0;
+    tcp_client_start();
+}
+
+/* ============================================================
    RECEIVE CALLBACK (FAST: only push into ring)
    ============================================================ */
 
@@ -137,14 +166,20 @@ static err_t tcp_client_recv(void *arg, struct tcp_pcb *tpcb,
         return ERR_OK;
     }
 
+    /* Test the whole chain up front: pushing part of it and then bailing
+       would itself leave a fragment in the ring. A full ring means
+       comm_process() has been unable to drain for a long time (its
+       backpressure check is holding because our own TX is backed up),
+       i.e. the sender is durably outrunning us -- dropping the link is
+       both the honest signal and the only non-corrupting way out. */
+    if (rx_ring_free() < p->tot_len) {
+        pbuf_free(p);
+        tcp_client_resync("RX ring full, sender outrunning us");
+        return ERR_OK;
+    }
+
     struct pbuf *q = p;
     while (q != NULL) {
-        uint32_t dropped = rx_ring_make_room(q->len);
-        if (dropped > 0) {
-            comm_log("\r[PCB] RX ring overflow, dropped %lu bytes\r\n",
-                     (unsigned long)dropped);
-        }
-
         rx_ring_push((const uint8_t *)q->payload, q->len);
         q = q->next;
     }
@@ -203,13 +238,14 @@ void comm_process(void)
 
         uint32_t record_size = packet_record_size(type);
         if (record_size == 0) {
-            /* Unknown type -- we have no way to know how many body bytes
-               belong to it. Drop just the header and hope the stream
-               resyncs on its own (mirrors the "payload too large" recovery
-               below); a real TCP error will fully reset the ring anyway. */
-            comm_log("\r[PCB] unknown packet type %u, dropping header\r\n", type);
-            rx_ring_advance(4);
-            continue;
+            /* An unknown type means we are not actually looking at a
+               header -- framing is already lost. We can't skip the body
+               (its size is unknown), and sliding forward a byte or four at
+               a time through a multi-KB packet stream does not resync in
+               practice. Reconnect instead. */
+            comm_log("\r[PCB] unknown packet type %u\r\n", type);
+            tcp_client_resync("framing lost");
+            return;
         }
 
         uint32_t body_bytes = length * record_size;
@@ -235,9 +271,13 @@ void comm_process(void)
         static uint8_t payload_buf[MAX_PAYLOAD_BYTES];
 
         if (length > MAX_PAYLOAD_SAMPLES) {
-            comm_log("\r[PCB] payload too large (%u records), dropping\r\n", length);
-            rx_ring_advance(body_bytes);
-            continue;
+            /* Also a framing-loss symptom rather than a real oversized
+               packet: the sender is capped well below this by
+               TCP_SND_BUF (see the backpressure check above), so a length
+               this large means we parsed a garbage header. */
+            comm_log("\r[PCB] payload too large (%u records)\r\n", length);
+            tcp_client_resync("framing lost");
+            return;
         }
 
         /* Bulk-copy the body out of the ring (at most one wrap), then

@@ -30,9 +30,13 @@ void rx_ring_advance(uint32_t len);
    the next connection's stream and desync framing permanently. */
 void rx_ring_reset(void);
 
-/* Drop the oldest bytes to guarantee at least `needed` bytes are free
-   (drops less if the ring doesn't have that many bytes used). Returns
-   the number of bytes actually dropped, 0 if nothing needed dropping. */
-uint32_t rx_ring_make_room(uint32_t needed);
+/* NOTE: there is deliberately no "drop the oldest N bytes to make room"
+   call here. There used to be (rx_ring_make_room), and it was the direct
+   cause of an unrecoverable failure under sustained overload: dropping an
+   arbitrary run of bytes out of a length-prefixed stream destroys packet
+   alignment, after which every subsequent header parse reads garbage. The
+   only safe response to a full ring is to discard the whole thing and
+   resync on a fresh connection -- see tcp_client_resync() in
+   lwip_comm_client_raw.c. Don't reintroduce partial dropping. */
 
 #endif /* RX_RING_H */

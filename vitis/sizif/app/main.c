@@ -38,56 +38,23 @@
 #include "lwip/priv/tcp_priv.h"
 #include "lwip/init.h"
 #include "lwip/inet.h"
-//#include "lwip_comm_client.h"
 #include "lwip/sys.h"
 #include "lwip_comm_client_raw.h"
 
-#if LWIP_IPV6==1
-#include "lwip/ip6_addr.h"
-#include "lwip/ip6.h"
-#else
-
-#if LWIP_DHCP==1
-#include "lwip/dhcp.h"
-extern volatile int dhcp_timoutcntr;
-#endif
-
+/* This build is IPv4 + static IP only: the BSP sets LWIP_IPV6 0 and
+   LWIP_DHCP 0 (see lwipopts.h), and the board's address is fixed at
+   192.168.1.10 by convention -- the PC-side relay identifies the board by
+   source IP, so it can't float. The stock template's IPv6/DHCP branches
+   were dropped rather than kept as dead #if blocks. */
 #define DEFAULT_IP_ADDRESS	"192.168.1.10"
-#define DEFAULT_IP_MASK		"255.255.255.0"
+#define DEFAULT_IP_MASK	  	"255.255.255.0"
 #define DEFAULT_GW_ADDRESS	"192.168.1.1"
-#endif /* LWIP_IPV6 */
 
 extern volatile int TcpFastTmrFlag;
 extern volatile int TcpSlowTmrFlag;
 
-void platform_enable_interrupts(void);
-void start_application(void);
-void transfer_data(void);
-//void print_app_header(void);
-
-#if defined (__arm__) && !defined (ARMR5)
-#if XPAR_GIGE_PCS_PMA_SGMII_CORE_PRESENT == 1 || \
-		 XPAR_GIGE_PCS_PMA_1000BASEX_CORE_PRESENT == 1
-int ProgramSi5324(void);
-int ProgramSfpPhy(void);
-#endif
-#endif
-
-#ifdef XPS_BOARD_ZCU102
-#if defined(XPAR_XIICPS_0_DEVICE_ID) || defined(XPAR_XIICPS_0_BASEADDR)
-int IicPhyReset(void);
-#endif
-#endif
-
 struct netif server_netif;
 
-#if LWIP_IPV6==1
-static void print_ipv6(char *msg, ip_addr_t *ip)
-{
-	print(msg);
-	xil_printf("\r %s\r\n", inet6_ntoa(*ip));
-}
-#else
 static void print_ip(char *msg, ip_addr_t *ip)
 {
 	print(msg);
@@ -120,7 +87,6 @@ static void assign_default_ip(ip_addr_t *ip, ip_addr_t *mask, ip_addr_t *gw)
 	if (!err)
 		xil_printf("\rInvalid default gateway address: %d\r\n", err);
 }
-#endif /* LWIP_IPV6 */
 
 int main(void)
 {
@@ -131,20 +97,6 @@ int main(void)
 		0x00, 0x0a, 0x35, 0x00, 0x01, 0x02 };
 
 	netif = &server_netif;
-#if defined (__arm__) && !defined (ARMR5)
-#if XPAR_GIGE_PCS_PMA_SGMII_CORE_PRESENT == 1 || \
-		XPAR_GIGE_PCS_PMA_1000BASEX_CORE_PRESENT == 1
-	ProgramSi5324();
-	ProgramSfpPhy();
-#endif
-#endif
-
-	/* Define this board specific macro in order perform PHY reset
-	 * on ZCU102
-	 */
-#ifdef XPS_BOARD_ZCU102
-	IicPhyReset();
-#endif
 
 	init_platform();
 
@@ -161,67 +113,29 @@ int main(void)
 		return -1;
 	}
 
-#if LWIP_IPV6==1
-	netif->ip6_autoconfig_enabled = 1;
-	netif_create_ip6_linklocal_address(netif, 1);
-	netif_ip6_addr_set_state(netif, 0, IP6_ADDR_VALID);
-	print_ipv6("\r\nlink local IPv6 address is:",&netif->ip6_addr[0]);
-#endif /* LWIP_IPV6 */
 	netif_set_default(netif);
 
-#ifndef SDT
-	/* now enable interrupts */
-	platform_enable_interrupts();
-#endif
+	/* Under the SDT flow (this build passes -DSDT, see the platform's
+	   generated Xilinx.spec) interrupt setup happens inside
+	   init_platform() via xinterrupt_wrap -- there is no separate
+	   platform_enable_interrupts() call to make here. */
 
 	/* specify that the network if is up */
 	netif_set_up(netif);
 
-#if (LWIP_IPV6==0)
-#if (LWIP_DHCP==1)
-	/* Create a new DHCP client for this interface.
-	 * Note: you must call dhcp_fine_tmr() and dhcp_coarse_tmr() at
-	 * the predefined regular intervals after starting the client.
-	 */
-	dhcp_start(netif);
-	dhcp_timoutcntr = 24;
-	while (((netif->ip_addr.addr) == 0) && (dhcp_timoutcntr > 0))
-		xemacif_input(netif);
-
-	if (dhcp_timoutcntr <= 0) {
-		if ((netif->ip_addr.addr) == 0) {
-			xil_printf("\rERROR: DHCP request timed out\r\n");
-			assign_default_ip(&(netif->ip_addr),
-					&(netif->netmask), &(netif->gw));
-		}
-	}
-
-	/* print IP address, netmask and gateway */
-#else
 	assign_default_ip(&(netif->ip_addr), &(netif->netmask), &(netif->gw));
-#endif
 	print_ip_settings(&(netif->ip_addr), &(netif->netmask), &(netif->gw));
-#endif /* LWIP_IPV6 */
 	xil_printf("\r\n");
 
-	/* print app header */
-	//print_app_header();
-
-	/* start the application*/
-	//start_application();
-	//xil_printf("\r\n");
     /* start our custom TCP client thread */
-    //sys_thread_new("comm", lwip_comm_client_thread, NULL, 2048, 3);
     lwip_comm_client_thread(NULL);
 
-    uint32_t tick_ms  = 0;   // LWIP timing
     uint32_t stats_ms = 0;   // Real time
 
     while (1) {
 
       usleep(1000);   // 1 ms real time
 
-      tick_ms  += 1;  // LWIP timers expect real milliseconds
       stats_ms += 1;  // Stats expect real milliseconds
 
       if (TcpFastTmrFlag) {

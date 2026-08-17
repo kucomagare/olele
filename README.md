@@ -17,6 +17,10 @@ run_all.sh      starts the PC app and flashes/runs the firmware on the
                 board (opens a PuTTY serial console too)
 stop_all.sh     stops the PC app (server + client)
 clean_all.sh    wipes build/ in every <tool>/sizif dir
+pc_app.sh       passthrough to pc_app/sizif/system.sh -- PC side only, no
+                board involvement: ./pc_app.sh restart-client after editing
+                config.py, restart-server after tcp_server_app.cpp, plus
+                start|stop|restart|status|logs
 vivado/sizif/   block design + custom RTL, batch-built bitstream/.xsa
 vitis/sizif/    bare-metal lwIP TCP client firmware
 pc_app/sizif/   Python client + C++ relay server
@@ -51,8 +55,18 @@ synth/impl and Vitis platform-creation steps and just recompile:
 Rebuilds the firmware ELF against the already-built Vitis platform export,
 then rebuilds `tcp_server_app` (skips the Python venv step if it already
 exists). Requires `build_all.sh` to have succeeded at least once already.
-Editing `pc_app/sizif/python_client.py` needs neither script — Python
-isn't compiled, just rerun it.
+Editing any Python module needs neither script — Python isn't compiled,
+just restart the client:
+
+```bash
+./pc_app.sh restart-client
+```
+
+This is the fast loop for tuning `SEND_RATE`/`CHUNK_SIZE` in `config.py`:
+both are PC-side only (the firmware reads `length` off the wire), so the
+board keeps running untouched and no reflash is needed. `./pc_app.sh` is a
+passthrough to `pc_app/sizif/system.sh`, callable from anywhere in the
+repo; use `restart-server` instead after editing `tcp_server_app.cpp`.
 
 Not run by `build_all.sh` or `compile_all.sh` — once builds succeed:
 
@@ -74,8 +88,9 @@ won't flip it for you) and the board connected/powered.
 Stops the PC app (server + client) and the PuTTY serial console
 `run.sh` launched. The board's firmware itself has no "stop" — it keeps
 running until reset/reflashed (`./run_all.sh` again) or power-cycled.
-Each piece can still be run/stopped individually: `vitis/sizif/run.sh`,
-`pc_app/sizif/system.sh {start|stop|status|logs}`.
+Each piece can still be run/stopped individually: `vitis/sizif/run.sh` for
+the board, `./pc_app.sh {start|stop|restart|restart-client|restart-server|status|logs}`
+for the PC side.
 
 ## Wire packet format
 

@@ -55,16 +55,3 @@ void rx_ring_reset(void)
     rx_head = 0;
     rx_tail = 0;
 }
-
-uint32_t rx_ring_make_room(uint32_t needed)
-{
-    uint32_t free = rx_ring_free();
-    if (needed <= free)
-        return 0;
-
-    uint32_t drop = needed - free;
-    if (drop > rx_ring_used())
-        drop = rx_ring_used();
-    rx_tail = (rx_tail + drop) % RX_RING_SIZE;
-    return drop;
-}
