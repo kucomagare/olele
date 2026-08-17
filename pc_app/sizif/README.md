@@ -9,7 +9,7 @@ python_client.py     entry point -- main() only, wires the pieces below together
 config.py             all tunable knobs (SEND_RATE, CHUNK_SIZE, plot window, ...)
 packet_format.py       loads packet_format.json, builds numpy dtypes, PacketReceiver
 signal_gen.py          synthetic test-signal generation + packet building
-plot.py                DualPlot (matplotlib) -- no networking/parsing here
+plot.py                DualPlot (matplotlib, blitted + envelope-decimated)
 net.py                 owns the socket: connect, send/receive loop, auto-reconnect
 tcp_server_app.cpp    C++ relay — forwards raw bytes between whichever two
                       peers are connected (identifies the board by source IP)
@@ -17,6 +17,27 @@ build/                empty in git; venv, compiled binary, run/logs all land her
 build.sh              one-time/incremental setup (compile server, create venv)
 system.sh             day-to-day start/stop/status/logs for both processes
 ```
+
+## Plot performance
+
+`plot.py` is deliberately not a naive matplotlib loop. Measured 2026-08-17
+at `SEND_RATE=800`/`CHUNK_SIZE=500`: the client sat at **107% CPU, 93.6% of
+it in the plot thread against 12.1% in the network thread** — the display
+cost roughly 8x the actual work. Two fixes:
+
+- **Blitting.** `refresh()` restores a cached background and redraws only
+  the four line artists, instead of `canvas.draw()` re-rendering axes,
+  ticks and legend (~30 ms each, 24x/s). The background is re-cached on
+  every real draw event, so resizing/zooming still works.
+- **Envelope decimation.** Each chunk is reduced to `PLOT_ENVELOPE_BLOCKS`
+  min/max pairs (`config.py`). At 400k samples/s a 1000-point buffer
+  otherwise turned over 400x per second — 2.5 ms of visible signal, i.e.
+  aliasing. min/max is used rather than stride decimation specifically so
+  short transients survive: a single-sample spike is invisible to
+  `values[::250]` but shows up in the envelope.
+
+Per-packet plot work is now O(1) rather than O(CHUNK_SIZE), and the window
+covers `PLOT_BUFFER/(2*SEND_RATE)` seconds (~0.6 s at 800 pkt/s).
 
 `net.py`'s `tcp_thread` owns the connection end to end, including
 reconnecting (with a `RECONNECT_DELAY` backoff, see `config.py`) on any

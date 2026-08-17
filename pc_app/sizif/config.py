@@ -11,6 +11,35 @@ HOST = "192.168.1.100" if BOARD_CONNECTED else "127.0.0.1"
 PORT = 5001
 
 PLOT_BUFFER = 1000
+
+# "scope"    -- show the most recent PLOT_BUFFER raw samples, refreshed at
+#               FRAME_RATE. Short window, full waveform detail. This is
+#               what you want to see the signal's shape.
+# "envelope" -- roll min/max pairs from every packet into the buffer.
+#               Long window (PLOT_BUFFER/(2*SEND_RATE) seconds), shows
+#               amplitude over time but not shape.
+#
+# At 400k samples/s you cannot have both: PLOT_BUFFER samples of raw signal
+# is 2.5 ms of real time. "scope" shows that 2.5 ms properly; "envelope"
+# covers ~0.6 s but collapses each packet to its extremes, which for a
+# waveform whose period is far shorter than CHUNK_SIZE just draws a solid
+# band between min and max.
+PLOT_MODE = "scope"
+
+# Each received chunk is reduced to this many min/max pairs before being
+# pushed into the plot buffer (so 2*PLOT_ENVELOPE_BLOCKS points per
+# packet). Set to 0 to plot raw samples.
+#
+# Why it defaults to 1: at SEND_RATE=800 / CHUNK_SIZE=500 the raw stream is
+# 400k samples/s, which turned a 1000-point buffer over 400 times a second
+# -- the window showed 2.5 ms of signal and was pure aliasing, at ~90% of a
+# CPU core. At 1 block the window covers PLOT_BUFFER/(2*SEND_RATE) seconds
+# (~0.6 s at 800 pkt/s) and shows the signal's envelope.
+#
+# Raise it for more detail within each packet (costs proportionally more
+# plot work); note CHUNK_SIZE samples span only CHUNK_SIZE/sample-rate of
+# real time, so past a point you are magnifying noise.
+PLOT_ENVELOPE_BLOCKS = 1
 FRAME_RATE = 24   # Plot redraws/s. Costs real CPU: plot.py's refresh()
                   # does a full canvas.draw(), ~20-40 ms each on TkAgg, so
                   # 24 fps is ~60% of a core. Measured 2026-08-17: dropping
@@ -52,11 +81,12 @@ FRAME_RATE = 24   # Plot redraws/s. Costs real CPU: plot.py's refresh()
 # ceiling", and a claim that bigger CHUNK_SIZE was worse) were measured
 # with a broken stats clock and were wrong by 3x. Any conclusion drawn
 # from them -- including the CHUNK_SIZE 500-vs-1000 comparison -- is void.
-SEND_RATE = 700   # ~85% of the measured 825 pkt/s ceiling. Deliberately
-                  # not closer: until the logging livelock above is fixed,
-                  # briefly exceeding the ceiling wedges the board rather
-                  # than just costing throughput, so the checked-in default
-                  # keeps margin. 820 runs fine when watched.
+SEND_RATE = 800   # ~97% of the measured 825 pkt/s ceiling, i.e. running
+                  # deliberately close to the limit. That is now safe:
+                  # exceeding it costs occasional resyncs and throughput,
+                  # not a wedged board -- verified at 1200 pkt/s, where it
+                  # holds ~815 and recovers by itself once the rate drops.
+                  # Drop to ~700 if you want margin for an unattended run.
 
 CHUNK_SIZE = 500  # Upper bound is now MAX_PAYLOAD_SAMPLES (2000, firmware
                   # + relay), not TCP_SND_BUF: at 65535 the old
