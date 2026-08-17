@@ -27,6 +27,12 @@ def send_all(sock, data):
 
 def _connect():
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    # Disable Nagle: each packet is 4 + 6*CHUNK_SIZE bytes and so ends in a
+    # partial segment, which Nagle holds back until the previous data is
+    # ACKed. With it on at all three hops (here, the C++ relay, and the
+    # board's lwIP) the pipeline degenerated into one packet per round
+    # trip -- a hard ~33 pkt/s ceiling regardless of SEND_RATE.
+    sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
     sock.connect((HOST, PORT))
     sock.setblocking(False)
     return sock

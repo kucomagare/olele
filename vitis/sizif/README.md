@@ -89,15 +89,57 @@ This runs `vitis -s <script>` (Vitis's Python automation API, headless —
 spawns `vitis-server` directly, no GUI) to create a platform named
 `sizif_platform` in `build/`, with a `standalone_ps7_cortexa9_0` domain
 (matching `app/app.yaml`'s `domain_path`), `lwip213` explicitly enabled as
-a BSP library (not on by default), builds the platform, then creates and
-builds a throwaway `tmp_app` (Hello World template) against it — that
-throwaway build is what forces Vitis to populate the full CMake export
-tree (`Xilinx.spec`, `cortexa9_toolchain.cmake`, `Findcommon.cmake`,
-`include/`, `lib/`) that `build_app.sh` needs; `platform build()` alone
-does not produce them. `tmp_app` itself is never used for anything else.
+a BSP library (not on by default), applies the lwIP tuning (see below) and
+builds the platform. That produces the full CMake export tree
+(`Xilinx.spec`, `cortexa9_toolchain.cmake`, `Findcommon.cmake`,
+`include/`, `lib/`) that `build_app.sh` needs — the BSP libraries are
+compiled as part of the platform build under the SDT flow.
+
+(Earlier versions of this script also created and built a throwaway
+`tmp_app` here, believing `platform.build()` alone didn't populate that
+tree. It does — verified on a from-scratch rebuild 2026-08-17 where the
+`tmp_app` step failed outright and the export tree was still complete and
+usable. The step was removed; it only guaranteed an `ALREADY_EXISTS`
+error on every re-run.)
 
 Confirmed working on this machine. If it ever errors out, see "Fallback:
 fully GUI-native" below.
+
+### Tuning the BSP (lwIP buffers etc.)
+
+`lwipopts.h` is **generated** — don't edit it in the build tree, the next
+platform build overwrites it. Its values come from `lwip213_*` CMake cache
+variables (`libsrc/lwip213/src/lwip213.cmake`), set via
+`domain.set_config(option="lib", ..., lib_name="lwip213")` in
+`build_platform.sh`'s Python block. `bsp.yaml` in the built BSP lists every
+settable parameter with its default and description.
+
+These are applied **at domain-creation time only**, so changing one means a
+full platform rebuild — the script refuses to run against an existing
+`build/sizif_platform` and tells you to delete it first:
+
+```bash
+rm -rf build/sizif_platform
+./build_platform.sh /path/to/CoraZ7_Eth_wrapper.xsa
+./build_app.sh
+```
+
+No Vivado step needed — the `.xsa` is unchanged.
+
+Two traps worth knowing:
+
+- **65535 is a hard ceiling** for `tcp_wnd` and `tcp_snd_buf`.
+  `LWIP_WND_SCALE` is off, so `tcpwnd_size_t` is `u16_t`; 65536 wraps to 0.
+- **Don't raise `n_rx_descriptors` alone.** The Xilinx EMAC port pins one
+  `PBUF_POOL` buffer per RX descriptor for the ring's lifetime
+  (`xemacpsif_dma.c`), so with `pbuf_pool_size=256`, going to 256
+  descriptors consumes the whole pool at init and starves everything else.
+  Raise `lwip213_pbuf_pool_size` in the same step or leave it at 64.
+
+Bad combinations mostly fail at compile time rather than on hardware —
+`lwip-2.1.3/src/core/init.c` has `#error` sanity checks for window sizes,
+`TCP_SND_BUF >= 2*TCP_MSS`, `TCP_SND_QUEUELEN`, and `TCP_WND` against the
+pbuf pool capacity.
 
 ### Fallback: fully GUI-native (if the script above fails)
 

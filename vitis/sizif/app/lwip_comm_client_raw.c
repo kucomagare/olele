@@ -65,6 +65,12 @@ static void tcp_client_start(void)
     tcp_err(client_pcb, tcp_client_error);
     tcp_sent(client_pcb, tcp_client_sent);
 
+    /* This is a latency-sensitive echo, not a bulk transfer: each packet
+       is 4 + 6*N bytes, so it ends in a partial segment that Nagle would
+       otherwise hold back until the previous data is ACKed -- serializing
+       the stream into one packet per round trip. */
+    tcp_nagle_disable(client_pcb);
+
     connected = 0;
 
     comm_log("\r[PCB] Connecting RAW TCP...\r\n");
@@ -334,7 +340,16 @@ static void tcp_client_send(struct tcp_pcb *tpcb, uint16_t type, uint16_t length
 
     err_t err = tcp_write(tpcb, buf, total_bytes, TCP_WRITE_FLAG_COPY);
     if (err == ERR_OK) {
-        /* Let LWIP batch tcp_output() via timers */
+        /* Push it out now. tcp_write() only *queues* -- without this the
+           segment leaves when lwIP next feels like it (fast timer, or an
+           incoming ACK happening to trigger a flush), which turned the
+           whole pipeline into one packet per round trip and pinned
+           throughput at ~33 pkt/s no matter what else was tuned. The
+           previous comment here ("let LWIP batch tcp_output() via timers")
+           described that as intentional; it was the bug. */
+        err = tcp_output(tpcb);
+        if (err != ERR_OK)
+            comm_log("\r[PCB] tcp_output failed: %d\r\n", err);
 
         packets_tx++;
         samples_tx += length;

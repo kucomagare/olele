@@ -54,6 +54,25 @@ exec > >(tee "$SCRIPT_DIR/build_platform.log") 2>&1
 
 mkdir -p "$BUILD_DIR"
 
+# create_platform_component fails with an unhelpful gRPC error if the
+# component already exists, and the BSP tuning below is only applied while
+# the domain is being created -- so re-running against an existing platform
+# would silently keep the old lwIP settings even if it did succeed. Refuse
+# up front with an actionable message instead.
+if [[ -d "$BUILD_DIR/sizif_platform" ]]; then
+    echo "A platform already exists at:"
+    echo "  $BUILD_DIR/sizif_platform"
+    echo
+    echo "Delete it first if you want to rebuild (required after changing"
+    echo "any lwip213_* setting in this script -- they are applied at"
+    echo "domain-creation time and are not picked up by a re-run):"
+    echo
+    echo "  rm -rf $BUILD_DIR/sizif_platform"
+    echo
+    echo "Then re-run this script, followed by ./build_app.sh."
+    exit 1
+fi
+
 PY_SCRIPT="$(mktemp --suffix=.py)"
 trap 'rm -f "$PY_SCRIPT"' EXIT
 
@@ -74,17 +93,61 @@ domain = platform.add_domain(
 )
 domain.set_lib(lib_name="lwip213")
 
+# lwIP tuning. These map 1:1 onto the lwip213_* CMake cache variables in
+# the generated BSP (libsrc/lwip213/src/lwip213.cmake), which in turn
+# become the #defines in lwipopts.h -- that header is generated, so it
+# must be changed here rather than edited in the build tree.
+#
+# Why: with the stock values the board's echo throughput was pinned at
+# ~0.4 MB/s, limited by bytes-in-flight rather than by CPU, link speed or
+# the AXI peripherals. Measured on hardware 2026-08-17: 146 pkt/s at
+# 3004 B/packet (0.44 MB/s) vs 57 pkt/s at 6004 B/packet (0.34 MB/s) --
+# both land near ~6 KB in flight, which is what TCP_SND_BUF=8192 allows.
+#
+# 65535 is the hard ceiling for both window values, not a round number:
+# LWIP_WND_SCALE is off in this BSP, so tcpwnd_size_t is u16_t and
+# tcp_sndbuf() returns u16_t. 65536 would wrap to 0.
+for _param, _value in [
+    # Inbound receive window: was 2048, the tightest limit of the two.
+    ("lwip213_tcp_wnd",        65535),
+    # Outbound unacked allowance, gates the echo path back to the PC.
+    ("lwip213_tcp_snd_buf",    65535),
+    # Heap backing copied send data (we use TCP_WRITE_FLAG_COPY), sized to
+    # comfortably hold a full 64 KB send buffer. ~+400 KB of .bss.
+    ("lwip213_mem_size",       524288),
+    # TCP_SND_QUEUELEN is derived as 16*TCP_SND_BUF/TCP_MSS = 718 at the
+    # values above, so the segment pool has to clear that.
+    ("lwip213_memp_n_tcp_seg", 1024),
+]:
+    domain.set_config(option="lib", param=_param, value=_value,
+                      lib_name="lwip213")
+
+# NOTE: deliberately NOT raising lwip213_n_rx_descriptors. The Xilinx EMAC
+# port (contrib/ports/xilinx/netif/xemacpsif_dma.c) allocates one pbuf from
+# PBUF_POOL per RX descriptor at init and pins it for the lifetime of the
+# ring. With PBUF_POOL_SIZE=256, going to 256 descriptors would consume the
+# entire pool at startup and starve TCP reassembly/transmit. If you ever do
+# want deeper rings, raise lwip213_pbuf_pool_size in the same step.
+
 platform.build()
 
-platform_xpfm = client.get_platform("sizif_platform")
-app = client.create_app_component(
-    name="tmp_app",
-    platform=platform_xpfm,
-    domain="standalone_ps7_cortexa9_0",
-    template="hello_world",
-)
-status = app.build(target="hw")
-print("tmp_app build status:", status)
+# NOTE: this used to be followed by creating and building a throwaway
+# "tmp_app" (hello_world template), on the belief that platform.build()
+# alone did not populate the CMake export tree (Xilinx.spec,
+# cortexa9_toolchain.cmake, include/, lib/) that build_app.sh needs.
+#
+# That is not true, at least on Vitis 2023.2 here. Proven on 2026-08-17:
+# build/sizif_platform was deleted, this script ran, the tmp_app step
+# errored out before creating anything (stale workspace registration), and
+# the export tree still came out complete -- build_app.sh then configured
+# and linked against it with no trouble. It makes sense in hindsight: the
+# BSP libraries (liblwip213.a and friends) are compiled as part of the
+# platform build itself under the SDT flow.
+#
+# So the step is gone: it added a guaranteed failure on every re-run
+# (create_app_component raises ALREADY_EXISTS) for no benefit. If a future
+# platform build ever does leave the export tree incomplete, recreate a
+# throwaway app by hand -- the GUI fallback in README.md covers it.
 
 client.close()
 EOF

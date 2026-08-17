@@ -6,6 +6,8 @@
 #include <atomic>
 #include <mutex>
 #include <arpa/inet.h>
+#include <netinet/in.h>
+#include <netinet/tcp.h>   // TCP_NODELAY
 #include <sys/socket.h>
 #include <sys/time.h>
 #include <unistd.h>
@@ -65,6 +67,13 @@ void handle_client(int client_fd, const std::string &ip, int port)
 
     timeval send_tv{SEND_TIMEOUT_SEC, 0};
     setsockopt(client_fd, SOL_SOCKET, SO_SNDTIMEO, &send_tv, sizeof(send_tv));
+
+    // Relaying is latency-critical: this process sits in the middle of a
+    // request/response path, and every packet ends in a partial segment.
+    // With Nagle on, that tail waits for an ACK before going out, which
+    // serialized the whole pipeline to one packet per round trip.
+    int nodelay = 1;
+    setsockopt(client_fd, IPPROTO_TCP, TCP_NODELAY, &nodelay, sizeof(nodelay));
 
     while (g_running)
     {
