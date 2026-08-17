@@ -7,6 +7,7 @@
 #include "comm_log.h"
 #include "rx_ring.h"
 #include "axi_processing.h"
+#include "mono_clock.h"
 
 /* ============================================================
    GLOBALS
@@ -41,6 +42,23 @@ uint32_t bytes_tx   = 0;
    START / RESTART TCP CLIENT
    ============================================================ */
 
+/* Minimum spacing between connection attempts.
+ *
+ * Without this, tcp_client_error() re-enters tcp_client_start()
+ * immediately, so a failing link retries as fast as the main loop spins.
+ * Measured 2026-08-17 at ~45,000 connect attempts per second, which
+ * exhausts lwIP's PCB pool (MEMP_NUM_TCP_PCB = 32) and leaves the link
+ * permanently down at 0 pkt/s.
+ *
+ * This was hidden until today: the blocking UART writes in comm_log_flush()
+ * used to throttle reconnects to ~160/s purely as a side effect of being
+ * slow. Bounding the log output (correctly) removed that accidental brake
+ * and exposed the missing deliberate one. */
+#define RECONNECT_BACKOFF_MS 250
+
+static uint64_t next_connect_ms = 0;
+static int      connect_pending = 0;
+
 static void tcp_client_start(void)
 {
     ip_addr_t server_ip;
@@ -51,12 +69,26 @@ static void tcp_client_start(void)
     }
 
     rx_ring_reset();
+    connected = 0;
+
+    {
+        uint64_t now = mono_now_ms();
+        if (now < next_connect_ms) {
+            /* Too soon -- comm_process() will retry once the backoff
+               expires. Leaving client_pcb NULL keeps the send path idle
+               in the meantime. */
+            connect_pending = 1;
+            return;
+        }
+        next_connect_ms = now + RECONNECT_BACKOFF_MS;
+        connect_pending = 0;
+    }
 
     IP4_ADDR(&server_ip, 192,168,1,100);   // PC IP
 
     client_pcb = tcp_new();
     if (!client_pcb) {
-        comm_log("\r[PCB] Failed to create PCB\r\n");
+        comm_log("[E] pcb alloc failed\r\n");
         return;
     }
 
@@ -73,11 +105,11 @@ static void tcp_client_start(void)
 
     connected = 0;
 
-    comm_log("\r[PCB] Connecting RAW TCP...\r\n");
+    comm_log("[N] connecting\r\n");
 
     err_t err = tcp_connect(client_pcb, &server_ip, 5001, tcp_client_connected);
     if (err != ERR_OK) {
-        comm_log("\r[PCB] tcp_connect failed: %d\r\n", err);
+        comm_log("[E] connect failed %d\r\n", err);
     }
 }
 
@@ -87,7 +119,7 @@ static void tcp_client_start(void)
 
 void lwip_comm_client_thread(void *arg)
 {
-    comm_log("\r[PCB] lwip_comm_client_thread STARTED\r\n");
+    comm_log("[N] client start\r\n");
     tcp_client_start();
 }
 
@@ -99,11 +131,11 @@ static err_t tcp_client_connected(void *arg, struct tcp_pcb *tpcb, err_t err)
 {
     if (err == ERR_OK) {
         connected = 1;
-        comm_log("\r[PCB] RAW TCP connected!\r\n");
+        comm_log("[N] connected\r\n");
         return ERR_OK;
     }
 
-    comm_log("\r[PCB] Connect error: %d\r\n", err);
+    comm_log("[E] connect err %d\r\n", err);
     return ERR_ABRT;
 }
 
@@ -113,7 +145,7 @@ static err_t tcp_client_connected(void *arg, struct tcp_pcb *tpcb, err_t err)
 
 static void tcp_client_error(void *arg, err_t err)
 {
-    comm_log("\r[PCB] TCP error: %d, reconnecting...\r\n", err);
+    comm_log("[E] tcp %d, reconn\r\n", err);
     connected = 0;
     client_pcb = NULL;
     tcp_client_start();
@@ -151,7 +183,7 @@ static err_t tcp_client_sent(void *arg, struct tcp_pcb *tpcb, u16_t len)
    rx_ring_reset() for us. */
 static void tcp_client_resync(const char *why)
 {
-    comm_log("\r[PCB] %s -- reconnecting to resync\r\n", why);
+    comm_log("[E] %s, resync\r\n", why);
     connected = 0;
     tcp_client_start();
 }
@@ -164,7 +196,7 @@ static err_t tcp_client_recv(void *arg, struct tcp_pcb *tpcb,
                              struct pbuf *p, err_t err)
 {
     if (!p || err != ERR_OK) {
-        comm_log("\r[PCB] Connection closed, reconnecting...\r\n");
+        comm_log("[N] closed, reconn\r\n");
         connected = 0;
         tcp_close(tpcb);
         client_pcb = NULL;
@@ -180,7 +212,7 @@ static err_t tcp_client_recv(void *arg, struct tcp_pcb *tpcb,
        both the honest signal and the only non-corrupting way out. */
     if (rx_ring_free() < p->tot_len) {
         pbuf_free(p);
-        tcp_client_resync("RX ring full, sender outrunning us");
+        tcp_client_resync("ring full");
         return ERR_OK;
     }
 
@@ -229,6 +261,13 @@ static void swap_be_fields(uint8_t *record, uint16_t type)
    ============================================================ */
 void comm_process(void)
 {
+    /* This is the module's once-per-loop entry point, so the deferred
+       reconnect retry lives here: tcp_client_start() returns without
+       connecting if it was called inside the backoff window, and this is
+       what picks it up again afterwards. */
+    if (connect_pending && mono_now_ms() >= next_connect_ms)
+        tcp_client_start();
+
     while (1)
     {
         /* Need at least header */
@@ -249,7 +288,7 @@ void comm_process(void)
                (its size is unknown), and sliding forward a byte or four at
                a time through a multi-KB packet stream does not resync in
                practice. Reconnect instead. */
-            comm_log("\r[PCB] unknown packet type %u\r\n", type);
+            comm_log("[E] bad type %u\r\n", type);
             tcp_client_resync("framing lost");
             return;
         }
@@ -281,7 +320,7 @@ void comm_process(void)
                packet: the sender is capped well below this by
                TCP_SND_BUF (see the backpressure check above), so a length
                this large means we parsed a garbage header. */
-            comm_log("\r[PCB] payload too large (%u records)\r\n", length);
+            comm_log("[E] len %u too big\r\n", length);
             tcp_client_resync("framing lost");
             return;
         }
@@ -349,13 +388,13 @@ static void tcp_client_send(struct tcp_pcb *tpcb, uint16_t type, uint16_t length
            described that as intentional; it was the bug. */
         err = tcp_output(tpcb);
         if (err != ERR_OK)
-            comm_log("\r[PCB] tcp_output failed: %d\r\n", err);
+            comm_log("[E] output %d\r\n", err);
 
         packets_tx++;
         samples_tx += length;
         bytes_tx   += total_bytes;
 
     } else {
-        comm_log("\r[PCB] tcp_write failed: %d\r\n", err);
+        comm_log("[E] write %d\r\n", err);
     }
 }

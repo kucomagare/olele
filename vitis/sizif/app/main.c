@@ -40,46 +40,22 @@
 #include "lwip/inet.h"
 #include "lwip/sys.h"
 #include "lwip_comm_client_raw.h"
-#include "xil_io.h"
+#include "mono_clock.h"
 
-/* ---- Wall clock -------------------------------------------------------
-   Read the Cortex-A9 SCU *global* timer directly: 64-bit, free-running,
-   monotonic, clocked at CPU_3x2x (= core clock / 2). Fixed address on
-   Zynq-7000: PERIPHBASE 0xF8F00000 + 0x200.
-
-   Not XTime_GetTime(): in this BSP that resolves to the xiltimer TTC
-   implementation (XSLEEPTIMER_IS_TTCPS), which returns
-   XTtcPs_GetCounterValue() -- a *16-bit* counter that wraps every ~0.6 ms.
-   Using it made every window read as 0 ms, so [STATS] stopped printing
-   entirely. The cortexa9 standalone xtime_l.c has a correct global-timer
-   version of the same function, but the xiltimer one wins at link time.
-
-   Not platform.c's get_time_ms() either: that returns an ISR tick counter
-   whose interval is ~340 us, not 1 ms. */
-#define GTIMER_BASE       0xF8F00200U
-#define GTIMER_LOWER      0x00U
-#define GTIMER_UPPER      0x04U
-#define GTIMER_CONTROL    0x08U
-#define GTIMER_HZ         (XPAR_CPU_CORE_CLOCK_FREQ_HZ / 2U)   /* 325 MHz */
-
-static void gtimer_start(void)
+/* Compact count for the [STATS] line: 873, 2.4k, 130k, 1.2M. Integer only
+   -- this toolchain's libc build has no float printf. */
+static void fmt_si(char *out, size_t n, uint32_t v)
 {
-    /* ps7_init normally enables this, but don't depend on it. */
-    if ((Xil_In32(GTIMER_BASE + GTIMER_CONTROL) & 1U) == 0U)
-        Xil_Out32(GTIMER_BASE + GTIMER_CONTROL, 1U);
-}
-
-static uint64_t now_ms(void)
-{
-    uint32_t hi, lo;
-
-    /* Re-read the high word to catch a low-word rollover between reads. */
-    do {
-        hi = Xil_In32(GTIMER_BASE + GTIMER_UPPER);
-        lo = Xil_In32(GTIMER_BASE + GTIMER_LOWER);
-    } while (Xil_In32(GTIMER_BASE + GTIMER_UPPER) != hi);
-
-    return (((uint64_t)hi << 32) | (uint64_t)lo) / (GTIMER_HZ / 1000U);
+    if (v < 1000U)
+        snprintf(out, n, "%lu", (unsigned long)v);
+    else if (v < 10000U)
+        snprintf(out, n, "%lu.%luk", (unsigned long)(v / 1000U),
+                                     (unsigned long)((v % 1000U) / 100U));
+    else if (v < 1000000U)
+        snprintf(out, n, "%luk", (unsigned long)(v / 1000U));
+    else
+        snprintf(out, n, "%lu.%luM", (unsigned long)(v / 1000000U),
+                                     (unsigned long)((v % 1000000U) / 100000U));
 }
 
 /* This build is IPv4 + static IP only: the BSP sets LWIP_IPV6 0 and
@@ -174,40 +150,19 @@ int main(void)
        looking but silently rescaled [STATS] line. So: time a known 100 ms
        sleep and print the result at boot. If this doesn't say ~100, every
        rate below it is suspect and you know immediately. */
-    gtimer_start();
-    {
-        uint64_t t0 = now_ms();
-        usleep(100000);
-        uint32_t measured = (uint32_t)(now_ms() - t0);
-        xil_printf("\r[CLK] usleep(100ms) measured as %lu ms (expect ~100)\r\n",
-                   measured);
-    }
+    mono_clock_init();
+    xil_printf("[CLK] 100ms = %lu ms\r\n", mono_clock_selftest_ms(100));
 
     /* start our custom TCP client thread */
     lwip_comm_client_thread(NULL);
 
-    /* Stats window is timed off the TTC hardware counter via
-       XTime_GetTime() (COUNTS_PER_SECOND = XSLEEPTIMER_FREQ, ~108.2 MHz on
-       this part). Two earlier attempts at this were both wrong, so the
-       reasoning is worth keeping:
-
-       1. Counting main-loop passes and calling each one a millisecond.
-          A pass is usleep(1000) *plus* the work in it, so the window ran
-          long -- about 14% at 100 pkt/s, and worse under load.
-
-       2. get_time_ms() from platform.c, which looks like the obvious
-          answer and is not. It returns `tickcntr`, an ISR counter whose
-          interval is NOT 1 ms: measured here it advances ~2.94 times per
-          millisecond, so a window labelled "1001 ms" was really ~340 ms
-          and every rate came out ~3x too low. The BSP is internally
-          inconsistent about this -- platform.c's own tcp_fasttmr logic
-          (`tickcntr % 25`) only makes sense if a tick were 10 ms, and the
-          MicroBlaze variant of get_time_ms() returns `tickcntr * 10`.
-          Don't trust tickcntr for wall-clock; use the hardware counter.
-
-       Ground truth for both corrections was the PC-side relay's own packet
-       counters, which are independent of anything running on the board. */
-    uint64_t last_stats_ms = now_ms();
+    /* Stats window is timed with mono_now_ms() (SCU global timer). Two
+       earlier attempts used BSP-provided time functions and both were
+       wrong -- one ~3x fast, one a 16-bit counter -- see mono_clock.h for
+       which and why. Ground truth for both corrections was the PC-side
+       relay's packet counters, which are independent of anything running
+       on the board; the [CLK] self-check above now catches it directly. */
+    uint64_t last_stats_ms = mono_now_ms();
 
     /* Instrumentation: how many times per second does this loop actually
        run, and how long is a pass? Distinguishes "the loop is slow" from
@@ -251,7 +206,7 @@ int main(void)
 
       comm_log_flush();
 
-      uint64_t stats_now = now_ms();
+      uint64_t stats_now = mono_now_ms();
       uint32_t elapsed = (uint32_t)(stats_now - last_stats_ms);
 
       if (elapsed >= 1000) {
@@ -268,33 +223,40 @@ int main(void)
         uint32_t rx_pps = (uint32_t)(((uint64_t)packets_rx * 1000ULL) / elapsed);
         uint32_t tx_pps = (uint32_t)(((uint64_t)packets_tx * 1000ULL) / elapsed);
         uint32_t rx_sps = (uint32_t)(((uint64_t)samples_rx * 1000ULL) / elapsed);
-        uint32_t tx_sps = (uint32_t)(((uint64_t)samples_tx * 1000ULL) / elapsed);
 
         uint64_t rx_bps = ((uint64_t)bytes_rx * 1000ULL) / elapsed;
-        uint64_t tx_bps = ((uint64_t)bytes_tx * 1000ULL) / elapsed;
-
         uint32_t rx_mb_int  = (uint32_t)(rx_bps / 1000000ULL);
         uint32_t rx_mb_frac = (uint32_t)((rx_bps % 1000000ULL) / 10000ULL);
-        uint32_t tx_mb_int  = (uint32_t)(tx_bps / 1000000ULL);
-        uint32_t tx_mb_frac = (uint32_t)((tx_bps % 1000000ULL) / 10000ULL);
 
-        /* Loop rate + average pass time in microseconds. With the sleep
-           gone, pass_us is pure work: it should be small when idle and
-           rise with load as comm_process() does more AXI transactions per
-           pass. If it climbs while pkt/s plateaus, the per-sample AXI cost
-           is the wall (see the note above loop_passes). */
         uint32_t loops_ps = (uint32_t)(((uint64_t)loop_passes * 1000ULL) / elapsed);
-        uint32_t pass_us  = loop_passes
-                          ? (uint32_t)(((uint64_t)elapsed * 1000ULL) / loop_passes)
-                          : 0;
 
-        comm_log("\r[STATS] (%lu ms) RX: %lu pkt/s, %lu samp/s, %lu.%02lu MB/s | "
-                 "TX: %lu pkt/s, %lu samp/s, %lu.%02lu MB/s | "
-                 "loop: %lu/s (%lu us/pass)\r\n",
-                 elapsed,
-                 rx_pps, rx_sps, rx_mb_int, rx_mb_frac,
-                 tx_pps, tx_sps, tx_mb_int, tx_mb_frac,
-                 loops_ps, pass_us);
+        /* Only the anomalies get printed. TX is identical to RX on an echo
+           path, and the window is 1000 ms unless something stalled the
+           loop -- printing them every second was ~half the line and told
+           you nothing. Now their *presence* is the signal.
+
+           Every byte here costs: at 115200 baud this line blocks the loop
+           for ~1 us/byte, and it is charged against comm_log's 512 B/s
+           budget (see comm_log.c). The old 130-byte version spent a
+           quarter of that budget once a second. */
+        char extra[40];
+        int  epos = 0;
+        extra[0] = '\0';
+        if (tx_pps != rx_pps)
+            epos += snprintf(extra + epos, sizeof(extra) - epos,
+                             " tx=%lu", (unsigned long)tx_pps);
+        if (elapsed < 990U || elapsed > 1010U)
+            snprintf(extra + epos, sizeof(extra) - epos,
+                     " w=%lu", (unsigned long)elapsed);
+
+        char smp[12], lps[12];
+        fmt_si(smp, sizeof(smp), rx_sps);
+        fmt_si(lps, sizeof(lps), loops_ps);
+
+        comm_log("[S] %lup/s %s smp/s %lu.%02luMB/s loop %s/s%s\r\n",
+                 (unsigned long)rx_pps, smp,
+                 (unsigned long)rx_mb_int, (unsigned long)rx_mb_frac,
+                 lps, extra);
 
         packets_rx = packets_tx = 0;
         samples_rx = samples_tx = 0;

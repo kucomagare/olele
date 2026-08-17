@@ -10,6 +10,33 @@ doing everything itself:
 - `rx_ring.{c,h}` — generic circular byte buffer, no protocol knowledge
 - `axi_processing.{c,h}` — pokes/reads the ch1/ch2 AXI-Lite peripherals
 
+## Reading the UART output
+
+Messages are kept short on purpose: `xil_printf()` blocks until every byte
+has shifted out, so at 115200 baud each byte costs ~87 us of main-loop
+time, and output is capped by a 512 B/s budget in `comm_log.c`.
+
+```
+[CLK] 100ms = 100 ms                                    clock self-check, at boot
+[S] 700p/s 350k smp/s 2.09MB/s loop 130k/s              once per second
+[N] connecting / connected / closed, reconn             normal lifecycle
+[E] ring full, resync / tcp -14, reconn / bad type N    problems
+[E] +N suppressed                                       N messages dropped by the budget
+```
+
+`[S]` fields are packet rate, sample rate, throughput, and main-loop rate.
+Two fields appear **only when abnormal**, so their presence is itself the
+signal:
+
+- `tx=N` — TX diverged from RX. On an echo path they should be equal;
+  a difference means packets were dropped or the link reset mid-stream.
+- `w=N` — the stats window was not ~1000 ms, i.e. something stalled the
+  loop long enough to skew the measurement.
+
+If `[CLK]` does not read ~100, treat every rate below it as wrong — see
+`mono_clock.h` for the two BSP time sources that produce exactly that
+failure.
+
 **Framing invariant:** the wire format is length-prefixed with no sync
 marker, so the read position is either exactly right or worthless — there
 is no in-band recovery. Every "we are lost" path (RX ring full, unknown
