@@ -116,7 +116,61 @@ ECG_SAMPLING_RATE = 500   # Hz, native rate of the simulated buffer. A
 ECG_HEART_RATE = 70       # bpm. Live-editable from the panel; signal_gen.py
                           # regenerates the buffer when this changes.
 ECG_DURATION_S = 60       # seconds of buffer before the stream loops.
-ECG_NOISE = 0.01          # nk.ecg_simulate's amplitude-relative noise level.
+ECG_NOISE = 0.01          # nk.ecg_simulate's own built-in amplitude-relative
+                          # (Laplace) noise level. Live-editable from the
+                          # panel's Noise tab. Separate from
+                          # ECG_EXTRA_NOISE_* below, which is a distinct
+                          # colored-noise signal added on top afterward.
+ECG_METHOD = "ecgsyn"     # "ecgsyn" (default) -- full McSharry dynamical
+                          # model, everything below actually does something.
+                          # "simple" -- cheaper Daubechies-wavelet
+                          # approximation; verified it silently IGNORES
+                          # heart_rate_std/lfhfratio/ti/ai/bi (no error, just
+                          # no effect). "multileads" is NOT offered here --
+                          # it returns a 12-lead DataFrame, a different
+                          # shape than this pipeline's one-signal-per-
+                          # channel model, and the panel's method selector
+                          # is a readonly combobox so it can't be typed in.
+ECG_HEART_RATE_STD = 1    # bpm, beat-to-beat heart-rate variability
+                          # (verified: visibly different signal, not just
+                          # noise -- real HRV jitter between beats).
+ECG_LFHFRATIO = 0.5       # Low/high-frequency ratio of that HRV's power
+                          # spectrum. Only visible when ECG_HEART_RATE_STD
+                          # > 0 (verified).
+ECG_TI = (-70, -15, 0, 15, 100)     # P,Q,R,S,T wave angular positions
+                                     # (degrees) in the ECGSYN model.
+ECG_AI = (1.2, -5, 30, -7.5, 0.75)  # P,Q,R,S,T RELATIVE wave heights.
+                                     # CAVEAT (verified empirically):
+                                     # scaling all five UNIFORMLY has no
+                                     # effect on the final signal -- nk
+                                     # renormalizes overall amplitude
+                                     # regardless (that's why ECG_AMPLITUDE
+                                     # exists as a separate post-scale).
+                                     # Changing the RATIOS between them
+                                     # (e.g. a taller T relative to R) does
+                                     # visibly reshape the waveform.
+ECG_BI = (0.25, 0.1, 0.1, 0.1, 0.4) # P,Q,R,S,T wave widths (Gaussian sigma).
+ECG_RANDOM_SEED = 1        # Base seed. ch2 uses ECG_RANDOM_SEED + 1, so the
+                            # two channels stay independent (different
+                            # traces) but reproducible -- same seed always
+                            # regenerates the same waveform.
+
+# Extra colored noise, generated separately via nk.signal_noise() and added
+# on top of the simulated ECG (distinct from ECG_NOISE above, which is
+# baked into nk.ecg_simulate() itself). See signal_gen.py's _simulate_raw().
+ECG_EXTRA_NOISE_ENABLED = False
+ECG_EXTRA_NOISE_BETA = 1   # nk.signal_noise()'s (1/f)**beta color exponent:
+                           # -2 violet, -1 blue, 0 white, 1 pink/flicker,
+                           # 2 brown. The panel exposes these as named
+                           # choices, not a raw number.
+ECG_EXTRA_NOISE_LEVEL = 0.1  # Added noise's peak-to-peak amplitude, as a
+                              # fraction of the ECG signal's OWN peak-to-
+                              # peak (both measured before either is scaled
+                              # to wire units) -- e.g. 0.1 = noise is 10% of
+                              # the ECG's own swing. Not tied to uint16
+                              # directly since it's relative to the signal,
+                              # not the wire -- ECG_AMPLITUDE still governs
+                              # the final (ECG + noise) mix's wire range.
 
 # Fraction (0.0-1.0) of each channel's wire dtype range (uint16 -> 0..65535)
 # that the signal's peak-to-peak amplitude occupies, centered at the

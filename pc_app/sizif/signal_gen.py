@@ -2,9 +2,9 @@
 # here on purpose -- net.py owns the connection and calls into this
 # module just to get bytes to send.
 #
-# ch1/ch2 are each pulled from an independently-simulated ECG buffer
-# (built once, cached, regenerated only when config.ECG_HEART_RATE or
-# config.ECG_SAMPLING_RATE changes -- see _raw_buffers()) so both plotted
+# ch1/ch2 are each pulled from an independently-simulated ECG buffer (built
+# once, cached, regenerated only when any generation-affecting config value
+# changes -- see _config_signature()/_raw_buffers()) so both plotted
 # channels show real ECG morphology rather than one being a scaled copy of
 # the other. Swap this for a second lead or a different signal later if you
 # need channels to actually differ clinically -- this is a placeholder
@@ -20,21 +20,39 @@ import struct
 
 # Generation (nk.ecg_simulate, expensive) and amplitude scaling (cheap) are
 # deliberately decoupled: the raw float buffer is cached and only rebuilt
-# when ECG_HEART_RATE or ECG_SAMPLING_RATE changes (see _raw_buffers());
-# ECG_AMPLITUDE is applied fresh on every chunk, so dragging the amplitude
-# control doesn't re-run the simulator and takes effect immediately.
+# when its "signature" (every config knob that affects generation -- see
+# _config_signature()) changes; ECG_AMPLITUDE is applied fresh on every
+# chunk in _scale_to_wire(), so dragging the amplitude control doesn't
+# re-run the simulator and takes effect immediately.
 #
 # Note nk.ecg_simulate's own amplitude-shaping kwarg (`ai`, the McSharry
 # ECGSYN model's per-wave heights) turned out not to be a usable amplitude
-# knob -- neurokit renormalizes its output regardless of `ai`, so peak-to-
-# peak stays ~constant across a wide range of `ai` scales (verified: 0.5x-
-# 3x `ai` all landed within ~3% of the same ptp). Amplitude control is
-# implemented here instead, as a post-generation fit into a band centered
-# on each channel's dtype range.
+# knob -- neurokit renormalizes its output regardless of a UNIFORM `ai`
+# scale, so peak-to-peak stays ~constant across a wide range of scales
+# (verified: 0.5x-3x `ai` all landed within ~3% of the same ptp). Amplitude
+# control is implemented here instead, as a post-generation fit into a band
+# centered on each channel's dtype range. `ai`'s RATIOS between components
+# do still reshape the waveform (verified), which is why it's still exposed
+# as a panel field -- just not as an amplitude control.
 #
-# (heart_rate, sampling_rate the raw buffers were built with, then per-channel
+# (signature tuple the raw buffers were built with, then per-channel
 #  (raw array, raw min, raw max))
-_cache = (None, None, None, None)
+_cache = (None, None, None)
+
+
+def _config_signature():
+    """Every config value that affects _simulate_raw()'s output. Compared
+    against the last-built signature in _raw_buffers() to decide whether
+    the (expensive) simulator needs to re-run. Extend this, not the cache
+    tuple shape, when adding a new generation parameter."""
+    return (
+        config.ECG_DURATION_S, config.ECG_SAMPLING_RATE, config.ECG_HEART_RATE,
+        config.ECG_HEART_RATE_STD, config.ECG_NOISE, config.ECG_METHOD,
+        config.ECG_LFHFRATIO, tuple(config.ECG_TI), tuple(config.ECG_AI),
+        tuple(config.ECG_BI), config.ECG_RANDOM_SEED,
+        config.ECG_EXTRA_NOISE_ENABLED, config.ECG_EXTRA_NOISE_BETA,
+        config.ECG_EXTRA_NOISE_LEVEL,
+    )
 
 
 def _simulate_raw(random_state):
@@ -42,23 +60,56 @@ def _simulate_raw(random_state):
         duration=config.ECG_DURATION_S,
         sampling_rate=config.ECG_SAMPLING_RATE,
         heart_rate=config.ECG_HEART_RATE,
+        heart_rate_std=config.ECG_HEART_RATE_STD,
         noise=config.ECG_NOISE,
+        method=config.ECG_METHOD,
+        lfhfratio=config.ECG_LFHFRATIO,
+        ti=config.ECG_TI,
+        ai=config.ECG_AI,
+        bi=config.ECG_BI,
         random_state=random_state,
     )
     raw = np.asarray(raw, dtype=np.float64)
+
+    if config.ECG_EXTRA_NOISE_ENABLED:
+        # Distinct colored-noise signal, generated separately and added on
+        # top -- not the same as ECG_NOISE above, which is baked into
+        # nk.ecg_simulate() itself. Scaled relative to the ECG's own
+        # peak-to-peak so ECG_EXTRA_NOISE_LEVEL means the same thing (e.g.
+        # "10% of the signal") regardless of heart rate/amplitude settings.
+        noise = np.asarray(
+            nk.signal_noise(
+                duration=config.ECG_DURATION_S,
+                sampling_rate=config.ECG_SAMPLING_RATE,
+                beta=config.ECG_EXTRA_NOISE_BETA,
+                random_state=random_state,
+            ),
+            dtype=np.float64,
+        )
+        # signal_noise()'s length matches duration*sampling_rate exactly in
+        # practice, but truncate defensively rather than assume it always
+        # will.
+        n = min(len(raw), len(noise))
+        raw, noise = raw[:n], noise[:n]
+        raw_ptp = raw.max() - raw.min()
+        noise_ptp = noise.max() - noise.min()
+        if noise_ptp > 0 and raw_ptp > 0:
+            raw = raw + noise * (config.ECG_EXTRA_NOISE_LEVEL * raw_ptp / noise_ptp)
+
     return raw, raw.min(), raw.max()
 
 
 def _raw_buffers():
     """Return (ch1_raw, ch1_lo, ch1_hi, ch2_raw, ch2_lo, ch2_hi), regenerating
-    only if ECG_HEART_RATE or ECG_SAMPLING_RATE has changed since the last
-    call -- this is the expensive nk.ecg_simulate() step."""
+    only if _config_signature() has changed since the last call -- this is
+    the expensive nk.ecg_simulate() step."""
     global _cache
-    built_hr, built_fs, ch1_entry, ch2_entry = _cache
-    if built_hr != config.ECG_HEART_RATE or built_fs != config.ECG_SAMPLING_RATE:
-        ch1_entry = _simulate_raw(random_state=1)
-        ch2_entry = _simulate_raw(random_state=2)
-        _cache = (config.ECG_HEART_RATE, config.ECG_SAMPLING_RATE, ch1_entry, ch2_entry)
+    sig, ch1_entry, ch2_entry = _cache
+    current_sig = _config_signature()
+    if sig != current_sig:
+        ch1_entry = _simulate_raw(random_state=config.ECG_RANDOM_SEED)
+        ch2_entry = _simulate_raw(random_state=config.ECG_RANDOM_SEED + 1)
+        _cache = (current_sig, ch1_entry, ch2_entry)
     return ch1_entry + ch2_entry
 
 

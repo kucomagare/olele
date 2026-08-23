@@ -6,8 +6,17 @@
 # Split by what each knob is actually about, laid out differently since
 # one has few, short fields and the other has more:
 #   SignalControlPanel (right-side column) -- the ECG signal itself and how
-#     fast it's generated/streamed: SEND_RATE / CHUNK_SIZE / ECG_HEART_RATE
-#     / ECG_SAMPLING_RATE / ECG_AMPLITUDE / SEND_ENABLED / RECEIVE_ENABLED.
+#     fast it's generated/streamed, in three tabs:
+#       Basic    -- SEND_RATE / CHUNK_SIZE / ECG_HEART_RATE /
+#                   ECG_SAMPLING_RATE / ECG_AMPLITUDE / RECEIVE_ENABLED,
+#                   plus the Pause/Resume button above the tabs.
+#       Waveform -- nk.ecg_simulate()'s ECGSYN-model kwargs: ECG_METHOD,
+#                   ECG_HEART_RATE_STD, ECG_LFHFRATIO, ECG_TI/AI/BI (each a
+#                   P,Q,R,S,T 5-tuple), ECG_RANDOM_SEED.
+#       Noise    -- ECG_NOISE (nk.ecg_simulate()'s own built-in noise) plus
+#                   ECG_EXTRA_NOISE_ENABLED/BETA/LEVEL, a separate colored
+#                   noise signal (nk.signal_noise()) added on top -- see
+#                   signal_gen.py's _simulate_raw().
 #   PlotControlPanel (bottom bar, one row) -- purely how the plot displays
 #     that signal: PLOT_MIN / PLOT_MAX / PLOT_BUFFER / FRAME_RATE. None of
 #     these affect what's generated or sent on the wire, only what's drawn
@@ -34,13 +43,67 @@ from tkinter import ttk
 import config
 
 
-def _add_entry(frame, row, label, var, on_commit):
-    ttk.Label(frame, text=label).grid(row=row, column=0, sticky="w", pady=2)
-    entry = ttk.Entry(frame, textvariable=var, width=8)
+class _Tooltip:
+    """Minimal hover tooltip -- Tk/ttk has no built-in one. A small
+    borderless Toplevel appears near the widget on <Enter> and is
+    destroyed on <Leave>; there's deliberately no delay/fade logic, this
+    just needs to answer "what does this field do" on hover."""
+
+    def __init__(self, widget, text):
+        self.widget = widget
+        self.text = text
+        self.tipwindow = None
+        widget.bind("<Enter>", self._show, add="+")
+        widget.bind("<Leave>", self._hide, add="+")
+
+    def _show(self, _event=None):
+        if self.tipwindow or not self.text:
+            return
+        x = self.widget.winfo_rootx() + 12
+        y = self.widget.winfo_rooty() + self.widget.winfo_height() + 4
+        self.tipwindow = tw = tk.Toplevel(self.widget)
+        tw.wm_overrideredirect(True)
+        tw.wm_geometry(f"+{x}+{y}")
+        tk.Label(tw, text=self.text, justify="left", background="#ffffe0",
+                 relief="solid", borderwidth=1, wraplength=260,
+                 font=("", 9)).pack(ipadx=4, ipady=2)
+
+    def _hide(self, _event=None):
+        if self.tipwindow:
+            self.tipwindow.destroy()
+            self.tipwindow = None
+
+
+def _add_entry(frame, row, label, var, on_commit, width=8, help_text=None):
+    lbl = ttk.Label(frame, text=label)
+    lbl.grid(row=row, column=0, sticky="w", pady=2)
+    entry = ttk.Entry(frame, textvariable=var, width=width)
     entry.grid(row=row, column=1, sticky="e", pady=2)
     entry.bind("<Return>", lambda _e: on_commit())
     entry.bind("<FocusOut>", lambda _e: on_commit())
+    if help_text:
+        _Tooltip(lbl, help_text)
+        _Tooltip(entry, help_text)
     return row + 1
+
+
+def _parse_5tuple(text, fallback):
+    """Parse a comma-separated "a,b,c,d,e" entry (used for the ECGSYN
+    model's ti/ai/bi wave parameters, each a 5-tuple for P,Q,R,S,T) back
+    into a tuple of 5 floats. Falls back to the last-good value on any
+    parse error or wrong count, same "reject the whole thing rather than
+    guess" policy as the other validated fields."""
+    try:
+        parts = tuple(float(p.strip()) for p in text.split(","))
+        if len(parts) != 5:
+            raise ValueError
+        return parts
+    except ValueError:
+        return fallback
+
+
+def _format_5tuple(values):
+    return ",".join(f"{v:g}" for v in values)
 
 
 def _add_entry_horizontal(frame, col, label, var, on_commit):
@@ -56,49 +119,215 @@ def _add_entry_horizontal(frame, col, label, var, on_commit):
     return col + 2
 
 
+_NOISE_COLORS = {
+    "Violet (-2)": -2,
+    "Blue (-1)": -1,
+    "White (0)": 0,
+    "Pink (1)": 1,
+    "Brown (2)": 2,
+}
+_NOISE_COLOR_BY_BETA = {v: k for k, v in _NOISE_COLORS.items()}
+
+_METHODS = ["ecgsyn", "simple"]  # NOT "multileads" -- see config.py's
+                                  # ECG_METHOD comment. A readonly combobox
+                                  # (state="readonly" below) means the user
+                                  # can only ever pick from this list.
+
+
 class SignalControlPanel:
     def __init__(self, parent):
         self.frame = ttk.Frame(parent, padding=8)
 
+        ttk.Label(self.frame, text="Signal", font=("", 10, "bold")).pack(anchor="w", pady=(0, 6))
+
+        self._pause_button = ttk.Button(self.frame, text=self._pause_label(),
+                                         command=self._toggle_pause)
+        self._pause_button.pack(fill="x", pady=(0, 6))
+
+        # Tabbed rather than one long stacked column -- Basic covers the
+        # fields every session needs; Waveform/Noise are the nk.ecg_simulate
+        # kwargs and nk.signal_noise() injection from the parameter survey,
+        # most of which most sessions won't touch.
+        notebook = ttk.Notebook(self.frame)
+        notebook.pack(fill="both", expand=True)
+        basic = ttk.Frame(notebook, padding=6)
+        waveform = ttk.Frame(notebook, padding=6)
+        noise = ttk.Frame(notebook, padding=6)
+        notebook.add(basic, text="Basic")
+        notebook.add(waveform, text="Waveform")
+        notebook.add(noise, text="Noise")
+
+        self._build_basic_tab(basic)
+        self._build_waveform_tab(waveform)
+        self._build_noise_tab(noise)
+
+        ttk.Separator(self.frame, orient="horizontal").pack(fill="x", pady=6)
+        self._rate_status = tk.StringVar()
+        ttk.Label(self.frame, textvariable=self._rate_status, wraplength=200,
+                  justify="left", foreground="#555").pack(anchor="w")
+        self._update_rate_status()
+
+    # ------------------------------------------------------------------
+    # Basic tab: the fields from before this session's parameter survey.
+    # ------------------------------------------------------------------
+    def _build_basic_tab(self, frame):
         self._send_rate = tk.StringVar(value=str(config.SEND_RATE))
         self._chunk_size = tk.StringVar(value=str(config.CHUNK_SIZE))
         self._heart_rate = tk.StringVar(value=str(config.ECG_HEART_RATE))
         self._ecg_sample_rate = tk.StringVar(value=str(config.ECG_SAMPLING_RATE))
         self._amplitude = tk.StringVar(value=f"{config.ECG_AMPLITUDE * 100:g}")
         self._receive_enabled = tk.BooleanVar(value=config.RECEIVE_ENABLED)
-        self._rate_status = tk.StringVar()
 
         row = 0
-        ttk.Label(self.frame, text="Signal", font=("", 10, "bold")).grid(
-            row=row, column=0, columnspan=2, sticky="w", pady=(0, 6))
+        row = _add_entry(frame, row, "Send rate (pkt/s)", self._send_rate, self._apply_send_rate,
+                          help_text="How many packets/second are sent. Together with Chunk "
+                                     "size, this sets the effective streaming rate (samples/s) "
+                                     "-- see the status box below to check it against the ECG's "
+                                     "own sample rate.")
+        row = _add_entry(frame, row, "Chunk size (smp/pkt)", self._chunk_size, self._apply_chunk_size,
+                          help_text="Samples per packet. Together with Send rate, sets the "
+                                     "effective streaming rate (samples/s).")
+        row = _add_entry(frame, row, "Heart rate (bpm)", self._heart_rate, self._apply_heart_rate,
+                          help_text="Mean simulated heart rate. Actual beat-to-beat timing can "
+                                     "vary slightly for realism -- see Heart rate std on the "
+                                     "Waveform tab.")
+        row = _add_entry(frame, row, "ECG sample rate (Hz)", self._ecg_sample_rate,
+                          self._apply_ecg_sample_rate,
+                          help_text="Native rate the ECG waveform itself is generated at. This "
+                                     "is what the plot's Time axis is calculated from -- not "
+                                     "Send rate/Chunk size, which only control delivery speed.")
+        row = _add_entry(frame, row, "Amplitude (% of uint16)", self._amplitude,
+                          self._apply_amplitude,
+                          help_text="How much of the wire format's uint16 range (0-65535) the "
+                                     "signal's peak-to-peak occupies, centered at the midpoint. "
+                                     "A pure wire/display scale -- it does not change the "
+                                     "waveform's shape, only its size.")
+
+        rx = ttk.Checkbutton(frame, text="Receive enabled", variable=self._receive_enabled,
+                              command=self._apply_receive_enabled)
+        rx.grid(row=row, column=0, columnspan=2, sticky="w", pady=2)
+        _Tooltip(rx, "When off, incoming (echoed) packets from the board/relay are ignored -- "
+                      "the plot's \"out\" trace stops updating. Sending continues unaffected.")
+
+    # ------------------------------------------------------------------
+    # Waveform tab: nk.ecg_simulate()'s ECGSYN-model parameters.
+    # ------------------------------------------------------------------
+    def _build_waveform_tab(self, frame):
+        self._method = tk.StringVar(value=config.ECG_METHOD)
+        self._heart_rate_std = tk.StringVar(value=f"{config.ECG_HEART_RATE_STD:g}")
+        self._lfhfratio = tk.StringVar(value=f"{config.ECG_LFHFRATIO:g}")
+        self._ti = tk.StringVar(value=_format_5tuple(config.ECG_TI))
+        self._ai = tk.StringVar(value=_format_5tuple(config.ECG_AI))
+        self._bi = tk.StringVar(value=_format_5tuple(config.ECG_BI))
+        self._random_seed = tk.StringVar(value=str(config.ECG_RANDOM_SEED))
+
+        row = 0
+        method_lbl = ttk.Label(frame, text="Method")
+        method_lbl.grid(row=row, column=0, sticky="w", pady=2)
+        method_box = ttk.Combobox(frame, textvariable=self._method, values=_METHODS,
+                                   state="readonly", width=8)
+        method_box.grid(row=row, column=1, sticky="e", pady=2)
+        method_box.bind("<<ComboboxSelected>>", self._apply_method)
+        method_help = ("\"ecgsyn\" (default) -- full dynamical model, realistic morphology, "
+                        "every field below has an effect. \"simple\" -- cheaper wavelet "
+                        "approximation of one cardiac cycle; verified it silently ignores "
+                        "Heart rate std, LF/HF ratio, and the ti/ai/bi fields below (no error, "
+                        "just no visible effect).")
+        _Tooltip(method_lbl, method_help)
+        _Tooltip(method_box, method_help)
         row += 1
 
-        self._pause_button = ttk.Button(self.frame, text=self._pause_label(),
-                                         command=self._toggle_pause)
-        self._pause_button.grid(row=row, column=0, columnspan=2, sticky="ew", pady=(0, 6))
+        row = _add_entry(frame, row, "Heart rate std (bpm)", self._heart_rate_std,
+                          self._apply_heart_rate_std,
+                          help_text="Beat-to-beat heart rate variability. 0 = perfectly regular "
+                                     "rhythm; higher values add realistic jitter between beats. "
+                                     "Only affects the \"ecgsyn\" method.")
+        row = _add_entry(frame, row, "LF/HF ratio", self._lfhfratio, self._apply_lfhfratio,
+                          help_text="Low/high-frequency ratio of the heart-rate-variability "
+                                     "power spectrum -- shapes HOW the beat-to-beat variability "
+                                     "above is distributed over time, not how much of it there "
+                                     "is. Only visible when Heart rate std > 0, and only "
+                                     "affects the \"ecgsyn\" method.")
+
+        ttk.Label(frame, text="Only affect \"ecgsyn\" method:", foreground="#777",
+                  font=("", 8)).grid(row=row, column=0, columnspan=2, sticky="w", pady=(6, 2))
         row += 1
+        row = _add_entry(frame, row, "P,Q,R,S,T angles (ti)", self._ti, self._apply_ti, width=18,
+                          help_text="Angular position (degrees) of each wave in the cardiac "
+                                     "cycle, comma-separated for P,Q,R,S,T in that order. "
+                                     "Shifts the timing/spacing between waves. Default: "
+                                     "-70,-15,0,15,100.")
+        row = _add_entry(frame, row, "P,Q,R,S,T heights (ai)", self._ai, self._apply_ai, width=18,
+                          help_text="Relative height of each wave (P,Q,R,S,T). Changing the "
+                                     "RATIOS between them reshapes the waveform (e.g. a taller "
+                                     "T wave) -- but scaling all five by the same factor has no "
+                                     "visible effect, since the overall signal gets renormalized "
+                                     "regardless (use Amplitude on the Basic tab for that "
+                                     "instead). Default: 1.2,-5,30,-7.5,0.75.")
+        row = _add_entry(frame, row, "P,Q,R,S,T widths (bi)", self._bi, self._apply_bi, width=18,
+                          help_text="Width (spread) of each wave -- larger values widen that "
+                                     "wave's bump, e.g. a wide value for T broadens the T wave "
+                                     "noticeably. Default: 0.25,0.1,0.1,0.1,0.4.")
+        row = _add_entry(frame, row, "Random seed", self._random_seed, self._apply_random_seed,
+                          help_text="Seed for the random generator. The same seed always "
+                                     "regenerates the identical waveform. Channel 2 always uses "
+                                     "seed+1, so the two channels differ from each other but "
+                                     "both stay reproducible.")
 
-        row = _add_entry(self.frame, row, "Send rate (pkt/s)", self._send_rate, self._apply_send_rate)
-        row = _add_entry(self.frame, row, "Chunk size (smp/pkt)", self._chunk_size, self._apply_chunk_size)
-        row = _add_entry(self.frame, row, "Heart rate (bpm)", self._heart_rate, self._apply_heart_rate)
-        row = _add_entry(self.frame, row, "ECG sample rate (Hz)", self._ecg_sample_rate,
-                          self._apply_ecg_sample_rate)
-        row = _add_entry(self.frame, row, "Amplitude (% of uint16)", self._amplitude,
-                          self._apply_amplitude)
+    # ------------------------------------------------------------------
+    # Noise tab: nk.ecg_simulate()'s own noise param + a separate
+    # nk.signal_noise()-based colored noise added on top.
+    # ------------------------------------------------------------------
+    def _build_noise_tab(self, frame):
+        self._ecg_noise = tk.StringVar(value=f"{config.ECG_NOISE:g}")
+        self._extra_noise_enabled = tk.BooleanVar(value=config.ECG_EXTRA_NOISE_ENABLED)
+        self._extra_noise_color = tk.StringVar(
+            value=_NOISE_COLOR_BY_BETA.get(config.ECG_EXTRA_NOISE_BETA, "Pink (1)"))
+        self._extra_noise_level = tk.StringVar(value=f"{config.ECG_EXTRA_NOISE_LEVEL * 100:g}")
 
-        ttk.Checkbutton(self.frame, text="Receive enabled", variable=self._receive_enabled,
-                         command=self._apply_receive_enabled).grid(
-            row=row, column=0, columnspan=2, sticky="w", pady=2)
-        row += 1
+        row = 0
+        row = _add_entry(frame, row, "Built-in noise", self._ecg_noise, self._apply_ecg_noise,
+                          help_text="Amplitude of the small random noise the model itself adds "
+                                     "while generating the waveform (Laplace-distributed). "
+                                     "Baked into the model at generation time -- separate from "
+                                     "the colored noise below, which is a distinct signal added "
+                                     "afterward. 0 = perfectly clean signal.")
 
-        ttk.Separator(self.frame, orient="horizontal").grid(
+        ttk.Separator(frame, orient="horizontal").grid(
             row=row, column=0, columnspan=2, sticky="ew", pady=6)
         row += 1
-        ttk.Label(self.frame, textvariable=self._rate_status, wraplength=160,
-                  justify="left", foreground="#555").grid(
-            row=row, column=0, columnspan=2, sticky="w")
 
-        self._update_rate_status()
+        extra_cb = ttk.Checkbutton(frame, text="Add colored noise",
+                                    variable=self._extra_noise_enabled,
+                                    command=self._apply_extra_noise_enabled)
+        extra_cb.grid(row=row, column=0, columnspan=2, sticky="w", pady=2)
+        _Tooltip(extra_cb, "Adds a second, independent noise signal on top of the clean ECG "
+                            "(nk.signal_noise(), not the model's built-in noise above) -- "
+                            "useful for simulating a specific interference character rather "
+                            "than just generic randomness.")
+        row += 1
+
+        color_lbl = ttk.Label(frame, text="Color")
+        color_lbl.grid(row=row, column=0, sticky="w", pady=2)
+        color_box = ttk.Combobox(frame, textvariable=self._extra_noise_color,
+                                  values=list(_NOISE_COLORS.keys()), state="readonly", width=10)
+        color_box.grid(row=row, column=1, sticky="e", pady=2)
+        color_box.bind("<<ComboboxSelected>>", self._apply_extra_noise_color)
+        color_help = ("The noise's frequency character (a power-spectrum exponent). Violet/"
+                       "Blue emphasize high frequencies (hiss-like); White is flat across all "
+                       "frequencies; Pink/Brown emphasize low frequencies (rumble/drift-like, "
+                       "closer to real baseline wander).")
+        _Tooltip(color_lbl, color_help)
+        _Tooltip(color_box, color_help)
+        row += 1
+
+        row = _add_entry(frame, row, "Level (% of ECG ptp)", self._extra_noise_level,
+                          self._apply_extra_noise_level,
+                          help_text="How strong the added noise is, as a percentage of the "
+                                     "ECG signal's OWN peak-to-peak swing -- so a given "
+                                     "percentage means the same thing regardless of heart rate "
+                                     "or Amplitude settings. Only has any effect while \"Add "
+                                     "colored noise\" is checked.")
 
     def _update_rate_status(self):
         effective = config.SEND_RATE * config.CHUNK_SIZE
@@ -160,6 +389,85 @@ class SignalControlPanel:
         value = max(0.0, min(value, 100.0))
         self._amplitude.set(f"{value:g}")
         config.ECG_AMPLITUDE = value / 100.0
+
+    # ------------------------------------------------------------------
+    # Waveform tab apply methods
+    # ------------------------------------------------------------------
+    def _apply_method(self, _event=None):
+        config.ECG_METHOD = self._method.get()
+
+    def _apply_heart_rate_std(self):
+        try:
+            value = float(self._heart_rate_std.get())
+        except ValueError:
+            value = config.ECG_HEART_RATE_STD
+        value = max(0.0, min(value, 30.0))
+        self._heart_rate_std.set(f"{value:g}")
+        config.ECG_HEART_RATE_STD = value
+
+    def _apply_lfhfratio(self):
+        try:
+            value = float(self._lfhfratio.get())
+            if value <= 0:
+                raise ValueError
+        except ValueError:
+            value = config.ECG_LFHFRATIO
+        value = max(0.01, min(value, 20.0))
+        self._lfhfratio.set(f"{value:g}")
+        config.ECG_LFHFRATIO = value
+
+    def _apply_ti(self):
+        value = _parse_5tuple(self._ti.get(), config.ECG_TI)
+        self._ti.set(_format_5tuple(value))
+        config.ECG_TI = value
+
+    def _apply_ai(self):
+        value = _parse_5tuple(self._ai.get(), config.ECG_AI)
+        self._ai.set(_format_5tuple(value))
+        config.ECG_AI = value
+
+    def _apply_bi(self):
+        value = _parse_5tuple(self._bi.get(), config.ECG_BI)
+        self._bi.set(_format_5tuple(value))
+        config.ECG_BI = value
+
+    def _apply_random_seed(self):
+        try:
+            value = int(self._random_seed.get())
+        except ValueError:
+            value = config.ECG_RANDOM_SEED
+        value = max(0, value)
+        self._random_seed.set(str(value))
+        config.ECG_RANDOM_SEED = value
+
+    # ------------------------------------------------------------------
+    # Noise tab apply methods
+    # ------------------------------------------------------------------
+    def _apply_ecg_noise(self):
+        try:
+            value = float(self._ecg_noise.get())
+        except ValueError:
+            value = config.ECG_NOISE
+        value = max(0.0, min(value, 1.0))
+        self._ecg_noise.set(f"{value:g}")
+        config.ECG_NOISE = value
+
+    def _apply_extra_noise_enabled(self):
+        config.ECG_EXTRA_NOISE_ENABLED = self._extra_noise_enabled.get()
+
+    def _apply_extra_noise_color(self, _event=None):
+        config.ECG_EXTRA_NOISE_BETA = _NOISE_COLORS[self._extra_noise_color.get()]
+
+    def _apply_extra_noise_level(self):
+        try:
+            value = float(self._extra_noise_level.get())
+        except ValueError:
+            value = config.ECG_EXTRA_NOISE_LEVEL * 100
+        value = max(0.0, min(value, 200.0))  # allow up to 2x the ECG's own
+                                              # ptp for a genuinely noise-
+                                              # dominated signal if wanted
+        self._extra_noise_level.set(f"{value:g}")
+        config.ECG_EXTRA_NOISE_LEVEL = value / 100.0
 
     def _pause_label(self):
         return "Resume" if not config.SEND_ENABLED else "Pause"
