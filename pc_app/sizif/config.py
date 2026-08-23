@@ -14,7 +14,7 @@ BOARD_CONNECTED = True  # True: connect over the real board network (192.168.1.1
 HOST = "192.168.1.100" if BOARD_CONNECTED else "127.0.0.1"
 PORT = 5001
 
-PLOT_BUFFER = 500  # Rolling window length, in samples. Live-editable from
+PLOT_BUFFER = 2000  # Rolling window length, in samples. Live-editable from
                     # the panel -- plot.py reallocates the four rolling
                     # buffers and re-fits the x-axis when this changes,
                     # keeping the most recent samples from the old buffers.
@@ -99,7 +99,7 @@ FRAME_RATE = 24   # Plot redraws/s. Live-editable from the panel --
 # in research_info/architecture-roadmap.md -- that's a different exercise
 # from streaming real ECG and is no longer the default.
 SEND_RATE = 50
-CHUNK_SIZE = 10
+CHUNK_SIZE = 3
 
 MAX_CHUNK_SIZE = 2000  # mirrors MAX_SAMPLES in tcp_server_app.cpp and
                         # MAX_PAYLOAD_SAMPLES in lwip_comm_client_raw.c --
@@ -109,18 +109,19 @@ MAX_CHUNK_SIZE = 2000  # mirrors MAX_SAMPLES in tcp_server_app.cpp and
 # ECG signal generation (neurokit2). ch1/ch2 are each an independent
 # nk.ecg_simulate() call, cached and re-sliced per packet -- see
 # signal_gen.py for how SEND_RATE/CHUNK_SIZE map onto this buffer.
-ECG_SAMPLING_RATE = 500   # Hz, native rate of the simulated buffer. A
+ECG_SAMPLING_RATE = 2048  # Hz, native rate of the simulated buffer. A
                           # standard clinical rate (compare 250-360 Hz for
                           # older Holter/MIT-BIH gear, up to 1000 Hz for
                           # research-grade capture).
-ECG_HEART_RATE = 70       # bpm. Live-editable from the panel; signal_gen.py
+ECG_HEART_RATE = 120      # bpm. Live-editable from the panel; signal_gen.py
                           # regenerates the buffer when this changes.
 ECG_DURATION_S = 60       # seconds of buffer before the stream loops.
 ECG_NOISE = 0.01          # nk.ecg_simulate's own built-in amplitude-relative
                           # (Laplace) noise level. Live-editable from the
-                          # panel's Noise tab. Separate from
-                          # ECG_EXTRA_NOISE_* below, which is a distinct
-                          # colored-noise signal added on top afterward.
+                          # panel's Noise tab. Separate from the
+                          # ECG_NOISE_{VIOLET,BLUE,WHITE,PINK,BROWN}_*
+                          # layers below, which are distinct colored-noise
+                          # signals added on top afterward.
 ECG_METHOD = "ecgsyn"     # "ecgsyn" (default) -- full McSharry dynamical
                           # model, everything below actually does something.
                           # "simple" -- cheaper Daubechies-wavelet
@@ -150,7 +151,7 @@ ECG_AI = (1.2, -5, 30, -7.5, 0.75)  # P,Q,R,S,T RELATIVE wave heights.
                                      # (e.g. a taller T relative to R) does
                                      # visibly reshape the waveform.
 ECG_BI = (0.25, 0.1, 0.1, 0.1, 0.4) # P,Q,R,S,T wave widths (Gaussian sigma).
-ECG_RANDOM_SEED = 1        # Base seed. ch2 uses ECG_RANDOM_SEED + 1, so the
+ECG_RANDOM_SEED = 1         # Base seed. ch2 uses ECG_RANDOM_SEED + 1, so the
                             # two channels stay independent (different
                             # traces) but reproducible -- same seed always
                             # regenerates the same waveform.
@@ -158,19 +159,28 @@ ECG_RANDOM_SEED = 1        # Base seed. ch2 uses ECG_RANDOM_SEED + 1, so the
 # Extra colored noise, generated separately via nk.signal_noise() and added
 # on top of the simulated ECG (distinct from ECG_NOISE above, which is
 # baked into nk.ecg_simulate() itself). See signal_gen.py's _simulate_raw().
-ECG_EXTRA_NOISE_ENABLED = False
-ECG_EXTRA_NOISE_BETA = 1   # nk.signal_noise()'s (1/f)**beta color exponent:
-                           # -2 violet, -1 blue, 0 white, 1 pink/flicker,
-                           # 2 brown. The panel exposes these as named
-                           # choices, not a raw number.
-ECG_EXTRA_NOISE_LEVEL = 0.1  # Added noise's peak-to-peak amplitude, as a
-                              # fraction of the ECG signal's OWN peak-to-
-                              # peak (both measured before either is scaled
-                              # to wire units) -- e.g. 0.1 = noise is 10% of
-                              # the ECG's own swing. Not tied to uint16
-                              # directly since it's relative to the signal,
-                              # not the wire -- ECG_AMPLITUDE still governs
-                              # the final (ECG + noise) mix's wire range.
+#
+# Five independent layers, one per named color (nk.signal_noise()'s
+# (1/f)**beta exponent: -2 violet, -1 blue, 0 white, 1 pink/flicker,
+# 2 brown) -- ANY COMBINATION can be enabled simultaneously, each at its
+# own level; enabled layers are generated separately and summed before
+# being added to the ECG. Each _LEVEL is that layer's peak-to-peak
+# amplitude as a fraction of the *clean ECG signal's own* peak-to-peak
+# (measured once, before any noise is added, so levels don't compound
+# against each other or drift as more layers get enabled) -- e.g. 0.1 =
+# that layer alone is 10% of the ECG's own swing. Not tied to uint16
+# directly since it's relative to the signal, not the wire -- ECG_AMPLITUDE
+# still governs the final (ECG + noise) mix's wire range.
+ECG_NOISE_VIOLET_ENABLED = False
+ECG_NOISE_VIOLET_LEVEL = 0.1
+ECG_NOISE_BLUE_ENABLED = False
+ECG_NOISE_BLUE_LEVEL = 0.1
+ECG_NOISE_WHITE_ENABLED = False
+ECG_NOISE_WHITE_LEVEL = 0.1
+ECG_NOISE_PINK_ENABLED = False
+ECG_NOISE_PINK_LEVEL = 0.1
+ECG_NOISE_BROWN_ENABLED = False
+ECG_NOISE_BROWN_LEVEL = 0.1
 
 # Fraction (0.0-1.0) of each channel's wire dtype range (uint16 -> 0..65535)
 # that the signal's peak-to-peak amplitude occupies, centered at the
@@ -178,7 +188,7 @@ ECG_EXTRA_NOISE_LEVEL = 0.1  # Added noise's peak-to-peak amplitude, as a
 # Live-editable from the panel -- see signal_gen.py's _scale_to_wire().
 # Deliberately tied to the wire dtype's own max rather than an arbitrary
 # plot constant, so it can never produce an out-of-range packet value.
-ECG_AMPLITUDE = 0.8
+ECG_AMPLITUDE = 0.75
 
 SEND_ENABLED = True
 RECEIVE_ENABLED = True

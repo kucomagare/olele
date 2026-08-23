@@ -14,9 +14,10 @@
 #                   ECG_HEART_RATE_STD, ECG_LFHFRATIO, ECG_TI/AI/BI (each a
 #                   P,Q,R,S,T 5-tuple), ECG_RANDOM_SEED.
 #       Noise    -- ECG_NOISE (nk.ecg_simulate()'s own built-in noise) plus
-#                   ECG_EXTRA_NOISE_ENABLED/BETA/LEVEL, a separate colored
-#                   noise signal (nk.signal_noise()) added on top -- see
-#                   signal_gen.py's _simulate_raw().
+#                   five independent colored-noise layers (ECG_NOISE_
+#                   {VIOLET,BLUE,WHITE,PINK,BROWN}_ENABLED/_LEVEL), any
+#                   combination of which can be active simultaneously --
+#                   see signal_gen.py's _simulate_raw()/_NOISE_LAYERS.
 #   PlotControlPanel (bottom bar, one row) -- purely how the plot displays
 #     that signal: PLOT_MIN / PLOT_MAX / PLOT_BUFFER / FRAME_RATE. None of
 #     these affect what's generated or sent on the wire, only what's drawn
@@ -119,14 +120,20 @@ def _add_entry_horizontal(frame, col, label, var, on_commit):
     return col + 2
 
 
-_NOISE_COLORS = {
-    "Violet (-2)": -2,
-    "Blue (-1)": -1,
-    "White (0)": 0,
-    "Pink (1)": 1,
-    "Brown (2)": 2,
-}
-_NOISE_COLOR_BY_BETA = {v: k for k, v in _NOISE_COLORS.items()}
+# (display name, config attr for "enabled", config attr for "level", beta,
+#  short description of that color's character for its tooltip)
+_NOISE_ROWS = (
+    ("Violet", "ECG_NOISE_VIOLET_ENABLED", "ECG_NOISE_VIOLET_LEVEL", -2,
+     "emphasizes high frequencies (hiss-like)"),
+    ("Blue", "ECG_NOISE_BLUE_ENABLED", "ECG_NOISE_BLUE_LEVEL", -1,
+     "emphasizes high frequencies, less sharply than violet"),
+    ("White", "ECG_NOISE_WHITE_ENABLED", "ECG_NOISE_WHITE_LEVEL", 0,
+     "flat across all frequencies"),
+    ("Pink", "ECG_NOISE_PINK_ENABLED", "ECG_NOISE_PINK_LEVEL", 1,
+     "emphasizes low frequencies (rumble/drift-like)"),
+    ("Brown", "ECG_NOISE_BROWN_ENABLED", "ECG_NOISE_BROWN_LEVEL", 2,
+     "emphasizes low frequencies more strongly, closer to real baseline wander"),
+)
 
 _METHODS = ["ecgsyn", "simple"]  # NOT "multileads" -- see config.py's
                                   # ECG_METHOD comment. A readonly combobox
@@ -280,54 +287,69 @@ class SignalControlPanel:
     # ------------------------------------------------------------------
     def _build_noise_tab(self, frame):
         self._ecg_noise = tk.StringVar(value=f"{config.ECG_NOISE:g}")
-        self._extra_noise_enabled = tk.BooleanVar(value=config.ECG_EXTRA_NOISE_ENABLED)
-        self._extra_noise_color = tk.StringVar(
-            value=_NOISE_COLOR_BY_BETA.get(config.ECG_EXTRA_NOISE_BETA, "Pink (1)"))
-        self._extra_noise_level = tk.StringVar(value=f"{config.ECG_EXTRA_NOISE_LEVEL * 100:g}")
 
         row = 0
         row = _add_entry(frame, row, "Built-in noise", self._ecg_noise, self._apply_ecg_noise,
                           help_text="Amplitude of the small random noise the model itself adds "
                                      "while generating the waveform (Laplace-distributed). "
                                      "Baked into the model at generation time -- separate from "
-                                     "the colored noise below, which is a distinct signal added "
-                                     "afterward. 0 = perfectly clean signal.")
+                                     "the colored noise layers below, which are distinct signals "
+                                     "added afterward. 0 = perfectly clean signal.")
 
         ttk.Separator(frame, orient="horizontal").grid(
-            row=row, column=0, columnspan=2, sticky="ew", pady=6)
+            row=row, column=0, columnspan=3, sticky="ew", pady=6)
+        row += 1
+        ttk.Label(frame, text="Colored noise -- any combination can be active:",
+                  foreground="#777", font=("", 8), wraplength=180, justify="left").grid(
+            row=row, column=0, columnspan=3, sticky="w", pady=(0, 4))
         row += 1
 
-        extra_cb = ttk.Checkbutton(frame, text="Add colored noise",
-                                    variable=self._extra_noise_enabled,
-                                    command=self._apply_extra_noise_enabled)
-        extra_cb.grid(row=row, column=0, columnspan=2, sticky="w", pady=2)
-        _Tooltip(extra_cb, "Adds a second, independent noise signal on top of the clean ECG "
-                            "(nk.signal_noise(), not the model's built-in noise above) -- "
-                            "useful for simulating a specific interference character rather "
-                            "than just generic randomness.")
-        row += 1
+        # One row per color: checkbox + level entry, each independently
+        # toggleable and summed together in signal_gen.py's _simulate_raw()
+        # -- this replaced a single enabled/color/level combo that only
+        # allowed one color active at a time.
+        self._noise_vars = {}
+        for name, enabled_attr, level_attr, beta, character in _NOISE_ROWS:
+            enabled_var = tk.BooleanVar(value=getattr(config, enabled_attr))
+            level_var = tk.StringVar(value=f"{getattr(config, level_attr) * 100:g}")
+            self._noise_vars[enabled_attr] = (enabled_var, level_var)
 
-        color_lbl = ttk.Label(frame, text="Color")
-        color_lbl.grid(row=row, column=0, sticky="w", pady=2)
-        color_box = ttk.Combobox(frame, textvariable=self._extra_noise_color,
-                                  values=list(_NOISE_COLORS.keys()), state="readonly", width=10)
-        color_box.grid(row=row, column=1, sticky="e", pady=2)
-        color_box.bind("<<ComboboxSelected>>", self._apply_extra_noise_color)
-        color_help = ("The noise's frequency character (a power-spectrum exponent). Violet/"
-                       "Blue emphasize high frequencies (hiss-like); White is flat across all "
-                       "frequencies; Pink/Brown emphasize low frequencies (rumble/drift-like, "
-                       "closer to real baseline wander).")
-        _Tooltip(color_lbl, color_help)
-        _Tooltip(color_box, color_help)
-        row += 1
+            cb = ttk.Checkbutton(frame, text=name, variable=enabled_var,
+                                  command=lambda a=enabled_attr, v=enabled_var:
+                                  self._apply_noise_enabled(a, v))
+            cb.grid(row=row, column=0, sticky="w", pady=2)
+            _Tooltip(cb, f"beta={beta} -- {character}. Independent of the other colors; "
+                          f"check any combination to layer them together.")
 
-        row = _add_entry(frame, row, "Level (% of ECG ptp)", self._extra_noise_level,
-                          self._apply_extra_noise_level,
-                          help_text="How strong the added noise is, as a percentage of the "
-                                     "ECG signal's OWN peak-to-peak swing -- so a given "
-                                     "percentage means the same thing regardless of heart rate "
-                                     "or Amplitude settings. Only has any effect while \"Add "
-                                     "colored noise\" is checked.")
+            entry = ttk.Entry(frame, textvariable=level_var, width=6)
+            entry.grid(row=row, column=1, sticky="e", pady=2)
+            commit = (lambda a=level_attr, v=level_var: self._apply_noise_level(a, v))
+            entry.bind("<Return>", lambda _e, c=commit: c())
+            entry.bind("<FocusOut>", lambda _e, c=commit: c())
+            level_help = (f"{name} noise's strength, as a percentage of the ECG signal's OWN "
+                           f"peak-to-peak swing -- so a given percentage means the same thing "
+                           f"regardless of heart rate or Amplitude settings, and regardless of "
+                           f"how many other colors are also active. Only has any effect while "
+                           f"{name} is checked.")
+            _Tooltip(entry, level_help)
+
+            ttk.Label(frame, text="%").grid(row=row, column=2, sticky="w")
+            row += 1
+
+    def _apply_noise_enabled(self, attr, var):
+        setattr(config, attr, var.get())
+
+    def _apply_noise_level(self, attr, var):
+        try:
+            value = float(var.get())
+        except ValueError:
+            value = getattr(config, attr) * 100
+        value = max(0.0, min(value, 200.0))  # allow up to 2x the ECG's own
+                                              # ptp per layer for a
+                                              # genuinely noise-dominated
+                                              # signal if wanted
+        var.set(f"{value:g}")
+        setattr(config, attr, value / 100.0)
 
     def _update_rate_status(self):
         effective = config.SEND_RATE * config.CHUNK_SIZE
@@ -451,23 +473,6 @@ class SignalControlPanel:
         value = max(0.0, min(value, 1.0))
         self._ecg_noise.set(f"{value:g}")
         config.ECG_NOISE = value
-
-    def _apply_extra_noise_enabled(self):
-        config.ECG_EXTRA_NOISE_ENABLED = self._extra_noise_enabled.get()
-
-    def _apply_extra_noise_color(self, _event=None):
-        config.ECG_EXTRA_NOISE_BETA = _NOISE_COLORS[self._extra_noise_color.get()]
-
-    def _apply_extra_noise_level(self):
-        try:
-            value = float(self._extra_noise_level.get())
-        except ValueError:
-            value = config.ECG_EXTRA_NOISE_LEVEL * 100
-        value = max(0.0, min(value, 200.0))  # allow up to 2x the ECG's own
-                                              # ptp for a genuinely noise-
-                                              # dominated signal if wanted
-        self._extra_noise_level.set(f"{value:g}")
-        config.ECG_EXTRA_NOISE_LEVEL = value / 100.0
 
     def _pause_label(self):
         return "Resume" if not config.SEND_ENABLED else "Pause"

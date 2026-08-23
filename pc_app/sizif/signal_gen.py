@@ -39,19 +39,33 @@ import struct
 #  (raw array, raw min, raw max))
 _cache = (None, None, None)
 
+# Colored-noise layers: (nk.signal_noise beta, config attr for "enabled",
+# config attr for "level"). Any combination can be active simultaneously
+# (see config.py's ECG_NOISE_*_ENABLED/_LEVEL) -- _simulate_raw() generates
+# each enabled one separately and sums them before adding to the ECG.
+_NOISE_LAYERS = (
+    (-2, "ECG_NOISE_VIOLET_ENABLED", "ECG_NOISE_VIOLET_LEVEL"),
+    (-1, "ECG_NOISE_BLUE_ENABLED", "ECG_NOISE_BLUE_LEVEL"),
+    (0, "ECG_NOISE_WHITE_ENABLED", "ECG_NOISE_WHITE_LEVEL"),
+    (1, "ECG_NOISE_PINK_ENABLED", "ECG_NOISE_PINK_LEVEL"),
+    (2, "ECG_NOISE_BROWN_ENABLED", "ECG_NOISE_BROWN_LEVEL"),
+)
+
 
 def _config_signature():
     """Every config value that affects _simulate_raw()'s output. Compared
     against the last-built signature in _raw_buffers() to decide whether
     the (expensive) simulator needs to re-run. Extend this, not the cache
     tuple shape, when adding a new generation parameter."""
+    noise_layers = tuple(
+        (getattr(config, enabled_attr), getattr(config, level_attr))
+        for _beta, enabled_attr, level_attr in _NOISE_LAYERS
+    )
     return (
         config.ECG_DURATION_S, config.ECG_SAMPLING_RATE, config.ECG_HEART_RATE,
         config.ECG_HEART_RATE_STD, config.ECG_NOISE, config.ECG_METHOD,
         config.ECG_LFHFRATIO, tuple(config.ECG_TI), tuple(config.ECG_AI),
-        tuple(config.ECG_BI), config.ECG_RANDOM_SEED,
-        config.ECG_EXTRA_NOISE_ENABLED, config.ECG_EXTRA_NOISE_BETA,
-        config.ECG_EXTRA_NOISE_LEVEL,
+        tuple(config.ECG_BI), config.ECG_RANDOM_SEED, noise_layers,
     )
 
 
@@ -71,30 +85,39 @@ def _simulate_raw(random_state):
     )
     raw = np.asarray(raw, dtype=np.float64)
 
-    if config.ECG_EXTRA_NOISE_ENABLED:
-        # Distinct colored-noise signal, generated separately and added on
-        # top -- not the same as ECG_NOISE above, which is baked into
-        # nk.ecg_simulate() itself. Scaled relative to the ECG's own
-        # peak-to-peak so ECG_EXTRA_NOISE_LEVEL means the same thing (e.g.
-        # "10% of the signal") regardless of heart rate/amplitude settings.
-        noise = np.asarray(
-            nk.signal_noise(
-                duration=config.ECG_DURATION_S,
-                sampling_rate=config.ECG_SAMPLING_RATE,
-                beta=config.ECG_EXTRA_NOISE_BETA,
-                random_state=random_state,
-            ),
-            dtype=np.float64,
-        )
-        # signal_noise()'s length matches duration*sampling_rate exactly in
-        # practice, but truncate defensively rather than assume it always
-        # will.
-        n = min(len(raw), len(noise))
-        raw, noise = raw[:n], noise[:n]
-        raw_ptp = raw.max() - raw.min()
-        noise_ptp = noise.max() - noise.min()
-        if noise_ptp > 0 and raw_ptp > 0:
-            raw = raw + noise * (config.ECG_EXTRA_NOISE_LEVEL * raw_ptp / noise_ptp)
+    # raw_ptp is measured on the CLEAN signal, once, before any noise is
+    # added -- so each layer's _LEVEL keeps meaning "N% of the clean ECG's
+    # own swing" regardless of how many other layers are also active,
+    # instead of compounding against an already-noisy signal.
+    raw_ptp = raw.max() - raw.min()
+    if raw_ptp > 0:
+        total_noise = np.zeros_like(raw)
+        for i, (beta, enabled_attr, level_attr) in enumerate(_NOISE_LAYERS):
+            if not getattr(config, enabled_attr):
+                continue
+            level = getattr(config, level_attr)
+            if level <= 0:
+                continue
+            # Distinct random_state per layer (and offset from the ECG's
+            # own seed/channel-2 seed) so multiple simultaneous layers --
+            # or the same color on both channels -- don't correlate.
+            noise = np.asarray(
+                nk.signal_noise(
+                    duration=config.ECG_DURATION_S,
+                    sampling_rate=config.ECG_SAMPLING_RATE,
+                    beta=beta,
+                    random_state=random_state * 1000 + i,
+                ),
+                dtype=np.float64,
+            )
+            # signal_noise()'s length matches duration*sampling_rate exactly
+            # in practice, but pad/truncate defensively rather than assume
+            # it always will.
+            n = min(len(raw), len(noise))
+            noise_ptp = noise[:n].max() - noise[:n].min()
+            if noise_ptp > 0:
+                total_noise[:n] += noise[:n] * (level * raw_ptp / noise_ptp)
+        raw = raw + total_noise
 
     return raw, raw.min(), raw.max()
 
