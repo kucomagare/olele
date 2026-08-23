@@ -1,22 +1,40 @@
 # pc_app/sizif
 
 PC-side companion app for the "sizif" hardware/firmware version: a Python
-client (synthetic signal generator + live plot) and a small C++ relay
-server that sits between the Python client and the board.
+client (ECG signal generator + live plot + runtime control panel) and a
+small C++ relay server that sits between the Python client and the board.
 
 ```
 python_client.py     entry point -- main() only, wires the pieces below together
 config.py             all tunable knobs (SEND_RATE, CHUNK_SIZE, plot window, ...)
 packet_format.py       loads packet_format.json, builds numpy dtypes, PacketReceiver
-signal_gen.py          synthetic test-signal generation + packet building
+signal_gen.py          ECG signal generation (neurokit2) + packet building
 plot.py                DualPlot (matplotlib, blitted + envelope-decimated)
+control_panel.py       Tkinter panel packed beside the plot -- live SEND_RATE,
+                      CHUNK_SIZE, heart rate, send/receive toggles
 net.py                 owns the socket: connect, send/receive loop, auto-reconnect
 tcp_server_app.cpp    C++ relay — forwards raw bytes between whichever two
-                      peers are connected (identifies the board by source IP)
+                      peers are connected (identifies the board by source IP);
+                      a 127.0.0.1 connection instead gets echoed straight back
+                      to itself, no second peer needed (BOARD_CONNECTED=False)
 build/                empty in git; venv, compiled binary, run/logs all land here
 build.sh              one-time/incremental setup (compile server, create venv)
 system.sh             day-to-day start/stop/status/logs for both processes
 ```
+
+## Control panel
+
+`control_panel.py`'s `ControlPanel` is packed as a sibling of the plot's
+canvas widget inside the same Tk window `plot.py`'s `DualPlot` creates (see
+its `__init__`) — no second Tk root/mainloop. It lets `SEND_RATE`,
+`CHUNK_SIZE`, `ECG_HEART_RATE`, `SEND_ENABLED` and `RECEIVE_ENABLED` be
+changed while the app is running: it writes straight onto `config`'s
+module attributes, and `net.py`/`signal_gen.py` read those live (`import
+config; config.SEND_RATE`, not a value frozen at import time), so a change
+takes effect within one send cycle. `SEND_RATE × CHUNK_SIZE` is the
+effective ECG playback rate in samples/s — the panel shows it next to
+`ECG_SAMPLING_RATE` so you can see whether you're at real-time speed or
+scrubbed away from it.
 
 ## Plot performance
 
@@ -60,8 +78,12 @@ skips whatever's already up to date.
 ## 2. Before running
 
 Open `config.py` and check `BOARD_CONNECTED`:
-- `True` → connects over the real board network (`192.168.1.100`)
-- `False` → loops back to `tcp_server_app` on this machine, no board needed
+- `True` → connects over the real board network (`192.168.1.100`); requires
+  the actual board, `tcp_server_app` forwards to/from it (see `PCB_IP` in
+  `tcp_server_app.cpp`)
+- `False` → connects to `tcp_server_app` on `127.0.0.1`, which echoes every
+  packet straight back to the sender — no board needed, and the data still
+  round-trips through the real relay/wire path (not a Python-side shortcut)
 
 Confirmed-good defaults for the old single-channel protocol: `SEND_RATE=220`,
 `CHUNK_SIZE=2000` (see repo history/notes for why — this was the stable

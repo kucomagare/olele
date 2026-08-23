@@ -140,6 +140,21 @@ void handle_client(int client_fd, const std::string &ip, int port)
 
         std::lock_guard<std::mutex> lock(fd_mutex);
 
+        if (ip == "127.0.0.1") {
+            // Loopback self-test: echo straight back to the sender instead
+            // of routing through a PCB/Python partner. This is what
+            // BOARD_CONNECTED=False actually needs -- the wire path (this
+            // relay's framing/TCP_NODELAY handling) still round-trips, it
+            // just doesn't require a second peer, since there's no board
+            // to be one.
+            if (!send_all(client_fd, out_buf.data(), out_buf.size())) {
+                std::cerr << "Loopback echo failed for " << ip << ":" << port
+                          << ", dropping connection\n";
+                break;
+            }
+            continue;
+        }
+
         if (client_fd == pcb_fd && python_fd != -1) {
             if (!send_all(python_fd, out_buf.data(), out_buf.size())) {
                 std::cerr << "Forward PCB -> Python stalled/failed, dropping Python connection\n";

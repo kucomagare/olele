@@ -1,5 +1,6 @@
-# Live dual-channel matplotlib plot (TX vs RX, ch1/ch2). Matplotlib-only
-# concerns live here -- no networking, no packet parsing.
+# Live dual-channel matplotlib plot: two stacked subplots (ch1, ch2), each
+# showing its in/out (sent/received) traces. Matplotlib-only concerns live
+# here -- no networking, no packet parsing.
 #
 # Two things here exist for performance, both measured on 2026-08-17 with
 # SEND_RATE=800 / CHUNK_SIZE=500 (400k samples/s):
@@ -24,6 +25,7 @@ import matplotlib.pyplot as plt
 
 from config import PLOT_MIN, PLOT_MAX, PLOT_ENVELOPE_BLOCKS, PLOT_MODE
 from packet_format import CH1_DTYPE, CH2_DTYPE
+from control_panel import ControlPanel
 
 _SCOPE = (PLOT_MODE == "scope")
 
@@ -54,29 +56,42 @@ class DualPlot:
         self.buffer_size = buffer_size
 
         plt.ion()
-        self.fig, self.ax = plt.subplots(1, 1)
+        self.fig, (self.ax1, self.ax2) = plt.subplots(2, 1, sharex=True)
         plt.show(block=False)
+
+        # Pack the control panel as a sibling of the canvas widget inside
+        # the same Tk window TkAgg already created for the figure -- no
+        # second Tk root/mainloop, just another widget in the manager's
+        # window.
+        tk_window = self.fig.canvas.manager.window
+        self.control_panel = ControlPanel(tk_window)
+        self.control_panel.frame.pack(side="right", fill="y")
 
         self.ch1_in  = np.zeros(buffer_size, dtype=CH1_DTYPE)
         self.ch2_in  = np.zeros(buffer_size, dtype=CH2_DTYPE)
         self.ch1_out = np.zeros(buffer_size, dtype=CH1_DTYPE)
         self.ch2_out = np.zeros(buffer_size, dtype=CH2_DTYPE)
 
-        self.line_ch1_in,  = self.ax.plot(self.ch1_in,  color="blue",       label="ch1 in",  animated=True)
-        self.line_ch2_in,  = self.ax.plot(self.ch2_in,  color="dodgerblue", label="ch2 in",  animated=True, linestyle="--")
-        self.line_ch1_out, = self.ax.plot(self.ch1_out, color="red",        label="ch1 out", animated=True)
-        self.line_ch2_out, = self.ax.plot(self.ch2_out, color="orangered",  label="ch2 out", animated=True, linestyle="--")
-        self._lines = (self.line_ch1_in, self.line_ch2_in,
-                       self.line_ch1_out, self.line_ch2_out)
+        self.line_ch1_in,  = self.ax1.plot(self.ch1_in,  color="blue", label="in",  animated=True)
+        self.line_ch1_out, = self.ax1.plot(self.ch1_out, color="red",  label="out", animated=True)
+        self.line_ch2_in,  = self.ax2.plot(self.ch2_in,  color="blue", label="in",  animated=True)
+        self.line_ch2_out, = self.ax2.plot(self.ch2_out, color="red",  label="out", animated=True)
+        self._lines_ax1 = (self.line_ch1_in, self.line_ch1_out)
+        self._lines_ax2 = (self.line_ch2_in, self.line_ch2_out)
 
-        self.ax.set_title("Streaming Input & Output (ch1/ch2)")
-        self.ax.legend()
-        self.ax.set_ylim(PLOT_MIN, PLOT_MAX)
+        self.ax1.set_title("Channel 1")
+        self.ax2.set_title("Channel 2")
+        for ax in (self.ax1, self.ax2):
+            ax.legend()
+            ax.set_ylim(PLOT_MIN, PLOT_MAX)
+        self.fig.tight_layout()
 
-        # Cache the static background once, then re-cache whenever
-        # matplotlib does a full draw of its own (resize, toolbar zoom,
-        # first show) -- otherwise blits would paint onto a stale image.
-        self._bg = None
+        # Cache each axis's static background separately (their bboxes
+        # differ), then re-cache whenever matplotlib does a full draw of
+        # its own (resize, toolbar zoom, first show) -- otherwise blits
+        # would paint onto a stale image.
+        self._bg1 = None
+        self._bg2 = None
         self.fig.canvas.mpl_connect("draw_event", self._on_draw)
         self.fig.canvas.draw()
 
@@ -86,7 +101,8 @@ class DualPlot:
         self._dirty = False
 
     def _on_draw(self, _event):
-        self._bg = self.fig.canvas.copy_from_bbox(self.ax.bbox)
+        self._bg1 = self.fig.canvas.copy_from_bbox(self.ax1.bbox)
+        self._bg2 = self.fig.canvas.copy_from_bbox(self.ax2.bbox)
 
     @staticmethod
     def _rolled(buf, values):
@@ -159,13 +175,20 @@ class DualPlot:
     def refresh(self):
         self.sync()
         canvas = self.fig.canvas
-        if self._bg is None:
+        if self._bg1 is None or self._bg2 is None:
             canvas.draw()
             return
-        canvas.restore_region(self._bg)
-        for line in self._lines:
-            self.ax.draw_artist(line)
-        canvas.blit(self.ax.bbox)
+
+        canvas.restore_region(self._bg1)
+        for line in self._lines_ax1:
+            self.ax1.draw_artist(line)
+        canvas.blit(self.ax1.bbox)
+
+        canvas.restore_region(self._bg2)
+        for line in self._lines_ax2:
+            self.ax2.draw_artist(line)
+        canvas.blit(self.ax2.bbox)
+
         # flush_events() pumps the GUI event loop (keeps the window
         # responsive). The old plt.pause(0.001) that used to be here did
         # the same thing plus a redundant redraw, and is a known CPU sink.

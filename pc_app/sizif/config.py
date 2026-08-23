@@ -4,13 +4,18 @@
 # values you actually hand-tune during testing aren't buried in the
 # middle of a longer script).
 
-BOARD_CONNECTED = True  # True: connect over the real board network (192.168.1.100)
-                        # False: loop back to the C++ server on this machine, no board needed
+BOARD_CONNECTED = True  # True: connect over the real board network (192.168.1.100) --
+                        # requires the actual board, tcp_server_app forwards to/from it.
+                        # False: connect to tcp_server_app on 127.0.0.1, which echoes
+                        # every packet straight back to the sender (see the ip ==
+                        # "127.0.0.1" branch in tcp_server_app.cpp) -- no board needed,
+                        # exercises the real wire path end to end.
 
 HOST = "192.168.1.100" if BOARD_CONNECTED else "127.0.0.1"
 PORT = 5001
 
-PLOT_BUFFER = 1000
+PLOT_BUFFER = 1500  # 3 s window at ECG_SAMPLING_RATE=500 Hz -- a few
+                    # P-QRS-T complexes visible at once.
 
 # "scope"    -- show the most recent PLOT_BUFFER raw samples, refreshed at
 #               FRAME_RATE. Short window, full waveform detail. This is
@@ -19,11 +24,13 @@ PLOT_BUFFER = 1000
 #               Long window (PLOT_BUFFER/(2*SEND_RATE) seconds), shows
 #               amplitude over time but not shape.
 #
-# At 400k samples/s you cannot have both: PLOT_BUFFER samples of raw signal
-# is 2.5 ms of real time. "scope" shows that 2.5 ms properly; "envelope"
-# covers ~0.6 s but collapses each packet to its extremes, which for a
-# waveform whose period is far shorter than CHUNK_SIZE just draws a solid
-# band between min and max.
+# At real ECG rates (SEND_RATE*CHUNK_SIZE ~ 500 samples/s) "scope" is the
+# right choice -- it's what shows ECG morphology (P-QRS-T shape). The
+# aliasing problem "envelope" mode was built for only bites at the old
+# ~400k samples/s stress-test rate: PLOT_BUFFER samples of raw signal
+# there was 2.5 ms of real time, so "scope" showed only that sliver while
+# "envelope" covered ~0.6 s at the cost of collapsing each packet to its
+# extremes.
 PLOT_MODE = "scope"
 
 # Each received chunk is reduced to this many min/max pairs before being
@@ -48,59 +55,59 @@ FRAME_RATE = 24   # Plot redraws/s. Costs real CPU: plot.py's refresh()
                   # limit), so this is a UI-smoothness knob, not a
                   # performance one -- lower it only if you need the CPU.
                   # The proper fix is blitting in plot.py.
-# SEND_RATE (packets/s) x CHUNK_SIZE (samples/packet) is the offered load.
 # Wire cost is 4 + 6*CHUNK_SIZE bytes per packet (ts+ch1+ch2, 2 bytes each).
 #
-# MEASURED CEILING (hardware, 2026-08-17, CHUNK_SIZE=500):
+# HARDWARE CEILING, for reference (measured 2026-08-17, CHUNK_SIZE=500,
+# full detail in research_info/architecture-roadmap.md): the board plateaus
+# flat at ~825 pkt/s = 412,500 samples/s = 2.48 MB/s, set by per-sample
+# AXI-Lite round trips in axi_process_sample(). Overshooting it degrades
+# gracefully (resyncs, throughput loss) rather than corrupting data -- see
+# the firmware's ring-overflow/resync handling -- but there's no reason to
+# get near it at real ECG rates; it only matters if SEND_RATE/CHUNK_SIZE
+# get cranked up well past real-time.
 #
-#   ~825 pkt/s = 412,500 samples/s = 2.48 MB/s
+# SEND_RATE x CHUNK_SIZE is the effective ECG playback rate (samples/s)
+# pulled out of the simulated buffer -- see ECG_SAMPLING_RATE below. Both
+# fields are live-editable from the control panel at runtime (net.py and
+# signal_gen.py read config.SEND_RATE / config.CHUNK_SIZE directly rather
+# than a value frozen at import time), so these are just the startup
+# defaults, not a ceiling.
 #
-# It plateaus flat at 822-827 while the PC offers more, so this is the
-# board's real limit, not a configured rate. Per packet the board spends
-# ~1190 us:
+# Defaults below are chosen so SEND_RATE * CHUNK_SIZE == ECG_SAMPLING_RATE
+# (50 * 10 = 500) -- i.e. real-world speed: one wall-clock second of stream
+# is one second of ECG. Detuning away from that (panel or here) just
+# scrubs the playback faster/slower; it's not a wire-format constraint.
 #
-#   ~874 us (73%)  axi_process_sample(): 500 samples x 4 AXI-Lite
-#                  transactions x ~437 ns each (~22 cycles @ 50 MHz)
-#   ~316 us (27%)  byte-swapping 500 records, memcpy, ring ops, tcp_write
-#
-# So the ceiling is set by the per-sample AXI round trips. Getting past it
-# means batching (AXI-Stream/DMA, or a peripheral that takes several
-# samples per transaction) -- a block-design change, not tuning. TCP
-# buffers are NOT the limit: TCP_SND_BUF/TCP_WND are already 65535 and the
-# main loop idles at ~737k passes/s.
-#
-# WARNING -- overshooting the ceiling currently wedges the board. Ring
-# overflow triggers a resync (framing stays intact, no corruption), but
-# each reconnect logs ~68 bytes and comm_log_flush() blocks on a 115200
-# baud UART: 5.9 ms of dead CPU per message. That stalls the loop, which
-# causes more overflow, which logs more -- a livelock that drops the board
-# to ~160 loops/s and 0 pkt/s until the sender backs off. Fix pending
-# (bounded log budget in comm_log). Until then, stay under the ceiling.
-#
-# Historical note: figures here before this date (a "146 pkt/s / 0.44 MB/s
-# ceiling", and a claim that bigger CHUNK_SIZE was worse) were measured
-# with a broken stats clock and were wrong by 3x. Any conclusion drawn
-# from them -- including the CHUNK_SIZE 500-vs-1000 comparison -- is void.
-SEND_RATE = 800   # ~97% of the measured 825 pkt/s ceiling, i.e. running
-                  # deliberately close to the limit. That is now safe:
-                  # exceeding it costs occasional resyncs and throughput,
-                  # not a wedged board -- verified at 1200 pkt/s, where it
-                  # holds ~815 and recovers by itself once the rate drops.
-                  # Drop to ~700 if you want margin for an unattended run.
+# Upper bound on CHUNK_SIZE is MAX_CHUNK_SIZE below, not TCP_SND_BUF: at
+# 65535 the old (TCP_SND_BUF-4)/6 = 1364 limit no longer binds. Historical
+# note: this pipeline was previously stress-tested at SEND_RATE=800 /
+# CHUNK_SIZE=500 (~412k samples/s) against the AXI-Lite ceiling documented
+# in research_info/architecture-roadmap.md -- that's a different exercise
+# from streaming real ECG and is no longer the default.
+SEND_RATE = 50
+CHUNK_SIZE = 10
 
-CHUNK_SIZE = 500  # Upper bound is now MAX_PAYLOAD_SAMPLES (2000, firmware
-                  # + relay), not TCP_SND_BUF: at 65535 the old
-                  # (TCP_SND_BUF-4)/6 = 1364 limit no longer binds.
-TRIANGLE_PERIOD = 50
+MAX_CHUNK_SIZE = 2000  # mirrors MAX_SAMPLES in tcp_server_app.cpp and
+                        # MAX_PAYLOAD_SAMPLES in lwip_comm_client_raw.c --
+                        # the wire/firmware hard ceiling. The control panel
+                        # clamps to this.
 
-AMP_BASE = 2000
-AMP_OSC  = 500
-AMP_FREQ = 0.2
+# ECG signal generation (neurokit2). ch1/ch2 are each an independent
+# nk.ecg_simulate() call, cached and re-sliced per packet -- see
+# signal_gen.py for how SEND_RATE/CHUNK_SIZE map onto this buffer.
+ECG_SAMPLING_RATE = 500   # Hz, native rate of the simulated buffer. A
+                          # standard clinical rate (compare 250-360 Hz for
+                          # older Holter/MIT-BIH gear, up to 1000 Hz for
+                          # research-grade capture).
+ECG_HEART_RATE = 70       # bpm. Live-editable from the panel; signal_gen.py
+                          # regenerates the buffer when this changes.
+ECG_DURATION_S = 60       # seconds of buffer before the stream loops.
+ECG_NOISE = 0.01          # nk.ecg_simulate's amplitude-relative noise level.
 
 SEND_ENABLED = True
 RECEIVE_ENABLED = True
 
 PLOT_MIN = 0
-PLOT_MAX = 5500
+PLOT_MAX = 3000
 
 RECONNECT_DELAY = 1.0  # seconds between reconnect attempts after a dropped/failed connection

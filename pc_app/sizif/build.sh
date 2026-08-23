@@ -26,15 +26,18 @@ else
 fi
 
 # --- Python venv ---
+# pip install always runs (not just on first creation) so re-running this
+# script after adding a new dependency here installs it into the existing
+# venv instead of silently doing nothing.
 VENV_DIR="$BUILD_DIR/venv"
 if [[ ! -d "$VENV_DIR" ]]; then
     echo "Creating venv..."
     python3 -m venv "$VENV_DIR"
     "$VENV_DIR/bin/pip" install --upgrade pip
-    "$VENV_DIR/bin/pip" install numba numpy matplotlib scipy pyqt5
 else
     echo "venv already exists at $VENV_DIR"
 fi
+"$VENV_DIR/bin/pip" install numba numpy matplotlib scipy pyqt5 neurokit2
 
 echo
 echo "Done. Run ./system.sh start to launch just the PC app, or"

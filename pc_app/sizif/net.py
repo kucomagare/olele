@@ -10,7 +10,8 @@ import select
 import time
 import queue
 
-from config import HOST, PORT, SEND_RATE, CHUNK_SIZE, SEND_ENABLED, RECEIVE_ENABLED, RECONNECT_DELAY
+import config
+from config import HOST, PORT, RECONNECT_DELAY
 from packet_format import PacketReceiver
 from signal_gen import generate_signal_packet
 
@@ -66,7 +67,6 @@ def _run_session(sock, plot_in_q, plot_out_q, stop_event):
     receiver = PacketReceiver()
 
     counter = 0
-    send_period = 1.0 / SEND_RATE
     next_send = time.perf_counter()
 
     packets_sent = 0
@@ -75,7 +75,7 @@ def _run_session(sock, plot_in_q, plot_out_q, stop_event):
     while not stop_event.is_set():
         now = time.perf_counter()
 
-        if SEND_ENABLED and now >= next_send:
+        if config.SEND_ENABLED and now >= next_send:
             try:
                 packet, ch1, ch2 = generate_signal_packet(counter, now)
                 send_all(sock, packet)
@@ -90,8 +90,11 @@ def _run_session(sock, plot_in_q, plot_out_q, stop_event):
                 print(f"[net] Connection lost while sending: {e}, reconnecting...")
                 return
 
-            counter += CHUNK_SIZE
-            next_send += send_period
+            counter += config.CHUNK_SIZE
+            # Read live each cycle (not cached once before the loop) so a
+            # SEND_RATE change from the control panel takes effect on the
+            # very next send.
+            next_send += 1.0 / config.SEND_RATE
 
         t = time.time()
         if t - last_report >= 1.0:
@@ -99,7 +102,7 @@ def _run_session(sock, plot_in_q, plot_out_q, stop_event):
             packets_sent = 0
             last_report = t
 
-        if RECEIVE_ENABLED:
+        if config.RECEIVE_ENABLED:
             try:
                 data = sock.recv(4096)
                 if not data:
