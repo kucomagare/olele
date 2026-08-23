@@ -14,8 +14,20 @@ BOARD_CONNECTED = True  # True: connect over the real board network (192.168.1.1
 HOST = "192.168.1.100" if BOARD_CONNECTED else "127.0.0.1"
 PORT = 5001
 
-PLOT_BUFFER = 1500  # 3 s window at ECG_SAMPLING_RATE=500 Hz -- a few
-                    # P-QRS-T complexes visible at once.
+PLOT_BUFFER = 500  # Rolling window length, in samples. Live-editable from
+                    # the panel -- plot.py reallocates the four rolling
+                    # buffers and re-fits the x-axis when this changes,
+                    # keeping the most recent samples from the old buffers.
+                    # At ECG_SAMPLING_RATE=500 Hz, 500 samples = 1 s of ECG.
+
+PLOT_MIN = 0        # Y-axis display range, both channels. Live-editable
+PLOT_MAX = 65535    # from the panel -- purely a *view* (what part of the
+                    # signal is visible), independent of ECG_AMPLITUDE
+                    # (config.py below), which controls how much of the
+                    # wire dtype's range (uint16 -> 0..65535) the
+                    # *generated* signal actually occupies. Defaults to the
+                    # full uint16 range so nothing is clipped from view;
+                    # narrow it to zoom into a portion of the signal.
 
 # "scope"    -- show the most recent PLOT_BUFFER raw samples, refreshed at
 #               FRAME_RATE. Short window, full waveform detail. This is
@@ -47,14 +59,16 @@ PLOT_MODE = "scope"
 # plot work); note CHUNK_SIZE samples span only CHUNK_SIZE/sample-rate of
 # real time, so past a point you are magnifying noise.
 PLOT_ENVELOPE_BLOCKS = 1
-FRAME_RATE = 24   # Plot redraws/s. Costs real CPU: plot.py's refresh()
-                  # does a full canvas.draw(), ~20-40 ms each on TkAgg, so
-                  # 24 fps is ~60% of a core. Measured 2026-08-17: dropping
-                  # this to 2 took python_client from 103% to 36% CPU. It
-                  # did NOT change throughput (that was a firmware-side
-                  # limit), so this is a UI-smoothness knob, not a
-                  # performance one -- lower it only if you need the CPU.
-                  # The proper fix is blitting in plot.py.
+FRAME_RATE = 24   # Plot redraws/s. Live-editable from the panel --
+                  # python_client.py reads config.FRAME_RATE each loop
+                  # cycle rather than a value frozen at import time.
+                  # Costs real CPU: even with blitting, refresh() still
+                  # does real canvas work every frame. Measured
+                  # 2026-08-17 (pre-blitting): dropping this to 2 took
+                  # python_client from 103% to 36% CPU, with zero change
+                  # to throughput (that was a firmware-side limit) -- this
+                  # is a UI-smoothness knob, not a performance one, lower
+                  # it only if you need the CPU.
 # Wire cost is 4 + 6*CHUNK_SIZE bytes per packet (ts+ch1+ch2, 2 bytes each).
 #
 # HARDWARE CEILING, for reference (measured 2026-08-17, CHUNK_SIZE=500,
@@ -104,10 +118,15 @@ ECG_HEART_RATE = 70       # bpm. Live-editable from the panel; signal_gen.py
 ECG_DURATION_S = 60       # seconds of buffer before the stream loops.
 ECG_NOISE = 0.01          # nk.ecg_simulate's amplitude-relative noise level.
 
+# Fraction (0.0-1.0) of each channel's wire dtype range (uint16 -> 0..65535)
+# that the signal's peak-to-peak amplitude occupies, centered at the
+# midpoint. 1.0 -> spans the full 0..65535; 0.0 -> flat line at 32767.
+# Live-editable from the panel -- see signal_gen.py's _scale_to_wire().
+# Deliberately tied to the wire dtype's own max rather than an arbitrary
+# plot constant, so it can never produce an out-of-range packet value.
+ECG_AMPLITUDE = 0.8
+
 SEND_ENABLED = True
 RECEIVE_ENABLED = True
-
-PLOT_MIN = 0
-PLOT_MAX = 3000
 
 RECONNECT_DELAY = 1.0  # seconds between reconnect attempts after a dropped/failed connection

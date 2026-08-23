@@ -22,10 +22,12 @@ import numpy as np
 import matplotlib
 matplotlib.use("TkAgg")
 import matplotlib.pyplot as plt
+from matplotlib.ticker import FuncFormatter
 
-from config import PLOT_MIN, PLOT_MAX, PLOT_ENVELOPE_BLOCKS, PLOT_MODE
+import config
+from config import PLOT_ENVELOPE_BLOCKS, PLOT_MODE
 from packet_format import CH1_DTYPE, CH2_DTYPE
-from control_panel import ControlPanel
+from control_panel import SignalControlPanel, PlotControlPanel
 
 _SCOPE = (PLOT_MODE == "scope")
 
@@ -59,23 +61,56 @@ class DualPlot:
         self.fig, (self.ax1, self.ax2) = plt.subplots(2, 1, sharex=True)
         plt.show(block=False)
 
-        # Pack the control panel as a sibling of the canvas widget inside
+        # Pack both control panels as siblings of the canvas widget inside
         # the same Tk window TkAgg already created for the figure -- no
-        # second Tk root/mainloop, just another widget in the manager's
-        # window.
+        # second Tk root/mainloop, just two more widgets in the manager's
+        # window. Layout: PlotControlPanel spans the full width as one row
+        # along the bottom; SignalControlPanel is a column on the right;
+        # the canvas+toolbar fill the remaining top-left area.
+        #
+        # Tk pack quirk that matters here: a side="top"/"bottom" slab (the
+        # canvas/toolbar, packed by plt.show() above) always reserves the
+        # FULL WIDTH of the cavity regardless of fill/expand, and a
+        # side="left"/"right" slab always reserves the FULL HEIGHT --
+        # packing our panels *after* the canvas/toolbar already claimed
+        # the whole window doesn't place them around it, it places them in
+        # whatever sliver is left (verified empirically: they ended up
+        # stacked underneath, not surrounding it). Fix: pop the canvas and
+        # toolbar out, pack our panels first in the order that matters --
+        # PlotControlPanel (bottom, full width) *before*
+        # SignalControlPanel (right) so the bottom bar isn't cut short by
+        # the right column already having claimed part of the width --
+        # then restore canvas+toolbar with their original pack config; they
+        # land in the remaining top-left area.
         tk_window = self.fig.canvas.manager.window
-        self.control_panel = ControlPanel(tk_window)
-        self.control_panel.frame.pack(side="right", fill="y")
+        existing = [(child, child.pack_info()) for child in tk_window.pack_slaves()]
+        for child, _ in existing:
+            child.pack_forget()
+
+        self.plot_control_panel = PlotControlPanel(tk_window)
+        self.plot_control_panel.frame.pack(side="bottom", fill="x")
+        self.signal_control_panel = SignalControlPanel(tk_window)
+        self.signal_control_panel.frame.pack(side="right", fill="y")
+
+        for child, info in existing:
+            info["in_"] = info.pop("in")
+            child.pack(**info)
 
         self.ch1_in  = np.zeros(buffer_size, dtype=CH1_DTYPE)
         self.ch2_in  = np.zeros(buffer_size, dtype=CH2_DTYPE)
         self.ch1_out = np.zeros(buffer_size, dtype=CH1_DTYPE)
         self.ch2_out = np.zeros(buffer_size, dtype=CH2_DTYPE)
 
-        self.line_ch1_in,  = self.ax1.plot(self.ch1_in,  color="blue", label="in",  animated=True)
-        self.line_ch1_out, = self.ax1.plot(self.ch1_out, color="red",  label="out", animated=True)
-        self.line_ch2_in,  = self.ax2.plot(self.ch2_in,  color="blue", label="in",  animated=True)
-        self.line_ch2_out, = self.ax2.plot(self.ch2_out, color="red",  label="out", animated=True)
+        # drawstyle="steps-mid": each sample renders as a flat segment
+        # centered on its x position instead of a straight line sloping
+        # into the next sample -- no interpolation is happening either
+        # way (see prior discussion), this just makes each individual
+        # sample's value visually distinct rather than implying a value in
+        # between two samples that was never actually measured/sent.
+        self.line_ch1_in,  = self.ax1.plot(self.ch1_in,  color="blue", label="in",  animated=True, drawstyle="steps-mid")
+        self.line_ch1_out, = self.ax1.plot(self.ch1_out, color="red",  label="out", animated=True, drawstyle="steps-mid")
+        self.line_ch2_in,  = self.ax2.plot(self.ch2_in,  color="blue", label="in",  animated=True, drawstyle="steps-mid")
+        self.line_ch2_out, = self.ax2.plot(self.ch2_out, color="red",  label="out", animated=True, drawstyle="steps-mid")
         self._lines_ax1 = (self.line_ch1_in, self.line_ch1_out)
         self._lines_ax2 = (self.line_ch2_in, self.line_ch2_out)
 
@@ -83,7 +118,25 @@ class DualPlot:
         self.ax2.set_title("Channel 2")
         for ax in (self.ax1, self.ax2):
             ax.legend()
-            ax.set_ylim(PLOT_MIN, PLOT_MAX)
+            ax.set_ylim(config.PLOT_MIN, config.PLOT_MAX)
+            # x-data stays the plain buffer index (0..buffer_size-1, oldest
+            # to newest) -- only the tick labels are reinterpreted as time,
+            # via ECG_SAMPLING_RATE (live-editable from the panel). Avoids
+            # touching the rolling-buffer/blit code below, which only ever
+            # calls set_ydata().
+            #
+            # Deliberately NOT SEND_RATE*CHUNK_SIZE: each buffer slot is one
+            # sample pulled straight from the raw ECG buffer (signal_gen.py),
+            # so consecutive slots are always 1/ECG_SAMPLING_RATE seconds
+            # apart *in ECG time* -- SEND_RATE*CHUNK_SIZE only sets wall-clock
+            # playback speed (how fast that ECG time is delivered), which only
+            # equals ECG_SAMPLING_RATE at the 1x real-time default. Using it
+            # here gave a correct-looking axis only by coincidence at that
+            # default and a wrong one (e.g. wrong R-R spacing for the
+            # configured heart rate) at any other SEND_RATE/CHUNK_SIZE.
+            ax.xaxis.set_major_formatter(FuncFormatter(self._format_time_tick))
+        self.ax1.set_xlim(0, buffer_size - 1)
+        self.ax2.set_xlabel("Time (s)")
         self.fig.tight_layout()
 
         # Cache each axis's static background separately (their bboxes
@@ -95,10 +148,49 @@ class DualPlot:
         self.fig.canvas.mpl_connect("draw_event", self._on_draw)
         self.fig.canvas.draw()
 
-        # Deferred-update state (see update_input/sync).
-        self._pending_in = None
-        self._pending_out = None
+        # ECG sampling rate (x-axis tick labels), y-limits, and buffer size
+        # as of the last full draw -- see refresh(). All three are live-
+        # editable from the panel but only take visible effect on a full
+        # canvas.draw(), since blitting only redraws line artists, not
+        # axes/ticks/limits baked into the cached background.
+        self._last_time_rate = config.ECG_SAMPLING_RATE
+        self._last_ylim = (config.PLOT_MIN, config.PLOT_MAX)
+        self._last_buffer_size = buffer_size
+
+        # True when the buffers hold data set_ydata() hasn't been given
+        # yet -- see sync().
         self._dirty = False
+
+    @staticmethod
+    def _format_time_tick(x, _pos):
+        rate = config.ECG_SAMPLING_RATE
+        return f"{x / rate:.2f}" if rate > 0 else ""
+
+    def _resize_buffers(self, new_size):
+        """Reallocate the four rolling buffers to `new_size`, keeping the
+        most recent samples from the old ones (zero-padded on the left if
+        growing). Must also update the lines' x-data -- Line2D requires
+        matching x/y lengths, and the old x-data (0..old_size-1) was fixed
+        at plot() time in __init__."""
+        def resized(old):
+            new = np.zeros(new_size, dtype=old.dtype)
+            keep = min(new_size, len(old))
+            if keep:
+                new[-keep:] = old[-keep:]
+            return new
+
+        self.ch1_in  = resized(self.ch1_in)
+        self.ch2_in  = resized(self.ch2_in)
+        self.ch1_out = resized(self.ch1_out)
+        self.ch2_out = resized(self.ch2_out)
+        self.buffer_size = new_size
+
+        x = np.arange(new_size)
+        self.line_ch1_in.set_data(x, self.ch1_in)
+        self.line_ch1_out.set_data(x, self.ch1_out)
+        self.line_ch2_in.set_data(x, self.ch2_in)
+        self.line_ch2_out.set_data(x, self.ch2_out)
+        self.ax1.set_xlim(0, new_size - 1)
 
     def _on_draw(self, _event):
         self._bg1 = self.fig.canvas.copy_from_bbox(self.ax1.bbox)
@@ -121,49 +213,45 @@ class DualPlot:
         buf[-n:] = values
         return buf
 
-    # update_*() are called at PACKET rate (800/s), refresh() at FRAME rate
-    # (24/s). So these do the cheapest possible thing and leave set_ydata()
-    # to sync(), which runs once per frame -- pushing 1000-point arrays into
-    # the artists 800 times a second was 33x more work than the display
-    # could ever show, and was the bulk of the remaining plot-thread CPU
-    # after blitting landed.
+    # update_*() are called at PACKET rate, refresh() at FRAME rate. The
+    # buffers themselves (self.ch1_in etc.) are updated immediately, every
+    # packet, here -- that's cheap (a numpy slice assignment, negligible
+    # even at hundreds of packets/s) and it's what keeps the rolling window
+    # a correct, contiguous stream of every sample regardless of how often
+    # the display redraws. Only set_ydata() (pushing the buffer into the
+    # line artist -- the actually expensive part) is deferred to sync(),
+    # which runs once per frame.
     #
-    # In "scope" mode that means just keeping a reference to the newest
-    # chunk; intermediate packets are intentionally dropped, since only the
-    # most recent PLOT_BUFFER samples are ever displayed.
+    # An earlier version of this deferred the *buffer update itself* in
+    # "scope" mode, keeping only the newest chunk and dropping any others
+    # received between two frames -- at FRAME_RATE below SEND_RATE (e.g.
+    # the 24 fps default against 50 pkt/s), that silently discarded roughly
+    # half of every packet, and because the survivor was still appended as
+    # if it were the immediately-next contiguous block, it left a real gap
+    # in the signal -- not just fewer points shown, an actual discontinuity
+    # where dropped samples should have been. That's what made the plot
+    # look "corrupted" at low frame rates and fine at high ones: at higher
+    # FRAME_RATE fewer packets got dropped per frame, purely by accident of
+    # timing, not because anything was actually more correct.
 
     def update_input(self, ch1, ch2):
-        if _SCOPE:
-            self._pending_in = (ch1, ch2)
-        else:
-            self._rolled(self.ch1_in, envelope(ch1))
-            self._rolled(self.ch2_in, envelope(ch2))
-            self._dirty = True
+        values1 = ch1 if _SCOPE else envelope(ch1)
+        values2 = ch2 if _SCOPE else envelope(ch2)
+        self._rolled(self.ch1_in, values1)
+        self._rolled(self.ch2_in, values2)
+        self._dirty = True
 
     def update_output(self, ch1, ch2):
-        if _SCOPE:
-            self._pending_out = (ch1, ch2)
-        else:
-            self._rolled(self.ch1_out, envelope(ch1))
-            self._rolled(self.ch2_out, envelope(ch2))
-            self._dirty = True
+        values1 = ch1 if _SCOPE else envelope(ch1)
+        values2 = ch2 if _SCOPE else envelope(ch2)
+        self._rolled(self.ch1_out, values1)
+        self._rolled(self.ch2_out, values2)
+        self._dirty = True
 
     def sync(self):
-        """Push buffered data into the line artists. Once per frame."""
-        if _SCOPE:
-            if self._pending_in is not None:
-                ch1, ch2 = self._pending_in
-                self._rolled(self.ch1_in, ch1)
-                self._rolled(self.ch2_in, ch2)
-                self._pending_in = None
-                self._dirty = True
-            if self._pending_out is not None:
-                ch1, ch2 = self._pending_out
-                self._rolled(self.ch1_out, ch1)
-                self._rolled(self.ch2_out, ch2)
-                self._pending_out = None
-                self._dirty = True
-
+        """Push the (already up to date) buffers into the line artists.
+        Once per frame -- this is the expensive part update_input/
+        update_output avoid doing at packet rate."""
         if not self._dirty:
             return
         self.line_ch1_in.set_ydata(self.ch1_in)
@@ -175,6 +263,38 @@ class DualPlot:
     def refresh(self):
         self.sync()
         canvas = self.fig.canvas
+
+        # ECG_SAMPLING_RATE (x-axis tick labels), PLOT_MIN/PLOT_MAX
+        # (y-limits) and PLOT_BUFFER (rolling buffer size) are all live-
+        # editable from the panel, but blitting only redraws line artists --
+        # axes/ticks/limits are baked into the cached background, so any of
+        # these actually changing needs one full canvas.draw() to show up
+        # and get re-cached (see _on_draw).
+        needs_full_draw = False
+
+        time_rate = config.ECG_SAMPLING_RATE
+        if time_rate != self._last_time_rate:
+            self._last_time_rate = time_rate
+            needs_full_draw = True
+
+        new_ylim = (config.PLOT_MIN, config.PLOT_MAX)
+        if new_ylim != self._last_ylim and new_ylim[1] > new_ylim[0]:
+            self._last_ylim = new_ylim
+            self.ax1.set_ylim(*new_ylim)
+            self.ax2.set_ylim(*new_ylim)
+            needs_full_draw = True
+
+        new_buffer_size = config.PLOT_BUFFER
+        if new_buffer_size != self._last_buffer_size and new_buffer_size > 0:
+            self._last_buffer_size = new_buffer_size
+            self._resize_buffers(new_buffer_size)
+            needs_full_draw = True
+
+        if needs_full_draw:
+            canvas.draw()
+            canvas.flush_events()
+            return
+
         if self._bg1 is None or self._bg2 is None:
             canvas.draw()
             return

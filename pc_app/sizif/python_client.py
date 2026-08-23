@@ -2,13 +2,13 @@ import threading
 import queue
 import time
 
-from config import PLOT_BUFFER, FRAME_RATE
+import config
 from plot import DualPlot
 from net import tcp_thread
 
 
 def main():
-    plotter = DualPlot(PLOT_BUFFER)
+    plotter = DualPlot(config.PLOT_BUFFER)
 
     plot_in_q  = queue.Queue(maxsize=1000)
     plot_out_q = queue.Queue(maxsize=1000)
@@ -24,7 +24,6 @@ def main():
                              daemon=True)
     t_tcp.start()
 
-    FRAME_PERIOD = 1.0 / FRAME_RATE
     next_frame = time.perf_counter()
 
     try:
@@ -47,7 +46,11 @@ def main():
 
             if now >= next_frame:
                 plotter.refresh()
-                next_frame += FRAME_PERIOD
+                # Read live each cycle (not cached once before the loop) so
+                # a FRAME_RATE change from the control panel takes effect
+                # on the very next frame -- same pattern as net.py's
+                # SEND_RATE.
+                next_frame += 1.0 / config.FRAME_RATE
 
             time.sleep(0.001)
 
