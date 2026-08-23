@@ -13,11 +13,13 @@
 #       Waveform -- nk.ecg_simulate()'s ECGSYN-model kwargs: ECG_METHOD,
 #                   ECG_HEART_RATE_STD, ECG_LFHFRATIO, ECG_TI/AI/BI (each a
 #                   P,Q,R,S,T 5-tuple), ECG_RANDOM_SEED.
-#       Noise    -- ECG_NOISE (nk.ecg_simulate()'s own built-in noise) plus
-#                   five independent colored-noise layers (ECG_NOISE_
-#                   {VIOLET,BLUE,WHITE,PINK,BROWN}_ENABLED/_LEVEL), any
-#                   combination of which can be active simultaneously --
-#                   see signal_gen.py's _simulate_raw()/_NOISE_LAYERS.
+#       Noise    -- ECG_NOISE (nk.ecg_simulate()'s own built-in noise), five
+#                   independent colored-noise layers (ECG_NOISE_
+#                   {VIOLET,BLUE,WHITE,PINK,BROWN}_ENABLED/_LEVEL, any
+#                   combination active at once), and two sine-wave
+#                   interference generators (ECG_SINE{1,2}_ENABLED/_FREQ/
+#                   _PHASE/_LEVEL, e.g. for mains hum) -- see
+#                   signal_gen.py's _simulate_raw()/_sine_contribution().
 #   PlotControlPanel (bottom bar, one row) -- purely how the plot displays
 #     that signal: PLOT_MIN / PLOT_MAX / PLOT_BUFFER / FRAME_RATE. None of
 #     these affect what's generated or sent on the wire, only what's drawn
@@ -133,6 +135,12 @@ _NOISE_ROWS = (
      "emphasizes low frequencies (rumble/drift-like)"),
     ("Brown", "ECG_NOISE_BROWN_ENABLED", "ECG_NOISE_BROWN_LEVEL", 2,
      "emphasizes low frequencies more strongly, closer to real baseline wander"),
+)
+
+# (display name, config attr for "enabled", "freq", "phase", "level")
+_SINE_ROWS = (
+    ("Sine 1", "ECG_SINE1_ENABLED", "ECG_SINE1_FREQ", "ECG_SINE1_PHASE", "ECG_SINE1_LEVEL"),
+    ("Sine 2", "ECG_SINE2_ENABLED", "ECG_SINE2_FREQ", "ECG_SINE2_PHASE", "ECG_SINE2_LEVEL"),
 )
 
 _METHODS = ["ecgsyn", "simple"]  # NOT "multileads" -- see config.py's
@@ -335,6 +343,85 @@ class SignalControlPanel:
 
             ttk.Label(frame, text="%").grid(row=row, column=2, sticky="w")
             row += 1
+
+        ttk.Separator(frame, orient="horizontal").grid(
+            row=row, column=0, columnspan=3, sticky="ew", pady=6)
+        row += 1
+        ttk.Label(frame, text="Sine interference -- e.g. mains hum, up to 2 at once:",
+                  foreground="#777", font=("", 8), wraplength=180, justify="left").grid(
+            row=row, column=0, columnspan=3, sticky="w", pady=(0, 4))
+        row += 1
+
+        # Each sine gets its own checkbox + 3 stacked fields (freq, phase,
+        # amplitude). Unlike the colored-noise rows, both generators can
+        # differ in every parameter but are added IDENTICALLY to both
+        # channels -- see signal_gen.py's _sine_contribution()/comment on
+        # why (real interference like mains hum affects every channel the
+        # same way, unlike the deliberately-decorrelated colored noise).
+        self._sine_vars = {}
+        for name, enabled_attr, freq_attr, phase_attr, level_attr in _SINE_ROWS:
+            enabled_var = tk.BooleanVar(value=getattr(config, enabled_attr))
+            freq_var = tk.StringVar(value=f"{getattr(config, freq_attr):g}")
+            phase_var = tk.StringVar(value=f"{getattr(config, phase_attr):g}")
+            level_var = tk.StringVar(value=f"{getattr(config, level_attr) * 100:g}")
+            self._sine_vars[enabled_attr] = (enabled_var, freq_var, phase_var, level_var)
+
+            cb = ttk.Checkbutton(frame, text=f"{name} enabled", variable=enabled_var,
+                                  command=lambda a=enabled_attr, v=enabled_var:
+                                  self._apply_sine_enabled(a, v))
+            cb.grid(row=row, column=0, columnspan=3, sticky="w", pady=(4, 0))
+            _Tooltip(cb, f"Adds a pure sine wave to BOTH channels identically (e.g. to "
+                          f"simulate powerline hum) -- independent of the other sine generator "
+                          f"and the colored noise above; any combination can be active.")
+            row += 1
+
+            row = _add_entry(frame, row, "  Frequency (Hz)", freq_var,
+                              lambda a=freq_attr, v=freq_var: self._apply_sine_freq(a, v),
+                              help_text=f"{name}'s frequency, evaluated at the ECG's own sample "
+                                         f"rate -- exact regardless of Send rate/Chunk size "
+                                         f"playback speed. Clamped below Nyquist (half the "
+                                         f"current ECG sample rate) to avoid aliasing.")
+            row = _add_entry(frame, row, "  Phase (deg)", phase_var,
+                              lambda a=phase_attr, v=phase_var: self._apply_sine_phase(a, v),
+                              help_text=f"{name}'s starting phase offset in degrees.")
+            row = _add_entry(frame, row, "  Amplitude (%)", level_var,
+                              lambda a=level_attr, v=level_var: self._apply_sine_level(a, v),
+                              help_text=f"{name}'s strength, as a percentage of the ECG "
+                                         f"signal's OWN peak-to-peak swing -- same convention "
+                                         f"as the colored-noise levels above. Only has any "
+                                         f"effect while \"{name} enabled\" is checked.")
+
+    def _apply_sine_enabled(self, attr, var):
+        setattr(config, attr, var.get())
+
+    def _apply_sine_freq(self, attr, var):
+        try:
+            value = float(var.get())
+            if value <= 0:
+                raise ValueError
+        except ValueError:
+            value = getattr(config, attr)
+        nyquist = config.ECG_SAMPLING_RATE / 2.0
+        value = max(0.01, min(value, nyquist))
+        var.set(f"{value:g}")
+        setattr(config, attr, value)
+
+    def _apply_sine_phase(self, attr, var):
+        try:
+            value = float(var.get())
+        except ValueError:
+            value = getattr(config, attr)
+        var.set(f"{value:g}")
+        setattr(config, attr, value)
+
+    def _apply_sine_level(self, attr, var):
+        try:
+            value = float(var.get())
+        except ValueError:
+            value = getattr(config, attr) * 100
+        value = max(0.0, min(value, 200.0))
+        var.set(f"{value:g}")
+        setattr(config, attr, value / 100.0)
 
     def _apply_noise_enabled(self, attr, var):
         setattr(config, attr, var.get())

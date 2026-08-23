@@ -182,6 +182,33 @@ ECG_NOISE_PINK_LEVEL = 0.1
 ECG_NOISE_BROWN_ENABLED = False
 ECG_NOISE_BROWN_LEVEL = 0.1
 
+# Two independent sine-wave interference generators, added on top of the
+# ECG (and any colored noise above) -- e.g. to simulate powerline hum
+# (50/60 Hz) or another discrete periodic artifact, as opposed to the
+# colored noise's broadband randomness. See signal_gen.py's
+# _simulate_raw(). Evaluated at t = sample_index / ECG_SAMPLING_RATE, the
+# same time base the raw ECG buffer itself is built on, so a given
+# frequency is exact regardless of playback speed (SEND_RATE/CHUNK_SIZE)
+# -- that's the "in sync with the sampling rate" this was asked for.
+# Both channels get the identical sine (same freq/phase/level, no
+# per-channel decorrelation like the colored-noise layers use) since real
+# interference like mains hum affects every channel the same way.
+#
+# _LEVEL is the sine's amplitude, as a fraction of the *clean ECG signal's*
+# own peak-to-peak (same convention as ECG_NOISE_*_LEVEL above) -- so the
+# sine's own peak-to-peak swing is 2 * _LEVEL * (ECG's ptp).
+# _PHASE is in degrees for readability; converted to radians in
+# signal_gen.py.
+ECG_SINE1_ENABLED = False
+ECG_SINE1_FREQ = 50.0    # Hz -- default matches EU/UK/most-of-world mains
+ECG_SINE1_PHASE = 0.0    # degrees
+ECG_SINE1_LEVEL = 0.1
+
+ECG_SINE2_ENABLED = False
+ECG_SINE2_FREQ = 60.0    # Hz -- default matches US/North America mains
+ECG_SINE2_PHASE = 0.0    # degrees
+ECG_SINE2_LEVEL = 0.1
+
 # Fraction (0.0-1.0) of each channel's wire dtype range (uint16 -> 0..65535)
 # that the signal's peak-to-peak amplitude occupies, centered at the
 # midpoint. 1.0 -> spans the full 0..65535; 0.0 -> flat line at 32767.

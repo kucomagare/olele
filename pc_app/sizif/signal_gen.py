@@ -51,6 +51,15 @@ _NOISE_LAYERS = (
     (2, "ECG_NOISE_BROWN_ENABLED", "ECG_NOISE_BROWN_LEVEL"),
 )
 
+# Sine-wave interference generators: (config attr for "enabled", "freq",
+# "phase", "level"). Unlike _NOISE_LAYERS, both channels get the IDENTICAL
+# sine (no per-channel decorrelation) -- see config.py's ECG_SINE1_*/
+# ECG_SINE2_* comment for why.
+_SINE_GENERATORS = (
+    ("ECG_SINE1_ENABLED", "ECG_SINE1_FREQ", "ECG_SINE1_PHASE", "ECG_SINE1_LEVEL"),
+    ("ECG_SINE2_ENABLED", "ECG_SINE2_FREQ", "ECG_SINE2_PHASE", "ECG_SINE2_LEVEL"),
+)
+
 
 def _config_signature():
     """Every config value that affects _simulate_raw()'s output. Compared
@@ -61,11 +70,16 @@ def _config_signature():
         (getattr(config, enabled_attr), getattr(config, level_attr))
         for _beta, enabled_attr, level_attr in _NOISE_LAYERS
     )
+    sine_generators = tuple(
+        (getattr(config, enabled_attr), getattr(config, freq_attr),
+         getattr(config, phase_attr), getattr(config, level_attr))
+        for enabled_attr, freq_attr, phase_attr, level_attr in _SINE_GENERATORS
+    )
     return (
         config.ECG_DURATION_S, config.ECG_SAMPLING_RATE, config.ECG_HEART_RATE,
         config.ECG_HEART_RATE_STD, config.ECG_NOISE, config.ECG_METHOD,
         config.ECG_LFHFRATIO, tuple(config.ECG_TI), tuple(config.ECG_AI),
-        tuple(config.ECG_BI), config.ECG_RANDOM_SEED, noise_layers,
+        tuple(config.ECG_BI), config.ECG_RANDOM_SEED, noise_layers, sine_generators,
     )
 
 
@@ -119,7 +133,37 @@ def _simulate_raw(random_state):
                 total_noise[:n] += noise[:n] * (level * raw_ptp / noise_ptp)
         raw = raw + total_noise
 
-    return raw, raw.min(), raw.max()
+    return raw
+
+
+def _sine_contribution(n, raw_ptp):
+    """Sum of both sine generators, sized for a buffer of length n. Computed
+    ONCE in _raw_buffers() (not per-channel in _simulate_raw()) and added
+    identically to both channels -- unlike the colored-noise layers, which
+    are deliberately decorrelated per channel, real interference like mains
+    hum affects every channel the same way. This is also why raw_ptp is a
+    parameter here rather than measured locally: using each channel's own
+    (slightly different, since they come from different random seeds) ptp
+    would make the "identical sine" promise false by a fraction of a
+    percent -- verified this was actually happening before fixing it."""
+    total = np.zeros(n)
+    if raw_ptp <= 0:
+        return total
+    t = np.arange(n) / config.ECG_SAMPLING_RATE
+    for enabled_attr, freq_attr, phase_attr, level_attr in _SINE_GENERATORS:
+        if not getattr(config, enabled_attr):
+            continue
+        level = getattr(config, level_attr)
+        if level <= 0:
+            continue
+        freq = getattr(config, freq_attr)
+        phase_rad = np.deg2rad(getattr(config, phase_attr))
+        # level = fraction of the reference ptp that becomes the sine's OWN
+        # peak-to-peak (same convention as the noise layers), so amplitude
+        # (sin()'s single-sided swing) is half of that.
+        amplitude = level * raw_ptp / 2.0
+        total += amplitude * np.sin(2 * np.pi * freq * t + phase_rad)
+    return total
 
 
 def _raw_buffers():
@@ -130,8 +174,18 @@ def _raw_buffers():
     sig, ch1_entry, ch2_entry = _cache
     current_sig = _config_signature()
     if sig != current_sig:
-        ch1_entry = _simulate_raw(random_state=config.ECG_RANDOM_SEED)
-        ch2_entry = _simulate_raw(random_state=config.ECG_RANDOM_SEED + 1)
+        ch1_raw = _simulate_raw(random_state=config.ECG_RANDOM_SEED)
+        ch2_raw = _simulate_raw(random_state=config.ECG_RANDOM_SEED + 1)
+
+        # Reference ptp for sine amplitude is ch1's -- arbitrary which
+        # channel, just needs to be the SAME one for both so the sine
+        # itself ends up bit-identical on both channels.
+        sine = _sine_contribution(len(ch1_raw), ch1_raw.max() - ch1_raw.min())
+        ch1_raw = ch1_raw + sine[:len(ch1_raw)]
+        ch2_raw = ch2_raw + sine[:len(ch2_raw)]
+
+        ch1_entry = (ch1_raw, ch1_raw.min(), ch1_raw.max())
+        ch2_entry = (ch2_raw, ch2_raw.min(), ch2_raw.max())
         _cache = (current_sig, ch1_entry, ch2_entry)
     return ch1_entry + ch2_entry
 
