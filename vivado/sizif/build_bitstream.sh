@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Batch-mode synthesis + implementation + bitstream + .xsa export for
-# vivado/sizif -- no Vivado GUI needed. Requires the project to already
+# vivado/<variant> -- no Vivado GUI needed. Requires the project to already
 # exist (./build.sh first). Output: the existing build/tcp_client project
 # gets its runs built, plus build/tcp_client/CoraZ7_Eth_wrapper.xsa.
 set -euo pipefail
@@ -20,7 +20,7 @@ fi
 # cd into build/ first so vivado's own cwd-relative artifacts (vivado.jou,
 # vivado.log, .Xil/) land there (gitignored, wiped by clean.sh) instead of
 # wherever this script happened to be invoked from -- e.g. the repo root
-# when run via build_all.sh, or vivado/sizif/ when run directly.
+# when run via build_all.sh, or vivado/<variant>/ when run directly.
 cd "$BUILD_DIR"
 
 TCL_SCRIPT="$(mktemp --suffix=.tcl)"
@@ -49,4 +49,4 @@ vivado -mode batch -source "$TCL_SCRIPT"
 
 echo
 echo "Bitstream + hardware platform exported: $XSA"
-echo "Next: vitis/sizif/build_platform.sh \"$XSA\""
+echo "Next: vitis/$(basename "$SCRIPT_DIR")/build_platform.sh \"$XSA\""

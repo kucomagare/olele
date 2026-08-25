@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# One-time/incremental setup for the "sizif" PC app: compiles the C++
+# One-time/incremental setup for this variant's PC app: compiles the C++
 # relay server and creates the Python venv, both under ./build/ (gitignored).
 # Safe to re-run — skips steps that are already done.
 set -euo pipefail
@@ -7,11 +7,14 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BUILD_DIR="$SCRIPT_DIR/build"
 SHARED_DIR="$SCRIPT_DIR/../../shared"
+# Variant name from this script's own directory (pc_app/<variant>/), used to
+# pick the matching wire format. Keeps a copied tree working with no edits.
+VARIANT="$(basename "$SCRIPT_DIR")"
 exec > >(tee "$SCRIPT_DIR/build.log") 2>&1
 mkdir -p "$BUILD_DIR"
 
-# --- Packet format header (generated from shared/packet_format.json) ---
-PACKET_FORMAT_JSON="$SHARED_DIR/packet_format.json"
+# --- Packet format header (generated from shared/$VARIANT/packet_format.json) ---
+PACKET_FORMAT_JSON="$SHARED_DIR/$VARIANT/packet_format.json"
 PACKET_FORMAT_H="$SCRIPT_DIR/packet_format.h"
 python3 "$SHARED_DIR/gen_packet_header.py" "$PACKET_FORMAT_JSON" "$PACKET_FORMAT_H"
 

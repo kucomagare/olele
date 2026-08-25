@@ -32,9 +32,15 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_PATH="${REPO_PATH:-$(cd "$SCRIPT_DIR/../.." && pwd)}"
+
+# Variant name from this script's own directory (vitis/<variant>/). Used both
+# for the platform component name and to find the matching vivado/<variant>/
+# bitstream -- never mix a bitstream from one variant with another's ELF.
+VARIANT="$(basename "$SCRIPT_DIR")"
+PLATFORM_NAME="${VARIANT}_platform"
 ELF="$SCRIPT_DIR/build/app/lwip_tcp_perf_client.elf"
-PS7_INIT_TCL="$SCRIPT_DIR/build/sizif_platform/hw/sdt/ps7_init.tcl"
-DEFAULT_BIT="$REPO_PATH/vivado/sizif/build/tcp_client/tcp_client.runs/impl_1/CoraZ7_Eth_wrapper.bit"
+PS7_INIT_TCL="$SCRIPT_DIR/build/$PLATFORM_NAME/hw/sdt/ps7_init.tcl"
+DEFAULT_BIT="$REPO_PATH/vivado/$VARIANT/build/tcp_client/tcp_client.runs/impl_1/CoraZ7_Eth_wrapper.bit"
 BIT="${1:-$DEFAULT_BIT}"
 UART_BAUD="115200"
 

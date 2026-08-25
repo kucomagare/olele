@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Creates the Vitis platform component ("sizif_platform") from a hardware
-# .xsa (produced by vivado/sizif's build.sh + Vivado's Export Hardware step)
+# Creates the Vitis platform component ("<variant>_platform") from a hardware
+# .xsa (produced by vivado/<variant>'s build.sh + Vivado's Export Hardware step)
 # AND the throwaway app needed to populate the CMake export tree, via the
 # Vitis 2023.2 Python automation API (`vitis -s <script>`). Output lands in
 # ./build/ (gitignored).
@@ -50,6 +50,12 @@ XSA_PATH="$(realpath "$1")"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BUILD_DIR="$SCRIPT_DIR/build"
 
+# Variant name is taken from this script's own directory (vitis/<variant>/),
+# so a copied tree needs no edits here. The platform component is named after
+# it so two variants' platforms never collide in a shared workspace.
+VARIANT="$(basename "$SCRIPT_DIR")"
+PLATFORM_NAME="${VARIANT}_platform"
+
 exec > >(tee "$SCRIPT_DIR/build_platform.log") 2>&1
 
 mkdir -p "$BUILD_DIR"
@@ -59,15 +65,15 @@ mkdir -p "$BUILD_DIR"
 # the domain is being created -- so re-running against an existing platform
 # would silently keep the old lwIP settings even if it did succeed. Refuse
 # up front with an actionable message instead.
-if [[ -d "$BUILD_DIR/sizif_platform" ]]; then
+if [[ -d "$BUILD_DIR/$PLATFORM_NAME" ]]; then
     echo "A platform already exists at:"
-    echo "  $BUILD_DIR/sizif_platform"
+    echo "  $BUILD_DIR/$PLATFORM_NAME"
     echo
     echo "Delete it first if you want to rebuild (required after changing"
     echo "any lwip213_* setting in this script -- they are applied at"
     echo "domain-creation time and are not picked up by a re-run):"
     echo
-    echo "  rm -rf $BUILD_DIR/sizif_platform"
+    echo "  rm -rf $BUILD_DIR/$PLATFORM_NAME"
     echo
     echo "Then re-run this script, followed by ./build_app.sh."
     exit 1
@@ -82,7 +88,7 @@ import vitis
 client = vitis.create_client(workspace="${BUILD_DIR}")
 
 platform = client.create_platform_component(
-    name="sizif_platform",
+    name="${PLATFORM_NAME}",
     hw="${XSA_PATH}",
 )
 
@@ -137,7 +143,7 @@ platform.build()
 # cortexa9_toolchain.cmake, include/, lib/) that build_app.sh needs.
 #
 # That is not true, at least on Vitis 2023.2 here. Proven on 2026-08-17:
-# build/sizif_platform was deleted, this script ran, the tmp_app step
+# build/<variant>_platform was deleted, this script ran, the tmp_app step
 # errored out before creating anything (stale workspace registration), and
 # the export tree still came out complete -- build_app.sh then configured
 # and linked against it with no trouble. It makes sense in hindsight: the
@@ -156,6 +162,6 @@ EOF
 
 echo
 echo "If the above finished without error, this should now exist:"
-echo "  $BUILD_DIR/sizif_platform/export/sizif_platform/sw/standalone_ps7_cortexa9_0"
+echo "  $BUILD_DIR/$PLATFORM_NAME/export/$PLATFORM_NAME/sw/standalone_ps7_cortexa9_0"
 echo "with Xilinx.spec / cortexa9_toolchain.cmake / include/ / lib/ populated."
 echo "Next: ./build_app.sh"

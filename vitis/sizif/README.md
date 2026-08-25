@@ -203,7 +203,7 @@ using the system `cmake` (not the Vitis-bundled one) and `-DNON_YOCTO=ON`
 fails on missing `lwip/tcp.h`). Output: `build/app/lwip_tcp_perf_client.elf`.
 
 Before compiling, this also regenerates `app/packet_format.h` from
-`../../shared/packet_format.json` (see the root README's "Wire packet
+`../../shared/<variant>/packet_format.json` (see the root README's "Wire packet
 format" section) — `lwip_comm_client_raw.c` picks it up via a plain
 `#include "packet_format.h"`. The generated header is gitignored; edit
 `packet_format.json`, not `app/packet_format.h` directly.

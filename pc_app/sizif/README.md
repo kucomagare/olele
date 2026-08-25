@@ -123,7 +123,7 @@ Closing the plot window does not stop the script — use
 Every message: 4-byte big-endian header `[type:u16][length:u16]` followed
 by `length` repeats of a fixed record whose shape depends on `type`.
 `type` and each type's record fields (name, bit width, signed/unsigned)
-are defined once in `../../shared/packet_format.json` -- edit that file to
+are defined once in `../../shared/<variant>/packet_format.json` -- edit that file to
 change them, not this doc or the source directly. Currently:
 
 - `type 0` ("data"): one record per sample, fields `ts, ch1, ch2` (16-bit

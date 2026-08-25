@@ -3,15 +3,24 @@
 # console that run.sh launched. The board's firmware itself has no "stop"
 # -- it keeps running until reset/reflashed (rerun ./run_all.sh) or
 # power-cycled.
+#
+# Stops ONE variant's PC app. If you started the other one, stop that too:
+#     VARIANT=marathon ./stop_all.sh
 set -euo pipefail
 
 REPO_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# Not sourced from bootenv.sh here (no Xilinx tools needed), so the default
+# is repeated. Keep it in sync with bootenv.sh.
+VARIANT="${VARIANT:-sizif}"
+
 exec > >(tee "$REPO_PATH/stop_all.log") 2>&1
 
-"$REPO_PATH/pc_app/sizif/system.sh" stop
+echo "=== variant: $VARIANT ==="
 
-PUTTY_PID_FILE="$REPO_PATH/vitis/sizif/build/putty.pid"
+"$REPO_PATH/pc_app/$VARIANT/system.sh" stop
+
+PUTTY_PID_FILE="$REPO_PATH/vitis/$VARIANT/build/putty.pid"
 if [[ -f "$PUTTY_PID_FILE" ]]; then
     PUTTY_PID="$(cat "$PUTTY_PID_FILE")"
     # Verify the PID is actually still putty before signaling it -- a

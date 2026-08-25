@@ -1,5 +1,5 @@
-# Packet/sample structure -- loaded from shared/packet_format.json, the
-# single source of truth also used to generate packet_format.h for the
+# Packet/sample structure -- loaded from shared/<variant>/packet_format.json,
+# the single source of truth also used to generate packet_format.h for the
 # firmware and the C++ relay (see shared/gen_packet_header.py). Change
 # field widths/signedness there, not here. No socket/matplotlib
 # dependency here on purpose -- this is pure wire-format logic, usable
@@ -10,7 +10,12 @@ import struct
 import numpy as np
 from pathlib import Path
 
-PACKET_FORMAT_PATH = Path(__file__).resolve().parent.parent.parent / "shared" / "packet_format.json"
+# This file lives at <repo_root>/pc_app/<variant>/packet_format.py, so the
+# variant name is just the parent directory's name -- no config needed, and a
+# copied tree picks up its own wire format automatically.
+_HERE = Path(__file__).resolve().parent
+VARIANT = _HERE.name
+PACKET_FORMAT_PATH = _HERE.parent.parent / "shared" / VARIANT / "packet_format.json"
 
 try:
     with open(PACKET_FORMAT_PATH) as _f:
@@ -18,7 +23,9 @@ try:
 except FileNotFoundError:
     raise FileNotFoundError(
         f"packet_format.json not found at {PACKET_FORMAT_PATH} -- expected "
-        "at <repo_root>/shared/packet_format.json; has this file moved?"
+        f"at <repo_root>/shared/{VARIANT}/packet_format.json (variant taken "
+        f"from this file's directory name). Has it moved, or is the variant "
+        f"directory missing?"
     )
 
 # (bits, signed) -> numpy dtype string. Big-endian ('>') to match the wire

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # Generates a C header from packet_format.json -- the single source of
 # truth for wire packet/sample structure shared by the firmware
-# (vitis/sizif/app/lwip_comm_client_raw.c) and the C++ relay
-# (pc_app/sizif/tcp_server_app.cpp). Both are compiled, bare-metal C has
+# (vitis/<variant>/app/lwip_comm_client_raw.c) and the C++ relay
+# (pc_app/<variant>/tcp_server_app.cpp). Both are compiled, bare-metal C has
 # no filesystem to read JSON from at runtime, so their view of the format
 # has to be baked in at build time instead -- run this before compiling.
 #

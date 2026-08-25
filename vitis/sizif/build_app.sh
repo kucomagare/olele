@@ -12,9 +12,14 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Variant name from this script's own directory (vitis/<variant>/) -- keeps a
+# copied tree working with no edits. Must match build_platform.sh.
+VARIANT="$(basename "$SCRIPT_DIR")"
+PLATFORM_NAME="${VARIANT}_platform"
 APP_DIR="$SCRIPT_DIR/app"
 BUILD_DIR="$SCRIPT_DIR/build/app"
-EXPORT_DIR="$SCRIPT_DIR/build/sizif_platform/export/sizif_platform/sw/standalone_ps7_cortexa9_0"
+EXPORT_DIR="$SCRIPT_DIR/build/$PLATFORM_NAME/export/$PLATFORM_NAME/sw/standalone_ps7_cortexa9_0"
 SHARED_DIR="$SCRIPT_DIR/../../shared"
 
 exec > >(tee "$SCRIPT_DIR/build_app.log") 2>&1
@@ -26,10 +31,10 @@ if [[ ! -d "$EXPORT_DIR" ]]; then
     exit 1
 fi
 
-# Packet format header (generated from shared/packet_format.json), picked
+# Packet format header (generated from shared/$VARIANT/packet_format.json), picked
 # up via the plain #include "packet_format.h" in lwip_comm_client_raw.c
 # (quoted includes search the including file's own directory first).
-python3 "$SHARED_DIR/gen_packet_header.py" "$SHARED_DIR/packet_format.json" "$APP_DIR/packet_format.h"
+python3 "$SHARED_DIR/gen_packet_header.py" "$SHARED_DIR/$VARIANT/packet_format.json" "$APP_DIR/packet_format.h"
 
 export PATH="${ARM_GNU_TOOLCHAIN_BIN:-/tools/Xilinx/Vitis/2023.2/gnu/aarch32/lin/gcc-arm-none-eabi/bin}:$PATH"
 CMAKE_BIN="${SYSTEM_CMAKE:-cmake}"

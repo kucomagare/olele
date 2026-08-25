@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Regenerates the Vivado project for the "sizif" hardware version from
+# Regenerates the Vivado project for this variant's hardware version from
 # cora_z7.tcl into ./build/ (gitignored). Run this, then open the project
 # in the Vivado GUI (or drive it further in batch mode) to run
 # synthesis/implementation and generate the bitstream/.xsa.

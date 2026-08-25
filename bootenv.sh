@@ -6,6 +6,10 @@
 #
 # Sets:
 #   REPO_PATH             - this repo's root (wherever it's actually checked out)
+#   VARIANT               - which project variant the *_all.sh scripts act on.
+#                             Defaults to "sizif". Override per-shell with
+#                             "export VARIANT=marathon" before sourcing, or
+#                             per-command with "VARIANT=marathon ./build_all.sh".
 #   SYSTEM_CMAKE           - the system cmake, captured *before* Xilinx's
 #                             settings scripts touch PATH (the Vitis-bundled
 #                             cmake-3.24.2 needs libssl.so.10, which isn't
@@ -16,7 +20,9 @@
 #                             xsct/xsdb land on PATH
 #
 # Also defines navigation aliases: cdrepo, cdvivado, cdvitis, cdpcapp
-# (jump to the repo root / vivado/sizif / vitis/sizif / pc_app/sizif).
+# (jump to the repo root / vivado/$VARIANT / vitis/$VARIANT / pc_app/$VARIANT).
+# The aliases resolve $VARIANT at use time, so changing VARIANT in an already-
+# open shell re-points them without re-sourcing.
 #
 # Adjust XILINX_VERSION / XILINX_INSTALL_DIR below if your install differs.
 
@@ -31,6 +37,11 @@ REPO_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 export SYSTEM_CMAKE
 SYSTEM_CMAKE="$(command -v cmake || true)"
 
+# Which <tool>/<variant>/ tree the orchestration scripts act on.
+#   sizif    - AXI-Lite architecture (frozen reference)
+#   marathon - DMA/AXI-Stream architecture (active development)
+export VARIANT="${VARIANT:-sizif}"
+
 XILINX_VERSION="2023.2"
 XILINX_INSTALL_DIR="/tools/Xilinx"
 
@@ -42,13 +53,15 @@ export ARM_GNU_TOOLCHAIN_BIN="$XILINX_INSTALL_DIR/Vitis/$XILINX_VERSION/gnu/aarc
 [[ -f "$VITIS_SETTINGS" ]] && source "$VITIS_SETTINGS"
 [[ -d "$ARM_GNU_TOOLCHAIN_BIN" ]] && export PATH="$ARM_GNU_TOOLCHAIN_BIN:$PATH"
 
-# Navigation aliases for the "sizif" variant. If a new variant is ever
-# added as a sibling (e.g. vivado/<other-name>/), update/duplicate these.
+# Navigation aliases. $VARIANT is deliberately NOT expanded here -- the
+# aliases expand it when invoked, so "export VARIANT=marathon" in an
+# already-open shell immediately re-points cdvivado/cdvitis/cdpcapp.
 alias cdrepo="cd \"\$REPO_PATH\""
-alias cdvivado="cd \"\$REPO_PATH/vivado/sizif\""
-alias cdvitis="cd \"\$REPO_PATH/vitis/sizif\""
-alias cdpcapp="cd \"\$REPO_PATH/pc_app/sizif\""
+alias cdvivado="cd \"\$REPO_PATH/vivado/\$VARIANT\""
+alias cdvitis="cd \"\$REPO_PATH/vitis/\$VARIANT\""
+alias cdpcapp="cd \"\$REPO_PATH/pc_app/\$VARIANT\""
 
 echo "bootenv: REPO_PATH=$REPO_PATH"
 echo "bootenv: SYSTEM_CMAKE=$SYSTEM_CMAKE"
+echo "bootenv: VARIANT=$VARIANT  (override: export VARIANT=marathon)"
 echo "bootenv: aliases: cdrepo, cdvivado, cdvitis, cdpcapp"
