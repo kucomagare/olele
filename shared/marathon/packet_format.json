@@ -1,0 +1,20 @@
+{
+  "packet_types": {
+    "0": {
+      "name": "data",
+      "description": "Streamed TDM frames; 'length' in the wire header [type:u16][length:u16] is the number of repeats of this field group. One repeat = one FRAME: a timestamp followed by one sample per channel. Slots are 32 bits (not 16 as in sizif): a uint16 timestamp wraps every 32 s at 2048 Hz, and real EEG front-ends such as the TI ADS1299 are 24-bit, which 16-bit slots would throw away. All slots share one width because the PL filter is time-division multiplexed -- one slot per clock, slot 0 passing through unfiltered. Adding a channel means adding a chN field here; that regenerates the C header and the numpy dtypes together. NOTE: the DMA buffer must be a whole number of frames AND a multiple of 32 bytes for cache maintenance; 8 frames satisfies both for any channel count, so keep the per-packet frame count a multiple of 8.",
+      "fields": [
+        { "name": "ts",  "bits": 32, "signed": false },
+        { "name": "ch1", "bits": 32, "signed": false },
+        { "name": "ch2", "bits": 32, "signed": false }
+      ]
+    },
+    "1": {
+      "name": "config",
+      "description": "Placeholder -- not yet acted on by the firmware, just a reserved shape for future use. 'length' is always 1 (one record).",
+      "fields": [
+        { "name": "reserved", "bits": 16, "signed": false }
+      ]
+    }
+  }
+}
