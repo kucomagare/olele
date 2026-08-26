@@ -282,6 +282,7 @@ int main(void)
         m.ring_used = rx_ring_used();
         m.ring_peak = ring_peak;
         m.resyncs   = comm_resyncs;
+        comm_latency_take(&m.lat_min_us, &m.lat_mean_us, &m.lat_max_us);
         comm_send_metrics(&m);
 
         ring_peak = 0;

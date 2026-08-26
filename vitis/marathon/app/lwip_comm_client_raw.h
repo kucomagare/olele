@@ -29,6 +29,12 @@ extern uint32_t comm_resyncs;
    stats block; no-op while disconnected. */
 void comm_send_metrics(const packet_metrics_t *m);
 
+/* Drain the per-packet service-latency accumulator: min/mean/max in
+   microseconds since the last call, then reset. Called once per second from
+   main.c's stats block. All zero means no packets were serviced in the
+   window. */
+void comm_latency_take(uint32_t *min_us, uint32_t *mean_us, uint32_t *max_us);
+
 /* Throughput statistics (used by main.c) */
 extern uint32_t packets_rx;
 extern uint32_t packets_tx;

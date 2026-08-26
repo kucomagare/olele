@@ -20,7 +20,7 @@ void mono_clock_init(void)
         Xil_Out32(GTIMER_BASE + GTIMER_CONTROL, 1U);
 }
 
-uint64_t mono_now_ms(void)
+static uint64_t gtimer_ticks(void)
 {
     uint32_t hi, lo;
 
@@ -30,7 +30,17 @@ uint64_t mono_now_ms(void)
         lo = Xil_In32(GTIMER_BASE + GTIMER_LOWER);
     } while (Xil_In32(GTIMER_BASE + GTIMER_UPPER) != hi);
 
-    return (((uint64_t)hi << 32) | (uint64_t)lo) / (GTIMER_HZ / 1000U);
+    return ((uint64_t)hi << 32) | (uint64_t)lo;
+}
+
+uint64_t mono_now_ms(void)
+{
+    return gtimer_ticks() / (GTIMER_HZ / 1000U);
+}
+
+uint64_t mono_now_us(void)
+{
+    return gtimer_ticks() / (GTIMER_HZ / 1000000U);
 }
 
 uint32_t mono_clock_selftest_ms(uint32_t sleep_ms)

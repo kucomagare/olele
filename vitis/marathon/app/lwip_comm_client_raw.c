@@ -62,6 +62,48 @@ int comm_use_dma = 1;
    A resync is the overload signal worth watching -- it means framing was
    lost badly enough to need dropping the connection. */
 uint32_t comm_resyncs = 0;
+
+/* Per-packet service latency: from a complete packet being available in the
+   ring to its echo being handed to lwIP. Deliberately NOT end-to-end round
+   trip -- that would be dominated by the PC's scheduler, the relay and TCP,
+   which is precisely the noise this architecture does not control. This
+   isolates the board, which is what the DMA conversion was actually meant to
+   make deterministic.
+ *
+ * Accumulated here, drained once per second by comm_latency_take(). uint32 us
+ * is good for ~71 minutes per sample, so overflow is not a concern; the sum is
+ * 64-bit because a second's worth at 1400 pkt/s would otherwise wrap. */
+static uint32_t lat_min_us = 0xFFFFFFFFu;
+static uint32_t lat_max_us = 0;
+static uint64_t lat_sum_us = 0;
+static uint32_t lat_count  = 0;
+
+/* Start time of the packet currently being serviced. One slot is enough: the
+   AXI-Lite path finishes within a single call, and the DMA path is gated on
+   dma_stream_busy() so only one transfer is ever in flight. */
+static uint64_t lat_t0 = 0;
+
+static void latency_record(uint64_t t0)
+{
+    if (t0 == 0)
+        return;
+    uint32_t dt = (uint32_t)(mono_now_us() - t0);
+    if (dt < lat_min_us) lat_min_us = dt;
+    if (dt > lat_max_us) lat_max_us = dt;
+    lat_sum_us += dt;
+    lat_count++;
+}
+
+void comm_latency_take(uint32_t *min_us, uint32_t *mean_us, uint32_t *max_us)
+{
+    *min_us  = (lat_count ? lat_min_us : 0);
+    *max_us  = lat_max_us;
+    *mean_us = (uint32_t)(lat_count ? (lat_sum_us / lat_count) : 0);
+    lat_min_us = 0xFFFFFFFFu;
+    lat_max_us = 0;
+    lat_sum_us = 0;
+    lat_count  = 0;
+}
 static int dma_init_done = 0;
 
 /* ============================================================
@@ -318,6 +360,10 @@ void comm_process(void)
         if (dma_stream_poll(&out, &out_bytes, &out_type, &out_len)) {
             if (client_pcb && connected)
                 tcp_client_send_raw(client_pcb, out, out_bytes, out_len);
+            /* Measured to here, not to poll() returning: the echo leaving is
+               what the latency is of. */
+            latency_record(lat_t0);
+            lat_t0 = 0;
             dma_stream_release();
         }
     }
@@ -399,6 +445,11 @@ void comm_process(void)
                 return;
             }
 
+            /* Clock starts here: the packet is complete and about to be
+               serviced. Anything before this is waiting for the wire, which is
+               not the board's latency. */
+            lat_t0 = mono_now_us();
+
             rx_ring_peek(0, dma_stream_tx_buf(), body_bytes);
             rx_ring_advance(body_bytes);
 
@@ -419,6 +470,8 @@ void comm_process(void)
         /* Bulk-copy the body out of the ring (at most one wrap), then
            byte-swap each record in place (network byte order: MSB first,
            matching tcp_client_send) instead of popping byte-by-byte. */
+        uint64_t t0 = mono_now_us();
+
         rx_ring_peek(0, payload_buf, body_bytes);
         rx_ring_advance(body_bytes);
         for (uint32_t i = 0; i < length; i++)
@@ -479,6 +532,11 @@ void comm_process(void)
 
             if (client_pcb && connected)
                 tcp_client_send(client_pcb, type, length, payload_buf);
+
+            /* AXI-Lite path completes inside this one call, so the whole
+               service time is measured here -- directly comparable with the
+               DMA path's figure above, which spans main-loop passes. */
+            latency_record(t0);
         }
     }
 }

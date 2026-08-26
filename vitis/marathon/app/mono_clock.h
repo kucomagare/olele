@@ -22,6 +22,13 @@
 void     mono_clock_init(void);
 uint64_t mono_now_ms(void);
 
+/* Same counter, microsecond resolution. The SCU global timer runs at
+   core/2 = 325 MHz, i.e. ~3.1 ns per tick, so a microsecond figure has
+   plenty of headroom -- the division is the only thing costing precision,
+   not the source. Used for per-packet service-latency measurement, where
+   milliseconds are far too coarse. */
+uint64_t mono_now_us(void);
+
 /* Times a known-length usleep with mono_now_ms(). Returns the measured
    duration in ms; a healthy clock returns ~the value passed in. */
 uint32_t mono_clock_selftest_ms(uint32_t sleep_ms);

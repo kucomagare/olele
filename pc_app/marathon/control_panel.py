@@ -359,8 +359,13 @@ class SignalControlPanel:
         m = net.last_metrics
         if m is not None and m is not self._last_metrics_seen:
             self._last_metrics_seen = m
+            # Jitter is derived, not transmitted: it is exactly max-min and
+            # sending it would be a third number that could disagree with the
+            # two it comes from.
+            jitter = max(0, m.get("lat_max_us", 0) - m.get("lat_min_us", 0))
             for key, _ in _METRIC_ROWS:
-                self._metric_vars[key].set(_format_metric(key, m.get(key, 0)))
+                value = jitter if key == "lat_jitter" else m.get(key, 0)
+                self._metric_vars[key].set(_format_metric(key, value))
 
         c = net.last_config
         if c is not None and c is not self._last_config_seen:
@@ -834,6 +839,10 @@ _METRIC_ROWS = (
     ("ring_used", "Ring used"),
     ("ring_peak", "Ring peak"),
     ("resyncs",   "Resyncs"),
+    ("lat_min_us",  "Latency min"),
+    ("lat_mean_us", "Latency mean"),
+    ("lat_max_us",  "Latency max"),
+    ("lat_jitter",  "Jitter (max-min)"),
     ("window_ms", "Stats window"),
     ("uptime_s",  "Uptime"),
 )
@@ -842,6 +851,8 @@ _METRIC_ROWS = (
 def _format_metric(key, value):
     """Human units for the metric boxes. Raw counts are unreadable at these
     magnitudes -- 16130000 means nothing at a glance, 16.13 MB/s does."""
+    if key.startswith("lat_"):
+        return f"{value} us"
     if key == "rx_bps":
         return f"{value / 1e6:.2f} MB/s"
     if key == "uptime_s":

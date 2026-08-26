@@ -59,7 +59,7 @@
     },
     "2": {
       "name": "metrics",
-      "description": "Board health, pushed once per second, board -> PC only. The PC never sends this and the board never expects a reply. Same numbers the [S] console line prints, so the serial console and the GUI can never disagree -- both are built from one computation in main.c. Every rate is normalized by window_ms rather than assumed to be exactly 1000 ms, because the stats check runs once per main-loop pass and the window always overshoots slightly.",
+      "description": "Board health, pushed once per second, board -> PC only. The PC never sends this and the board never expects a reply. Same numbers the [S] console line prints, so the serial console and the GUI can never disagree -- both are built from one computation in main.c. Every rate is normalized by window_ms rather than assumed to be exactly 1000 ms, because the stats check runs once per main-loop pass and the window always overshoots slightly. lat_*_us is BOARD-SIDE service latency -- a complete packet in the rx ring to its echo handed to lwIP -- not end-to-end round trip. End-to-end would be dominated by the PC's scheduler, the relay and TCP, none of which this architecture controls; this isolates the part DMA was meant to make deterministic. Jitter is lat_max_us - lat_min_us. All zero means no packets were serviced in the window.",
       "fields": [
         {
           "name": "uptime_s",
@@ -108,6 +108,21 @@
         },
         {
           "name": "resyncs",
+          "bits": 32,
+          "signed": false
+        },
+        {
+          "name": "lat_min_us",
+          "bits": 32,
+          "signed": false
+        },
+        {
+          "name": "lat_mean_us",
+          "bits": 32,
+          "signed": false
+        },
+        {
+          "name": "lat_max_us",
           "bits": 32,
           "signed": false
         }
