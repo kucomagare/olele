@@ -5,6 +5,8 @@
 #include <csignal>
 #include <atomic>
 #include <mutex>
+#include <memory>
+#include <string>
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>   // TCP_NODELAY
@@ -24,11 +26,23 @@ constexpr int RECV_TIMEOUT_SEC = 30;  // reap peers that go silent without closi
 constexpr int SEND_TIMEOUT_SEC = 2;   // cap how long a forward can block on a stalled peer
 
 // ============================================================
-// Global client sockets, guarded by fd_mutex
+// Peer registry
+//
+// fd_mutex guards ONLY the two registry pointers (below, after send_all) --
+// never a send. Holding one lock across a blocking send() was the original
+// design and it meant a peer that was slow to drain locked out the *other*
+// direction too, for up to SEND_TIMEOUT_SEC: the board's thread, stuck
+// writing to a busy Python client, held the same mutex the Python thread
+// needed to forward to the board, so one slow reader stalled both ways and
+// made the innocent side look guilty. Each Peer now carries its own send
+// mutex, so the two directions are independent.
 // ============================================================
 std::mutex fd_mutex;
-int pcb_fd    = -1;
-int python_fd = -1;
+
+// Raw fd mirrors, for handle_signal() only. A signal handler must not take a
+// mutex or touch a shared_ptr, so it gets plain atomics to shutdown().
+std::atomic<int> g_pcb_raw_fd{-1};
+std::atomic<int> g_python_raw_fd{-1};
 
 std::atomic<bool> g_running{true};
 int g_server_fd = -1;
@@ -39,8 +53,9 @@ void handle_signal(int)
     if (g_server_fd != -1) shutdown(g_server_fd, SHUT_RDWR);
     // Also unblock any worker thread stuck in a blocking send()/recv() on a
     // stalled peer, otherwise the join() loop in main() waits forever for it.
-    if (pcb_fd != -1)    shutdown(pcb_fd, SHUT_RDWR);
-    if (python_fd != -1) shutdown(python_fd, SHUT_RDWR);
+    int fd;
+    if ((fd = g_pcb_raw_fd.load())    != -1) shutdown(fd, SHUT_RDWR);
+    if ((fd = g_python_raw_fd.load()) != -1) shutdown(fd, SHUT_RDWR);
 }
 
 bool send_all(int fd, const void *buf, size_t len)
@@ -48,7 +63,15 @@ bool send_all(int fd, const void *buf, size_t len)
     const uint8_t *p = static_cast<const uint8_t *>(buf);
     size_t sent = 0;
     while (sent < len) {
-        ssize_t n = send(fd, p + sent, len - sent, 0);
+        // MSG_NOSIGNAL, not 0: without it, writing to a socket whose peer
+        // has already gone raises SIGPIPE, and SIGPIPE's default action is
+        // to kill the process. That is not hypothetical here -- at high
+        // packet rates this relay is inside send() almost continuously, so
+        // restarting the Python client killed the relay outright, mid-line,
+        // with nothing in the log. With the signal suppressed the call just
+        // fails with EPIPE and the caller's existing "dropping connection"
+        // path handles it, which is what was always intended.
+        ssize_t n = send(fd, p + sent, len - sent, MSG_NOSIGNAL);
         if (n <= 0) return false;
         sent += static_cast<size_t>(n);
     }
@@ -56,10 +79,57 @@ bool send_all(int fd, const void *buf, size_t len)
 }
 
 // ============================================================
+// Peer: one connected client, owning its fd
+//
+// The fd is closed by ~Peer, i.e. only once the last shared_ptr to it is
+// gone. That is what makes it safe to send outside fd_mutex: a sender holds
+// a reference for the duration of the call, so the number it is writing to
+// cannot be closed and handed to an unrelated socket underneath it. Dropping
+// a peer calls kill(), which shutdown()s -- unblocking anyone already inside
+// send()/recv() and failing every later call -- without closing.
+// ============================================================
+struct Peer {
+    int fd;
+    std::mutex send_mtx;             // serializes writes to THIS fd only
+    std::atomic<bool> dead{false};
+
+    explicit Peer(int f) : fd(f) {}
+    ~Peer() { if (fd != -1) ::close(fd); }
+    Peer(const Peer &) = delete;
+    Peer &operator=(const Peer &) = delete;
+
+    bool send(const void *buf, size_t len)
+    {
+        if (dead.load()) return false;
+        std::lock_guard<std::mutex> lock(send_mtx);
+        if (dead.load()) return false;   // re-check: kill() may have landed
+                                         // while we waited for send_mtx
+        return send_all(fd, buf, len);
+    }
+
+    void kill()
+    {
+        if (!dead.exchange(true) && fd != -1) ::shutdown(fd, SHUT_RDWR);
+    }
+};
+
+std::shared_ptr<Peer> pcb_peer;      // both guarded by fd_mutex
+std::shared_ptr<Peer> python_peer;
+
+// Unregister `p` from whichever slot still holds it. Safe to call twice.
+void drop_peer(const std::shared_ptr<Peer> &p)
+{
+    std::lock_guard<std::mutex> lock(fd_mutex);
+    if (pcb_peer == p)    { pcb_peer.reset();    g_pcb_raw_fd    = -1; }
+    if (python_peer == p) { python_peer.reset(); g_python_raw_fd = -1; }
+}
+
+// ============================================================
 // Client handler thread
 // ============================================================
-void handle_client(int client_fd, const std::string &ip, int port)
+void handle_client(std::shared_ptr<Peer> self, const std::string &ip, int port, bool is_pcb)
 {
+    const int client_fd = self->fd;
     int packet_counter = 0;
 
     timeval tv{RECV_TIMEOUT_SEC, 0};
@@ -138,7 +208,18 @@ void handle_client(int client_fd, const std::string &ip, int port)
         if (!raw.empty())
             memcpy(out_buf.data() + 4, raw.data(), raw.size());
 
-        std::lock_guard<std::mutex> lock(fd_mutex);
+        // Snapshot the partner (and confirm we are still the registered peer
+        // for our own side -- a replaced connection must stop relaying) while
+        // holding fd_mutex, then RELEASE it before sending. The send itself
+        // serializes on that peer's own send_mtx, so the two directions no
+        // longer block each other.
+        std::shared_ptr<Peer> partner;
+        {
+            std::lock_guard<std::mutex> lock(fd_mutex);
+            if (self == pcb_peer)         partner = python_peer;
+            else if (self == python_peer) partner = pcb_peer;
+            else break;   // we were replaced; stop relaying
+        }
 
         if (ip == "127.0.0.1") {
             // Loopback self-test: echo straight back to the sender instead
@@ -147,7 +228,7 @@ void handle_client(int client_fd, const std::string &ip, int port)
             // relay's framing/TCP_NODELAY handling) still round-trips, it
             // just doesn't require a second peer, since there's no board
             // to be one.
-            if (!send_all(client_fd, out_buf.data(), out_buf.size())) {
+            if (!self->send(out_buf.data(), out_buf.size())) {
                 std::cerr << "Loopback echo failed for " << ip << ":" << port
                           << ", dropping connection\n";
                 break;
@@ -155,31 +236,23 @@ void handle_client(int client_fd, const std::string &ip, int port)
             continue;
         }
 
-        if (client_fd == pcb_fd && python_fd != -1) {
-            if (!send_all(python_fd, out_buf.data(), out_buf.size())) {
-                std::cerr << "Forward PCB -> Python stalled/failed, dropping Python connection\n";
-                shutdown(python_fd, SHUT_RDWR);
-                close(python_fd);
-                python_fd = -1;
-            }
-        }
-
-        if (client_fd == python_fd && pcb_fd != -1) {
-            if (!send_all(pcb_fd, out_buf.data(), out_buf.size())) {
-                std::cerr << "Forward Python -> PCB stalled/failed, dropping PCB connection\n";
-                shutdown(pcb_fd, SHUT_RDWR);
-                close(pcb_fd);
-                pcb_fd = -1;
+        if (partner) {
+            if (!partner->send(out_buf.data(), out_buf.size())) {
+                // Message text unchanged: it is what the logs have always
+                // said and what any grep over them expects.
+                std::cerr << (is_pcb ? "Forward PCB -> Python stalled/failed, dropping Python connection\n"
+                                     : "Forward Python -> PCB stalled/failed, dropping PCB connection\n");
+                partner->kill();
+                drop_peer(partner);
             }
         }
     }
 
     std::cout << "Client disconnected: " << ip << ":" << port << std::endl;
-    close(client_fd);
-
-    std::lock_guard<std::mutex> lock(fd_mutex);
-    if (client_fd == pcb_fd)    pcb_fd = -1;
-    if (client_fd == python_fd) python_fd = -1;
+    // No close() here: ~Peer does it when the last reference drops, which may
+    // be a forwarding thread still inside send() on this fd.
+    self->kill();
+    drop_peer(self);
 }
 
 // ============================================================
@@ -189,6 +262,11 @@ int main()
 {
     std::signal(SIGINT, handle_signal);
     std::signal(SIGTERM, handle_signal);
+    // Belt-and-braces alongside MSG_NOSIGNAL in send_all(): that flag covers
+    // the sends this program actually makes, this covers anything that ever
+    // writes to a dead peer without it. A dead peer is a connection to drop,
+    // never a reason to take the whole relay down.
+    std::signal(SIGPIPE, SIG_IGN);
 
     int server_fd = socket(AF_INET, SOCK_STREAM, 0);
     if (server_fd < 0) {
@@ -239,28 +317,29 @@ int main()
 
         bool is_pcb = (strcmp(ip_str, PCB_IP) == 0);
 
+        auto peer = std::make_shared<Peer>(client_fd);
         {
             std::lock_guard<std::mutex> lock(fd_mutex);
-            int &slot = is_pcb ? pcb_fd : python_fd;
-            if (slot != -1) {
+            auto &slot = is_pcb ? pcb_peer : python_peer;
+            if (slot) {
                 std::cout << "Replacing existing " << (is_pcb ? "PCB" : "Python")
                           << " connection (closing old fd)\n";
-                shutdown(slot, SHUT_RDWR);
-                close(slot);
+                slot->kill();   // shutdown only; its own thread closes it
             }
-            slot = client_fd;
+            slot = peer;
+            (is_pcb ? g_pcb_raw_fd : g_python_raw_fd) = client_fd;
         }
 
         std::cout << "Registered " << (is_pcb ? "PCB" : "Python") << " client\n";
 
-        workers.emplace_back(handle_client, client_fd, std::string(ip_str), client_port);
+        workers.emplace_back(handle_client, peer, std::string(ip_str), client_port, is_pcb);
     }
 
     close(server_fd);
     {
         std::lock_guard<std::mutex> lock(fd_mutex);
-        if (pcb_fd != -1)    shutdown(pcb_fd, SHUT_RDWR);
-        if (python_fd != -1) shutdown(python_fd, SHUT_RDWR);
+        if (pcb_peer)    pcb_peer->kill();
+        if (python_peer) python_peer->kill();
     }
     for (auto &t : workers) if (t.joinable()) t.join();
 
