@@ -122,6 +122,40 @@ def _add_entry_horizontal(frame, col, label, var, on_commit):
     return col + 2
 
 
+# Which config settings each part of the GUI owns, in GUI order. Used by
+# DualPlot.dump_buffers() to group the settings snapshot the same way the
+# window is laid out, so it is obvious at a glance that a whole tab was
+# captured -- a flat alphabetical list makes a missing tab invisible.
+#
+# This is presentation only. The snapshot itself is built reflectively from
+# config, and anything not listed here still gets written, under [ungrouped].
+# So forgetting to add a new knob here costs you the grouping, never the value.
+GUI_SECTIONS = (
+    ("Plot bar", (
+        "PLOT_MIN", "PLOT_MAX", "PLOT_BUFFER", "FRAME_RATE",
+        "PLOT_TRIGGER", "PLOT_TRIGGER_LEVEL",
+    )),
+    ("Signal / Basic tab", (
+        "SEND_RATE", "CHUNK_SIZE", "ECG_HEART_RATE", "ECG_SAMPLING_RATE",
+        "ECG_AMPLITUDE", "SEND_ENABLED", "RECEIVE_ENABLED",
+    )),
+    ("Signal / Waveform tab", (
+        "ECG_METHOD", "ECG_HEART_RATE_STD", "ECG_LFHFRATIO",
+        "ECG_TI", "ECG_AI", "ECG_BI", "ECG_RANDOM_SEED",
+    )),
+    ("Signal / Noise tab", (
+        "ECG_NOISE",
+        "ECG_NOISE_VIOLET_ENABLED", "ECG_NOISE_VIOLET_LEVEL",
+        "ECG_NOISE_BLUE_ENABLED",   "ECG_NOISE_BLUE_LEVEL",
+        "ECG_NOISE_WHITE_ENABLED",  "ECG_NOISE_WHITE_LEVEL",
+        "ECG_NOISE_PINK_ENABLED",   "ECG_NOISE_PINK_LEVEL",
+        "ECG_NOISE_BROWN_ENABLED",  "ECG_NOISE_BROWN_LEVEL",
+        "ECG_SINE1_ENABLED", "ECG_SINE1_FREQ", "ECG_SINE1_PHASE", "ECG_SINE1_LEVEL",
+        "ECG_SINE2_ENABLED", "ECG_SINE2_FREQ", "ECG_SINE2_PHASE", "ECG_SINE2_LEVEL",
+    )),
+)
+
+
 # (display name, config attr for "enabled", config attr for "level", beta,
 #  short description of that color's character for its tooltip)
 _NOISE_ROWS = (
@@ -493,10 +527,10 @@ class SignalControlPanel:
             value = int(self._ecg_sample_rate.get())
         except ValueError:
             value = config.ECG_SAMPLING_RATE
-        value = max(50, min(value, 2000))  # 50 Hz floor keeps QRS shape
-                                            # recognizable; 2000 Hz ceiling
-                                            # is a sanity cap, well above
-                                            # any real ECG hardware rate.
+        # Bounds live in config.py next to the value they bound -- see the
+        # comment there for why, and for the measurement behind the ceiling.
+        value = max(config.ECG_SAMPLING_RATE_MIN,
+                    min(value, config.ECG_SAMPLING_RATE_MAX))
         self._ecg_sample_rate.set(str(value))
         config.ECG_SAMPLING_RATE = value
         self._update_rate_status()
@@ -584,8 +618,12 @@ class SignalControlPanel:
 
 
 class PlotControlPanel:
-    def __init__(self, parent):
+    def __init__(self, parent, plot=None):
         self.frame = ttk.Frame(parent, padding=8)
+        # The DualPlot that owns the buffers, for the "Log buffer" button.
+        # Optional so the panel stays constructible on its own; the button
+        # just disables itself when there is nothing to dump.
+        self._plot = plot
 
         self._plot_min = tk.StringVar(value=str(config.PLOT_MIN))
         self._plot_max = tk.StringVar(value=str(config.PLOT_MAX))
@@ -616,6 +654,34 @@ class PlotControlPanel:
         col += 1
         col = _add_entry_horizontal(self.frame, col, "Level (0-1)", self._trigger_level,
                                      self._apply_trigger)
+
+        # Writes the on-screen window of all four traces to a CSV under
+        # build/logs/. For inspecting a trace that looks wrong -- far more
+        # useful than describing it, since the file carries the settings that
+        # produced it alongside the samples.
+        self._dump_button = ttk.Button(self.frame, text="Log buffer",
+                                       command=self._dump_buffers)
+        self._dump_button.grid(row=0, column=col, sticky="w", padx=(8, 4))
+        if self._plot is None:
+            self._dump_button.state(["disabled"])
+        col += 1
+        self._dump_status = ttk.Label(self.frame, text="")
+        self._dump_status.grid(row=0, column=col, sticky="w")
+        col += 1
+
+    def _dump_buffers(self):
+        if self._plot is None:
+            return
+        try:
+            path = self._plot.dump_buffers()
+        except Exception as exc:                      # noqa: BLE001
+            # Never let a dump failure take down the plot: this is a
+            # diagnostic, and losing the live view to save a file would be a
+            # bad trade. Report it in the panel and in the log, carry on.
+            self._dump_status.configure(text="dump failed")
+            print(f"[plot] buffer dump failed: {exc}")
+            return
+        self._dump_status.configure(text=path.name)
 
     def _apply_trigger(self):
         config.PLOT_TRIGGER = bool(self._trigger_on.get())

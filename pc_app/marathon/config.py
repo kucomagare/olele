@@ -70,10 +70,15 @@ PLOT_MODE = "scope"
 # upward crossing of a level. Same phase every frame, so a repeating
 # waveform stands still no matter how fast the stream runs.
 #
+# Off by default: at real-time playback rates the window scrolls smoothly on
+# its own and a trigger only costs you the newest samples (it slides the view
+# back to the last crossing). Turn it on -- from the panel, live -- when the
+# stream outruns the window and the trace starts jumping.
+#
 # Cost: the capture buffers become PLOT_CAPTURE_FACTOR x PLOT_BUFFER so
 # there is somewhere to slide the window within. The displayed length, the
 # x-axis and PLOT_BUFFER's meaning are all unchanged.
-PLOT_TRIGGER = True
+PLOT_TRIGGER = False
 
 # Trigger level as a fraction of the PLOT_MIN..PLOT_MAX view range. For ECG
 # the R-wave upstroke is the obvious feature to lock to; 0.6 sits above the
@@ -176,6 +181,41 @@ ECG_SAMPLING_RATE = 2048  # Hz, native rate of the simulated buffer. A
                           # research-grade capture).
 ECG_HEART_RATE = 120      # bpm. Live-editable from the panel; signal_gen.py
                           # regenerates the buffer when this changes.
+# Panel limits for ECG_SAMPLING_RATE. Here rather than hardcoded in
+# control_panel.py because the default above used to exceed the panel's own
+# ceiling: 2048 was fine at startup but silently snapped to 2000 the moment
+# the field was touched, with no way back. Keeping the bound next to the value
+# it bounds makes that drift visible.
+#
+# Measured 2026-08-26 with ECG_DURATION_S=60, method=ecgsyn:
+#
+#     rate     samples   generate   buffer (2ch)   2000-sample window
+#     2048     122,880      0.45 s        2.0 MB            977 ms
+#     8192     491,520      0.61 s        7.9 MB            244 ms
+#    16384     983,040      0.76 s       15.7 MB            122 ms
+#    32768   1,966,080      1.17 s       31.5 MB             61 ms
+#    65536   3,932,160      2.08 s       62.9 MB             30 ms
+#
+# 65536 works, but two things scale badly with it and neither is obvious:
+#
+#  - Regeneration runs on the GUI thread and goes 0.45 s -> 2.08 s. Every
+#    heart-rate or waveform change freezes the window for two seconds, and at
+#    high SEND_RATE that is long enough to show up as "(dropped N late)" in
+#    the client log. Not a fault, but do not go hunting for it.
+#  - PLOT_BUFFER has to scale with the rate or the window stops meaning
+#    anything: at 65536 Hz, 2000 samples is 30 ms of ECG, about 6% of one beat
+#    at 120 bpm. One beat needs ~32,768 samples, three needs ~98,000 -- and
+#    matplotlib's per-refresh cost is roughly linear in points drawn (~8.8 ms
+#    at 2000 points, measured), so that is the real limit, not the generator.
+#
+# Note this is the rate the waveform is GENERATED at, not the rate it is
+# streamed at -- streaming is SEND_RATE x CHUNK_SIZE. Raising this alone makes
+# the waveform finer-grained and the plot's time axis shorter; it does not put
+# more samples per second on the wire.
+ECG_SAMPLING_RATE_MIN = 50     # below this the QRS shape stops being
+                                # recognizable
+ECG_SAMPLING_RATE_MAX = 65536  # 2**16
+
 ECG_DURATION_S = 60       # seconds of buffer before the stream loops.
 ECG_NOISE = 0.01          # nk.ecg_simulate's own built-in amplitude-relative
                           # (Laplace) noise level. Live-editable from the

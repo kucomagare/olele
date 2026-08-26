@@ -18,6 +18,10 @@
 #      so the window covers a useful span AND the per-packet work drops
 #      from O(CHUNK_SIZE) to O(1).
 
+import csv
+import time as _time
+from pathlib import Path
+
 import numpy as np
 import matplotlib
 matplotlib.use("TkAgg")
@@ -27,7 +31,7 @@ from matplotlib.ticker import FuncFormatter
 import config
 from config import PLOT_ENVELOPE_BLOCKS, PLOT_MODE
 from packet_format import CH1_DTYPE, CH2_DTYPE
-from control_panel import SignalControlPanel, PlotControlPanel
+from control_panel import GUI_SECTIONS, SignalControlPanel, PlotControlPanel
 
 _SCOPE = (PLOT_MODE == "scope")
 
@@ -87,7 +91,7 @@ class DualPlot:
         for child, _ in existing:
             child.pack_forget()
 
-        self.plot_control_panel = PlotControlPanel(tk_window)
+        self.plot_control_panel = PlotControlPanel(tk_window, plot=self)
         self.plot_control_panel.frame.pack(side="bottom", fill="x")
         self.signal_control_panel = SignalControlPanel(tk_window)
         self.signal_control_panel.frame.pack(side="right", fill="y")
@@ -310,6 +314,128 @@ class DualPlot:
         self.line_ch1_out.set_ydata(self.ch1_out[off_out:off_out + n])
         self.line_ch2_out.set_ydata(self.ch2_out[off_out:off_out + n])
         self._dirty = False
+
+    def dump_buffers(self, out_dir=None):
+        """Write the currently displayed window of all four traces to a CSV
+        and return the path.
+
+        Dumps the DISPLAYED window (post-trigger), not the whole capture
+        buffer, so the file contains exactly what is on screen -- the point
+        is to be able to inspect a trace that looks wrong, which means the
+        samples the eye is actually looking at.
+
+        Called from a Tk button callback, which runs on the same thread as
+        update_input/update_output (python_client.py's main loop pumps the Tk
+        event loop via canvas.flush_events()). So the buffers cannot be
+        half-updated underneath this -- no locking needed. It would need
+        locking if the net thread ever wrote them directly.
+        """
+        n = self.buffer_size
+        off_in  = self._trigger_offset(self.ch1_in)
+        off_out = self._trigger_offset(self.ch1_out)
+
+        # Widen to uint64 before writing: the buffers are big-endian wire
+        # dtypes, and csv would otherwise emit numpy scalar reprs rather than
+        # plain integers.
+        cols = {
+            "ch1_in":  self.ch1_in[off_in:off_in + n].astype(np.uint64),
+            "ch2_in":  self.ch2_in[off_in:off_in + n].astype(np.uint64),
+            "ch1_out": self.ch1_out[off_out:off_out + n].astype(np.uint64),
+            "ch2_out": self.ch2_out[off_out:off_out + n].astype(np.uint64),
+        }
+
+        if out_dir is None:
+            out_dir = Path(__file__).resolve().parent / "build" / "logs"
+        out_dir = Path(out_dir)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        # One timestamp for both files so the data and the settings that
+        # produced it are obviously a pair.
+        stamp = _time.strftime("%Y%m%d_%H%M%S")
+        path = out_dir / f"plotdump_{stamp}.csv"
+        cfg_path = out_dir / f"plot_config_data_{stamp}.txt"
+
+        rate = config.ECG_SAMPLING_RATE or 1
+        with open(path, "w", newline="") as f:
+            # Metadata as leading comment lines: a dump is worthless later
+            # without the settings that produced it. numpy.genfromtxt and
+            # pandas.read_csv both skip '#' when told to; a bare csv reader
+            # does not, hence the header row below them.
+            f.write(f"# samples={n} trigger={config.PLOT_TRIGGER} "
+                    f"level={config.PLOT_TRIGGER_LEVEL}\n")
+            f.write(f"# send_rate={config.SEND_RATE} chunk={config.CHUNK_SIZE} "
+                    f"effective_sps={config.SEND_RATE * config.CHUNK_SIZE}\n")
+            f.write(f"# ecg_rate={config.ECG_SAMPLING_RATE} "
+                    f"amplitude={config.ECG_AMPLITUDE} hr={config.ECG_HEART_RATE}\n")
+            f.write(f"# plot_min={config.PLOT_MIN} plot_max={config.PLOT_MAX} "
+                    f"dtype={self.ch1_in.dtype}\n")
+            w = csv.writer(f)
+            w.writerow(["index", "time_s", *cols.keys()])
+            for i in range(n):
+                w.writerow([i, f"{i / rate:.6f}", *(int(c[i]) for c in cols.values())])
+
+        self._dump_config(cfg_path, stamp, path.name, n, off_in, off_out)
+
+        print(f"[plot] dumped {n} samples x {len(cols)} traces -> {path}")
+        print(f"[plot] settings -> {cfg_path}")
+        return path
+
+    def _dump_config(self, cfg_path, stamp, data_name, n, off_in, off_out):
+        """Snapshot every live setting next to the data dump.
+
+        Reads config.py's public names reflectively rather than listing them:
+        the whole point of the file is to still be complete a month from now,
+        and a hand-maintained list silently rots every time a knob is added.
+        Values that are not plain scalars are skipped -- they are numpy
+        buffers and imported modules, not settings.
+        """
+        derived = [
+            ("effective_samples_per_s", config.SEND_RATE * config.CHUNK_SIZE),
+            ("displayed_samples",       n),
+            ("capture_samples",         self._cap_size),
+            ("wire_dtype",              str(self.ch1_in.dtype)),
+            ("trigger_offset_in",       off_in),
+            ("trigger_offset_out",      off_out),
+        ]
+        settings = {}
+        for name in sorted(dir(config)):
+            # isupper() alone is not enough: underscores have no case, so
+            # private helpers like _WIRE_MAX pass it.
+            if name.startswith("_") or not name.isupper():
+                continue
+            value = getattr(config, name)
+            if isinstance(value, (bool, int, float, str, type(None))):
+                settings[name] = value
+            elif isinstance(value, (tuple, list)) and all(
+                    isinstance(v, (bool, int, float, str)) for v in value):
+                settings[name] = value
+
+        # Group to match the window's own layout, so a whole missing tab is
+        # obvious. GUI_SECTIONS is presentation only -- anything it does not
+        # mention still gets written, under [ungrouped]. A knob added to the
+        # GUI without being listed there loses its grouping, never its value.
+        grouped, seen = [], set()
+        for section, names in GUI_SECTIONS:
+            rows = [(n, settings[n]) for n in names if n in settings]
+            seen.update(n for n, _ in rows)
+            if rows:
+                grouped.append((section, rows))
+        rest = [(n, v) for n, v in settings.items() if n not in seen]
+        if rest:
+            grouped.append(("ungrouped (not owned by any GUI section)", rest))
+
+        width = max([len(k) for k, _ in derived]
+                    + [len(k) for _, rows in grouped for k, _ in rows] or [0])
+        with open(cfg_path, "w") as f:
+            f.write(f"# olele plot settings snapshot -- {stamp}\n")
+            f.write(f"# pairs with {data_name}\n")
+            f.write(f"# {len(settings)} settings, grouped as the window lays them out\n\n")
+            f.write("[derived]\n")
+            for k, v in derived:
+                f.write(f"{k:<{width}} = {v}\n")
+            for section, rows in grouped:
+                f.write(f"\n[{section}]\n")
+                for k, v in rows:
+                    f.write(f"{k:<{width}} = {v}\n")
 
     def refresh(self):
         self.sync()
