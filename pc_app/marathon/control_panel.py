@@ -201,7 +201,9 @@ class SignalControlPanel:
                                      "own sample rate.")
         row = _add_entry(frame, row, "Chunk size (smp/pkt)", self._chunk_size, self._apply_chunk_size,
                           help_text="Samples per packet. Together with Send rate, sets the "
-                                     "effective streaming rate (samples/s).")
+                                     "effective streaming rate (samples/s). Rounded down to a "
+                                     "multiple of 8: one packet is one DMA buffer, which must "
+                                     "be a whole number of frames and a multiple of 32 bytes.")
         row = _add_entry(frame, row, "Heart rate (bpm)", self._heart_rate, self._apply_heart_rate,
                           help_text="Mean simulated heart rate. Actual beat-to-beat timing can "
                                      "vary slightly for realism -- see Heart rate std on the "
@@ -464,6 +466,15 @@ class SignalControlPanel:
         except ValueError:
             value = config.CHUNK_SIZE
         value = max(1, min(value, config.MAX_CHUNK_SIZE))
+        # Snap down to a whole number of DMA-safe groups. On marathon a
+        # packet is one DMA buffer, which has to be a multiple of 32 bytes
+        # AND a whole number of frames -- see CHUNK_SIZE_GRANULARITY in
+        # config.py. Silently rounding beats accepting a value that would
+        # leave the tested regime with no visible symptom; the entry box is
+        # rewritten below so the user sees what actually took effect.
+        gran = getattr(config, "CHUNK_SIZE_GRANULARITY", 1)
+        if gran > 1:
+            value = max(gran, (value // gran) * gran)
         self._chunk_size.set(str(value))
         config.CHUNK_SIZE = value
         self._update_rate_status()
@@ -580,6 +591,8 @@ class PlotControlPanel:
         self._plot_max = tk.StringVar(value=str(config.PLOT_MAX))
         self._plot_buffer = tk.StringVar(value=str(config.PLOT_BUFFER))
         self._frame_rate = tk.StringVar(value=str(config.FRAME_RATE))
+        self._trigger_on = tk.BooleanVar(value=bool(config.PLOT_TRIGGER))
+        self._trigger_level = tk.StringVar(value=str(config.PLOT_TRIGGER_LEVEL))
 
         col = 0
         ttk.Label(self.frame, text="Plot", font=("", 10, "bold")).grid(
@@ -592,6 +605,30 @@ class PlotControlPanel:
                                      self._apply_plot_buffer)
         col = _add_entry_horizontal(self.frame, col, "Frame rate (fps)", self._frame_rate,
                                      self._apply_frame_rate)
+
+        # Scope trigger. Without it the window shows whatever phase happened
+        # to be newest at frame time, which above a few thousand samples/s
+        # means a different phase every frame -- see the PLOT_TRIGGER comment
+        # in config.py. Untick to get the old free-running behaviour back.
+        ttk.Checkbutton(self.frame, text="Trigger", variable=self._trigger_on,
+                        command=self._apply_trigger).grid(
+            row=0, column=col, sticky="w", padx=(0, 8))
+        col += 1
+        col = _add_entry_horizontal(self.frame, col, "Level (0-1)", self._trigger_level,
+                                     self._apply_trigger)
+
+    def _apply_trigger(self):
+        config.PLOT_TRIGGER = bool(self._trigger_on.get())
+        try:
+            level = float(self._trigger_level.get())
+        except ValueError:
+            level = config.PLOT_TRIGGER_LEVEL
+        # Clamped inside the view range rather than to [0, 1] exactly: a
+        # level sitting on either limit can never be crossed, so it would
+        # silently free-run instead of triggering.
+        level = min(max(level, 0.01), 0.99)
+        self._trigger_level.set(f"{level:g}")
+        config.PLOT_TRIGGER_LEVEL = level
 
     def _apply_plot_ylim(self):
         try:

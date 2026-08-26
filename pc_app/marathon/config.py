@@ -54,6 +54,41 @@ PLOT_MAX = _WIRE_MAX    # from the panel -- purely a *view* (what part of the
 # extremes.
 PLOT_MODE = "scope"
 
+# --- Oscilloscope trigger -------------------------------------------------
+# Why this exists: the window shows PLOT_BUFFER samples, but at high
+# streaming rates far more than that arrives between two frames. At
+# SEND_RATE=1500 x CHUNK_SIZE=960 the stream is 1.44M samples/s, so a
+# 2000-sample window is 1.39 ms of signal and turns over ~30 times per frame
+# at FRAME_RATE=24. Which phase of the waveform is on screen at frame time is
+# then arbitrary, and the trace appears to jump rather than scroll -- not
+# dropped or corrupt data, just no phase reference. (At the old
+# 50 x 10 = 500 samples/s only ~21 samples arrived per frame, 1% of the
+# window, which is why it used to look stable.)
+#
+# A real scope fixes this by triggering: instead of always showing the newest
+# PLOT_BUFFER samples, show the window that STARTS at the most recent
+# upward crossing of a level. Same phase every frame, so a repeating
+# waveform stands still no matter how fast the stream runs.
+#
+# Cost: the capture buffers become PLOT_CAPTURE_FACTOR x PLOT_BUFFER so
+# there is somewhere to slide the window within. The displayed length, the
+# x-axis and PLOT_BUFFER's meaning are all unchanged.
+PLOT_TRIGGER = True
+
+# Trigger level as a fraction of the PLOT_MIN..PLOT_MAX view range. For ECG
+# the R-wave upstroke is the obvious feature to lock to; 0.6 sits above the
+# baseline but below the R peak, so it fires once per beat. Lower it if the
+# trace free-runs (never triggering), raise it if it locks onto a T wave or
+# onto noise.
+PLOT_TRIGGER_LEVEL = 0.6
+
+# How much history to keep behind the displayed window, as a multiple of
+# PLOT_BUFFER. 2 means the trigger can slide the window back by up to one
+# full window to find a crossing. Larger costs memory and a slightly longer
+# search for no real benefit.
+PLOT_CAPTURE_FACTOR = 2
+
+
 # Each received chunk is reduced to this many min/max pairs before being
 # pushed into the plot buffer (so 2*PLOT_ENVELOPE_BLOCKS points per
 # packet). Set to 0 to plot raw samples.
@@ -122,7 +157,15 @@ CHUNK_SIZE = 8
 MAX_CHUNK_SIZE = 2000  # mirrors MAX_SAMPLES in tcp_server_app.cpp and
                         # MAX_PAYLOAD_SAMPLES in lwip_comm_client_raw.c --
                         # the wire/firmware hard ceiling. The control panel
-                        # clamps to this.
+                        # clamps to this. Also a multiple of 8, so the whole
+                        # range below is reachable.
+
+# Machine-readable form of the MARATHON CONSTRAINT documented above, so the
+# control panel can enforce it instead of leaving it to a comment nobody
+# reads mid-experiment. The panel snaps any typed Chunk size down to a
+# multiple of this. sizif has no such constraint (its equivalent is 1) --
+# reading it with getattr() keeps a copied panel working either way.
+CHUNK_SIZE_GRANULARITY = 8
 
 # ECG signal generation (neurokit2). ch1/ch2 are each an independent
 # nk.ecg_simulate() call, cached and re-sliced per packet -- see

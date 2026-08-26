@@ -96,10 +96,15 @@ class DualPlot:
             info["in_"] = info.pop("in")
             child.pack(**info)
 
-        self.ch1_in  = np.zeros(buffer_size, dtype=CH1_DTYPE)
-        self.ch2_in  = np.zeros(buffer_size, dtype=CH2_DTYPE)
-        self.ch1_out = np.zeros(buffer_size, dtype=CH1_DTYPE)
-        self.ch2_out = np.zeros(buffer_size, dtype=CH2_DTYPE)
+        # Capture buffers are PLOT_CAPTURE_FACTOR x the DISPLAYED window, so
+        # the trigger has somewhere to slide the window back to. Everything
+        # else -- buffer_size, the x-axis, PLOT_BUFFER's meaning -- still
+        # refers to the displayed length only.
+        self._cap_size = buffer_size * config.PLOT_CAPTURE_FACTOR
+        self.ch1_in  = np.zeros(self._cap_size, dtype=CH1_DTYPE)
+        self.ch2_in  = np.zeros(self._cap_size, dtype=CH2_DTYPE)
+        self.ch1_out = np.zeros(self._cap_size, dtype=CH1_DTYPE)
+        self.ch2_out = np.zeros(self._cap_size, dtype=CH2_DTYPE)
 
         # drawstyle="steps-mid": each sample renders as a flat segment
         # centered on its x position instead of a straight line sloping
@@ -107,10 +112,10 @@ class DualPlot:
         # way (see prior discussion), this just makes each individual
         # sample's value visually distinct rather than implying a value in
         # between two samples that was never actually measured/sent.
-        self.line_ch1_in,  = self.ax1.plot(self.ch1_in,  color="blue", label="in",  animated=True, drawstyle="steps-mid")
-        self.line_ch1_out, = self.ax1.plot(self.ch1_out, color="red",  label="out", animated=True, drawstyle="steps-mid")
-        self.line_ch2_in,  = self.ax2.plot(self.ch2_in,  color="blue", label="in",  animated=True, drawstyle="steps-mid")
-        self.line_ch2_out, = self.ax2.plot(self.ch2_out, color="red",  label="out", animated=True, drawstyle="steps-mid")
+        self.line_ch1_in,  = self.ax1.plot(self.ch1_in[-buffer_size:],  color="blue", label="in",  animated=True, drawstyle="steps-mid")
+        self.line_ch1_out, = self.ax1.plot(self.ch1_out[-buffer_size:], color="red",  label="out", animated=True, drawstyle="steps-mid")
+        self.line_ch2_in,  = self.ax2.plot(self.ch2_in[-buffer_size:],  color="blue", label="in",  animated=True, drawstyle="steps-mid")
+        self.line_ch2_out, = self.ax2.plot(self.ch2_out[-buffer_size:], color="red",  label="out", animated=True, drawstyle="steps-mid")
         self._lines_ax1 = (self.line_ch1_in, self.line_ch1_out)
         self._lines_ax2 = (self.line_ch2_in, self.line_ch2_out)
 
@@ -172,9 +177,11 @@ class DualPlot:
         growing). Must also update the lines' x-data -- Line2D requires
         matching x/y lengths, and the old x-data (0..old_size-1) was fixed
         at plot() time in __init__."""
+        cap_size = new_size * config.PLOT_CAPTURE_FACTOR
+
         def resized(old):
-            new = np.zeros(new_size, dtype=old.dtype)
-            keep = min(new_size, len(old))
+            new = np.zeros(cap_size, dtype=old.dtype)
+            keep = min(cap_size, len(old))
             if keep:
                 new[-keep:] = old[-keep:]
             return new
@@ -184,12 +191,13 @@ class DualPlot:
         self.ch1_out = resized(self.ch1_out)
         self.ch2_out = resized(self.ch2_out)
         self.buffer_size = new_size
+        self._cap_size = cap_size
 
         x = np.arange(new_size)
-        self.line_ch1_in.set_data(x, self.ch1_in)
-        self.line_ch1_out.set_data(x, self.ch1_out)
-        self.line_ch2_in.set_data(x, self.ch2_in)
-        self.line_ch2_out.set_data(x, self.ch2_out)
+        self.line_ch1_in.set_data(x, self.ch1_in[-new_size:])
+        self.line_ch1_out.set_data(x, self.ch1_out[-new_size:])
+        self.line_ch2_in.set_data(x, self.ch2_in[-new_size:])
+        self.line_ch2_out.set_data(x, self.ch2_out[-new_size:])
         self.ax1.set_xlim(0, new_size - 1)
 
     def _on_draw(self, _event):
@@ -248,16 +256,59 @@ class DualPlot:
         self._rolled(self.ch2_out, values2)
         self._dirty = True
 
+    def _trigger_offset(self, ref):
+        """Index in the capture buffer where the displayed window should
+        start: the most recent upward crossing of the trigger level that
+        still leaves a full window after it.
+
+        Picking the LAST valid crossing rather than the first keeps the
+        display as fresh as possible; because the crossings of a repeating
+        waveform are one period apart, whichever one is chosen puts the
+        trace at the same phase, which is the whole point.
+
+        Falls back to the newest window -- i.e. exactly the old untriggered
+        behaviour -- when triggering is off, the view range is degenerate,
+        or the signal simply never crosses the level (a flat or
+        below-threshold trace, which free-runs rather than blanking).
+        """
+        newest = self._cap_size - self.buffer_size
+        if not config.PLOT_TRIGGER:
+            return newest
+
+        lo, hi = config.PLOT_MIN, config.PLOT_MAX
+        if hi <= lo:
+            return newest
+        level = lo + config.PLOT_TRIGGER_LEVEL * (hi - lo)
+
+        # Only positions <= newest can start a full window. float64 because
+        # the buffers are big-endian wire dtypes and this keeps the
+        # comparison free of byte-order and overflow surprises; it is a few
+        # thousand elements twice a frame, not a hot path.
+        candidates = ref[:newest + 1].astype(np.float64, copy=False)
+        if candidates.size < 2:
+            return newest
+        crossings = np.flatnonzero((candidates[:-1] < level) & (candidates[1:] >= level))
+        if crossings.size == 0:
+            return newest
+        return int(crossings[-1]) + 1
+
     def sync(self):
         """Push the (already up to date) buffers into the line artists.
         Once per frame -- this is the expensive part update_input/
         update_output avoid doing at packet rate."""
         if not self._dirty:
             return
-        self.line_ch1_in.set_ydata(self.ch1_in)
-        self.line_ch2_in.set_ydata(self.ch2_in)
-        self.line_ch1_out.set_ydata(self.ch1_out)
-        self.line_ch2_out.set_ydata(self.ch2_out)
+        n = self.buffer_size
+        # One offset per direction, taken from that direction's ch1 and
+        # applied to both its channels: in/out are separated by the link's
+        # round-trip delay so they need their own triggers, but ch1/ch2
+        # share a time base and must stay aligned with each other.
+        off_in  = self._trigger_offset(self.ch1_in)
+        off_out = self._trigger_offset(self.ch1_out)
+        self.line_ch1_in.set_ydata(self.ch1_in[off_in:off_in + n])
+        self.line_ch2_in.set_ydata(self.ch2_in[off_in:off_in + n])
+        self.line_ch1_out.set_ydata(self.ch1_out[off_out:off_out + n])
+        self.line_ch2_out.set_ydata(self.ch2_out[off_out:off_out + n])
         self._dirty = False
 
     def refresh(self):
