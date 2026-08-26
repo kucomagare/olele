@@ -1,0 +1,124 @@
+=======================================================================
+ olele -- commands you run from the repo root
+=======================================================================
+
+Every *_all.sh script and pc_app.sh acts on ONE variant, chosen by the
+VARIANT env var. It DEFAULTS TO "sizif", so marathon work needs it set
+every time -- either per command:
+
+    VARIANT=marathon ./run_all.sh
+
+or once per shell:
+
+    source ./bootenv.sh                # also puts the Xilinx tools on PATH
+    export VARIANT=marathon
+
+VARIANT must be an env var, never a positional argument: pc_app.sh passes
+all its arguments straight through, so "./pc_app.sh marathon start" would
+hand "marathon" to system.sh as a subcommand and fail.
+
+    sizif     AXI-Lite architecture, frozen reference
+    marathon  DMA / AXI-Stream architecture, active development
+
+Only one variant can own the board at a time -- they flash the same part.
+Both also use TCP port 5001, so stop one before starting the other.
+
+
+-----------------------------------------------------------------------
+ EVERY DAY
+-----------------------------------------------------------------------
+
+  source ./bootenv.sh              Once per shell, before anything else.
+                                   SOURCE it, do not execute it.
+
+  ./net_tune.sh                    Once per BOOT, before any throughput
+                                   work. Kernel state, so a reboot loses
+                                   it and the stream goes unstable again.
+
+  VARIANT=marathon ./run_all.sh    Flash + run the board, and start the
+                                   PC app. Needs build_all.sh done first.
+
+  VARIANT=marathon ./stop_all.sh   Stop the PC app and the serial console.
+                                   The firmware keeps running until reset,
+                                   reflashed or power-cycled.
+
+
+-----------------------------------------------------------------------
+ BUILDING
+-----------------------------------------------------------------------
+
+  VARIANT=marathon ./build_all.sh    Whole stack: Vivado bitstream + .xsa,
+                                     Vitis platform + firmware ELF, relay
+                                     binary + venv. Slow. Builds only, does
+                                     not flash or start anything.
+
+  VARIANT=marathon ./compile_all.sh  Fast path: firmware C and the C++ relay
+                                     only. Use after editing app/src/*.c or
+                                     tcp_server_app.cpp. Skips Vivado synth
+                                     and Vitis platform creation.
+
+  VARIANT=marathon ./clean_all.sh    Wipe that variant's build/ dirs. The
+                                     other variant is left alone so a slow
+                                     Vivado rebuild is not triggered by
+                                     accident.
+
+  Rule of thumb: build_all.sh only when the bitstream or the Vitis platform
+  itself changed. Otherwise compile_all.sh. Neither is needed for a
+  Python-only change -- pc_app.sh restart-client covers that.
+
+
+-----------------------------------------------------------------------
+ PC SIDE ONLY  (no reflash -- passthrough to pc_app/$VARIANT/system.sh)
+-----------------------------------------------------------------------
+
+  VARIANT=marathon ./pc_app.sh start
+                              stop
+                              restart           both relay and client
+                              restart-client    after editing config.py,
+                                                net.py, plot.py, ...
+                              restart-server    after editing
+                                                tcp_server_app.cpp
+                              status            what is running
+                              logs              tail both logs
+
+  restart-client is the one to prefer while experimenting: it leaves the
+  relay up, so the board's TCP connection survives and the board-side [S]
+  stats stay continuous.
+
+  Panel fields (send rate, chunk size, frame rate, trigger, heart rate...)
+  are live -- they need NO restart at all.
+
+
+-----------------------------------------------------------------------
+ NETWORK TUNING / DIAGNOSIS
+-----------------------------------------------------------------------
+
+  ./net_tune.sh          Apply. Needs sudo. Existing TCP connections do
+                         NOT pick it up -- restart the PC side after.
+  ./net_tune.sh show     Is it applied? No sudo needed. FIRST THING TO
+                         CHECK if throughput is fluctuating.
+  ./net_tune.sh loss     Live packet loss to the board. ~0.85% is the
+                         known standing figure; rising means you are
+                         pushing past what the board's rx path absorbs.
+  ./net_tune.sh revert   Remove the flags.
+
+
+-----------------------------------------------------------------------
+ WHEN SOMETHING LOOKS WRONG -- CHECK IN THIS ORDER
+-----------------------------------------------------------------------
+
+  1. ./net_tune.sh show            untuned after a reboot is the most
+                                   likely cause of "it fluctuates"
+  2. VARIANT=... ./pc_app.sh logs  the client line tells you WHERE:
+                                     (dropped N late)  -> local PC stall
+                                     (N send-stalls)   -> far end pushing
+                                                          back
+                                   both near zero and still short of the
+                                   setpoint -> the limit is elsewhere
+  3. the board's PuTTY console     [E] lines, and the [S] rate; tx= shows
+                                   only when it differs from rx, and +/-1
+                                   is just a window-boundary straddle
+  4. ./net_tune.sh loss            link health
+
+  Note the board has been the innocent party in every problem so far.
+  Suspect the PC and the link first.
