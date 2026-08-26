@@ -20,7 +20,14 @@ void comm_process(void);
    0 = the legacy per-sample AXI-Lite chains. Both are in the bitstream so
    they can be A/B'd on identical data. Cleared automatically if DMA
    initialisation fails. */
+#include "packet_format.h"
+
 extern int comm_use_dma;
+extern uint32_t comm_resyncs;
+
+/* Push one metrics packet to the PC. Called once per second from main.c's
+   stats block; no-op while disconnected. */
+void comm_send_metrics(const packet_metrics_t *m);
 
 /* Throughput statistics (used by main.c) */
 extern uint32_t packets_rx;

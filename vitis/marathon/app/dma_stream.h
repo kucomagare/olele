@@ -62,4 +62,12 @@ void dma_stream_release(void);
    shift 0 == bypass. */
 void dma_stream_set_filter(uint32_t n_channels, uint32_t shift, uint32_t ctrl);
 
+/* Read the TDM filter's registers back out of the fabric. Deliberately a real
+   read rather than a copy of whatever was last written: a value the hardware
+   clamped, ignored, or never received then shows up as a mismatch instead of
+   being reported back as if it had taken effect. `status` is the filter's
+   read-only STATUS word (see axi_tdm_filter.vhd). Any pointer may be NULL. */
+void dma_stream_get_filter(uint32_t *n_channels, uint32_t *shift,
+                           uint32_t *ctrl, uint32_t *status);
+
 #endif /* DMA_STREAM_H */

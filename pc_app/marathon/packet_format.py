@@ -55,6 +55,31 @@ TS_MODULUS = 1 << _TS_BITS
 CH1_DTYPE = DATA_DTYPE.fields["ch1"][0]
 CH2_DTYPE = DATA_DTYPE.fields["ch2"][0]
 
+CONFIG_TYPE   = next(t for t, v in PACKET_TYPES.items() if v["name"] == "config")
+CONFIG_DTYPE  = PACKET_DTYPES[CONFIG_TYPE]
+METRICS_TYPE  = next(t for t, v in PACKET_TYPES.items() if v["name"] == "metrics")
+METRICS_DTYPE = PACKET_DTYPES[METRICS_TYPE]
+
+# Config packet ops. Mirrored in the firmware as CONFIG_OP_* -- the JSON's
+# "config" description is the source of truth for what they mean.
+CONFIG_OP_READ = 0
+CONFIG_OP_WRITE = 1
+
+
+def build_config_packet(op, n_channels=0, shift=0, ctrl=0):
+    """Frame one config packet ready for the wire.
+
+    status is sent as 0: it is read-only on the board and ignored inbound,
+    so there is nothing meaningful to put there.
+    """
+    rec = np.zeros(1, dtype=CONFIG_DTYPE)
+    rec[0]["op"] = op
+    rec[0]["n_channels"] = n_channels
+    rec[0]["shift"] = shift
+    rec[0]["ctrl"] = ctrl
+    rec[0]["status"] = 0
+    return struct.pack("!HH", CONFIG_TYPE, 1) + rec.tobytes()
+
 
 class PacketReceiver:
     def __init__(self):
@@ -84,9 +109,11 @@ class PacketReceiver:
         body = bytes(self.buffer[4:total_needed])
         del self.buffer[:total_needed]
 
-        if type_r != DATA_TYPE:
-            # Other packet types (e.g. "config") aren't acted on yet --
-            # placeholder, nothing to plot.
+        dtype = PACKET_DTYPES.get(type_r)
+        if dtype is None:
             return None
 
-        return np.frombuffer(body, dtype=DATA_DTYPE)
+        # (type, records) rather than a bare array: there are three packet
+        # types on this link now and the caller has to dispatch on it. Callers
+        # that only care about data compare against DATA_TYPE.
+        return type_r, np.frombuffer(body, dtype=dtype)

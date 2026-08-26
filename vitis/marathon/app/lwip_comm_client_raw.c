@@ -8,6 +8,11 @@
 #include "rx_ring.h"
 #include "axi_processing.h"
 #include "dma_stream.h"
+
+/* Config packet ops -- see the "config" description in
+   shared/marathon/packet_format.json, which is the source of truth. */
+#define CONFIG_OP_READ  0u
+#define CONFIG_OP_WRITE 1u
 #include "mono_clock.h"
 
 /* ============================================================
@@ -51,6 +56,12 @@ uint32_t bytes_tx   = 0;
  * automatically if dma_stream_init() fails, so a DMA problem degrades to a
  * working system rather than a dead one. */
 int comm_use_dma = 1;
+
+/* Cumulative, never reset: the metrics packet reports it as a running total
+   so the PC can see both the rate (by differencing) and the lifetime count.
+   A resync is the overload signal worth watching -- it means framing was
+   lost badly enough to need dropping the connection. */
+uint32_t comm_resyncs = 0;
 static int dma_init_done = 0;
 
 /* ============================================================
@@ -198,6 +209,7 @@ static err_t tcp_client_sent(void *arg, struct tcp_pcb *tpcb, u16_t len)
    rx_ring_reset() for us. */
 static void tcp_client_resync(const char *why)
 {
+    comm_resyncs++;
     comm_log("[E] %s, resync\r\n", why);
     connected = 0;
     tcp_client_start();
@@ -417,9 +429,41 @@ void comm_process(void)
         samples_rx += length;
         bytes_rx   += total_needed;
 
-        /* Process. "config" packets are a placeholder for now -- consumed
-           above but otherwise ignored (no processing, no echo). "data"
-           packets get each channel run through its own AXI-Lite
+        /* Config packets: apply (op=WRITE) or not (op=READ), then always
+           reply with a read-back of the actual fabric registers. Replying
+           with the read-back rather than an echo is the point -- a value the
+           hardware clamped or never received shows up on the PC as a
+           mismatch instead of being confirmed as if it had taken effect.
+
+           Handled here on the AXI-Lite path, not in the DMA branch above:
+           these are register pokes, not stream data, and they must not be
+           gated on dma_stream_busy() -- config has to stay reachable while
+           the stream is saturated, which is exactly when you want to change
+           it. */
+        if (type == PACKET_TYPE_CONFIG) {
+            if (length >= 1) {
+                packet_config_t *req = (packet_config_t *)payload_buf;
+                if (req->op == CONFIG_OP_WRITE)
+                    dma_stream_set_filter(req->n_channels, req->shift, req->ctrl);
+
+                packet_config_t rsp;
+                rsp.op = req->op;
+                dma_stream_get_filter(&rsp.n_channels, &rsp.shift,
+                                      &rsp.ctrl, &rsp.status);
+
+                comm_log("[C] op=%lu n=%lu sh=%lu ctrl=%lu st=%08lx\r\n",
+                         (unsigned long)rsp.op, (unsigned long)rsp.n_channels,
+                         (unsigned long)rsp.shift, (unsigned long)rsp.ctrl,
+                         (unsigned long)rsp.status);
+
+                if (client_pcb && connected)
+                    tcp_client_send(client_pcb, PACKET_TYPE_CONFIG, 1,
+                                    (uint8_t *)&rsp);
+            }
+            continue;
+        }
+
+        /* "data" packets get each channel run through its own AXI-Lite
            processing chain in the PL (see axi_processing.c). */
         if (type == PACKET_TYPE_DATA) {
             packet_data_t *entries = (packet_data_t *)payload_buf;
@@ -436,6 +480,17 @@ void comm_process(void)
 /* ============================================================
    SEND RESPONSE
    ============================================================ */
+
+/* Exported so main.c can push metrics from the same place it computes the
+   [S] console line -- one computation, two outputs, so the serial console and
+   the GUI can never disagree about what the board is doing. Silently does
+   nothing while disconnected; metrics are a status feed, not something worth
+   queueing or retrying. */
+void comm_send_metrics(const packet_metrics_t *m)
+{
+    if (client_pcb && connected)
+        tcp_client_send(client_pcb, PACKET_TYPE_METRICS, 1, (uint8_t *)m);
+}
 
 /* Send an already-complete wire-order block (4-byte header followed by the
    payload) exactly as-is. This is the DMA path's counterpart to

@@ -44,6 +44,7 @@ import tkinter as tk
 from tkinter import ttk
 
 import config
+import net
 
 
 class _Tooltip:
@@ -198,24 +199,148 @@ class SignalControlPanel:
         # fields every session needs; Waveform/Noise are the nk.ecg_simulate
         # kwargs and nk.signal_noise() injection from the parameter survey,
         # most of which most sessions won't touch.
+        # Identity of the last dict rendered, so poll_board() can skip the
+        # frames where nothing new arrived (metrics land at 1 Hz, poll runs at
+        # FRAME_RATE).
+        self._last_metrics_seen = None
+        self._last_config_seen = None
+
         notebook = ttk.Notebook(self.frame)
         notebook.pack(fill="both", expand=True)
         basic = ttk.Frame(notebook, padding=6)
         waveform = ttk.Frame(notebook, padding=6)
         noise = ttk.Frame(notebook, padding=6)
+        board = ttk.Frame(notebook, padding=6)
         notebook.add(basic, text="Basic")
         notebook.add(waveform, text="Waveform")
         notebook.add(noise, text="Noise")
+        notebook.add(board, text="Board")
 
         self._build_basic_tab(basic)
         self._build_waveform_tab(waveform)
         self._build_noise_tab(noise)
+        self._build_board_tab(board)
 
         ttk.Separator(self.frame, orient="horizontal").pack(fill="x", pady=6)
         self._rate_status = tk.StringVar()
         ttk.Label(self.frame, textvariable=self._rate_status, wraplength=200,
                   justify="left", foreground="#555").pack(anchor="w")
         self._update_rate_status()
+
+    # ------------------------------------------------------------------
+    # Board tab: live metrics pushed by the board once a second, and the
+    # TDM filter's runtime registers.
+    # ------------------------------------------------------------------
+    def _build_board_tab(self, frame):
+        row = 0
+        ttk.Label(frame, text="Metrics (1 Hz from board)",
+                  font=("", 9, "bold")).grid(row=row, column=0, columnspan=2,
+                                              sticky="w", pady=(0, 4))
+        row += 1
+
+        self._metric_vars = {}
+        for key, label in _METRIC_ROWS:
+            ttk.Label(frame, text=label).grid(row=row, column=0, sticky="w", padx=(0, 6))
+            var = tk.StringVar(value="--")
+            ttk.Label(frame, textvariable=var, width=12, anchor="e",
+                      relief="sunken", padding=2).grid(row=row, column=1, sticky="w", pady=1)
+            self._metric_vars[key] = var
+            row += 1
+
+        ttk.Separator(frame, orient="horizontal").grid(
+            row=row, column=0, columnspan=2, sticky="ew", pady=6)
+        row += 1
+
+        ttk.Label(frame, text="TDM filter", font=("", 9, "bold")).grid(
+            row=row, column=0, columnspan=2, sticky="w", pady=(0, 4))
+        row += 1
+
+        self._filter_nchan = tk.StringVar(value="2")
+        self._filter_shift = tk.StringVar(value="4")
+        self._filter_swap = tk.BooleanVar(value=True)
+        self._filter_clear = tk.BooleanVar(value=False)
+
+        row = _add_entry(frame, row, "N channels", self._filter_nchan, self._noop,
+                          help_text="Slots per frame the filter expects, written to the "
+                                     "filter's reg0. Nothing is sent until you press Apply.")
+        row = _add_entry(frame, row, "Shift (0=bypass)", self._filter_shift, self._noop,
+                          help_text="IIR cutoff: alpha = 1/2**SHIFT, so bigger means more "
+                                     "smoothing and more lag. 0 is exactly a bypass "
+                                     "(y = y + (x-y) = x), which is the quickest way to check "
+                                     "the datapath is transparent.")
+        sw = ttk.Checkbutton(frame, text="Byte swap in fabric", variable=self._filter_swap)
+        sw.grid(row=row, column=0, columnspan=2, sticky="w")
+        _Tooltip(sw, "ctrl bit 0. The fabric swaps wire byte order so the CPU never has to -- "
+                      "turning this off will produce garbage unless something else swaps.")
+        row += 1
+        cl = ttk.Checkbutton(frame, text="Clear filter state", variable=self._filter_clear)
+        cl.grid(row=row, column=0, columnspan=2, sticky="w")
+        _Tooltip(cl, "ctrl bit 1. Holds every channel's accumulator at zero, so the output "
+                      "passes through unfiltered while set.")
+        row += 1
+
+        buttons = ttk.Frame(frame)
+        buttons.grid(row=row, column=0, columnspan=2, sticky="w", pady=(4, 2))
+        ttk.Button(buttons, text="Apply", command=self._apply_filter_config).pack(side="left")
+        ttk.Button(buttons, text="Read", command=self._read_filter_config).pack(side="left", padx=4)
+        row += 1
+
+        self._filter_status = tk.StringVar(value="not read yet")
+        ttk.Label(frame, textvariable=self._filter_status, wraplength=200,
+                  justify="left", foreground="#555").grid(
+            row=row, column=0, columnspan=2, sticky="w")
+
+    @staticmethod
+    def _noop():
+        """Entry commit handler for fields that are only sent on Apply.
+
+        _add_entry() binds Return/FocusOut to a callback, and these two fields
+        deliberately do not push on every keystroke -- writing a half-typed
+        channel count into live fabric registers is not something to do by
+        accident."""
+
+    def _apply_filter_config(self):
+        try:
+            nchan = int(self._filter_nchan.get())
+            shift = int(self._filter_shift.get())
+        except ValueError:
+            self._filter_status.set("n channels / shift must be integers")
+            return
+        ctrl = (0x1 if self._filter_swap.get() else 0) | \
+               (0x2 if self._filter_clear.get() else 0)
+        if net.request_config(net.CONFIG_OP_WRITE, nchan, shift, ctrl):
+            self._filter_status.set("apply sent, awaiting read-back...")
+        else:
+            self._filter_status.set("not sent -- link down?")
+
+    def _read_filter_config(self):
+        if net.request_config(net.CONFIG_OP_READ):
+            self._filter_status.set("read sent...")
+        else:
+            self._filter_status.set("not sent -- link down?")
+
+    def poll_board(self):
+        """Refresh the Board tab from whatever the net thread last received.
+
+        Called from DualPlot.refresh(), i.e. at FRAME_RATE, against data that
+        arrives at 1 Hz -- so it compares object identity first and does
+        nothing at all on the frames where nothing new landed."""
+        m = net.last_metrics
+        if m is not None and m is not self._last_metrics_seen:
+            self._last_metrics_seen = m
+            for key, _ in _METRIC_ROWS:
+                self._metric_vars[key].set(_format_metric(key, m.get(key, 0)))
+
+        c = net.last_config
+        if c is not None and c is not self._last_config_seen:
+            self._last_config_seen = c
+            self._filter_nchan.set(str(c["n_channels"]))
+            self._filter_shift.set(str(c["shift"]))
+            self._filter_swap.set(bool(c["ctrl"] & 0x1))
+            self._filter_clear.set(bool(c["ctrl"] & 0x2))
+            self._filter_status.set(
+                f"read back: n={c['n_channels']} shift={c['shift']} "
+                f"ctrl=0x{c['ctrl']:x} status=0x{c['status']:08x}")
 
     # ------------------------------------------------------------------
     # Basic tab: the fields from before this session's parameter survey.
@@ -647,6 +772,39 @@ class SignalControlPanel:
 
     def _apply_receive_enabled(self):
         config.RECEIVE_ENABLED = self._receive_enabled.get()
+
+
+# Board metrics, in display order: (packet field, label). Kept in wire order
+# rather than alphabetical so the boxes read like the [S] console line.
+_METRIC_ROWS = (
+    ("rx_pps",    "RX packets/s"),
+    ("tx_pps",    "TX packets/s"),
+    ("rx_sps",    "Samples/s"),
+    ("rx_bps",    "Throughput"),
+    ("loop_ps",   "Main loop/s"),
+    ("ring_used", "Ring used"),
+    ("ring_peak", "Ring peak"),
+    ("resyncs",   "Resyncs"),
+    ("window_ms", "Stats window"),
+    ("uptime_s",  "Uptime"),
+)
+
+
+def _format_metric(key, value):
+    """Human units for the metric boxes. Raw counts are unreadable at these
+    magnitudes -- 16130000 means nothing at a glance, 16.13 MB/s does."""
+    if key == "rx_bps":
+        return f"{value / 1e6:.2f} MB/s"
+    if key == "uptime_s":
+        h, rem = divmod(value, 3600)
+        return f"{h}:{rem // 60:02d}:{rem % 60:02d}"
+    if key == "window_ms":
+        return f"{value} ms"
+    if key in ("ring_used", "ring_peak"):
+        return f"{value / 1024:.1f} KB"
+    if key in ("rx_sps", "loop_ps") and value >= 1000:
+        return f"{value / 1000:.1f}k"
+    return str(value)
 
 
 class PlotControlPanel:

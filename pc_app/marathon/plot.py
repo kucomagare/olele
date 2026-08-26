@@ -29,6 +29,7 @@ import matplotlib.pyplot as plt
 from matplotlib.ticker import FuncFormatter
 
 import config
+import net
 from config import PLOT_ENVELOPE_BLOCKS, PLOT_MODE
 from packet_format import CH1_DTYPE, CH2_DTYPE
 from control_panel import GUI_SECTIONS, SignalControlPanel, PlotControlPanel
@@ -437,8 +438,55 @@ class DualPlot:
                 for k, v in rows:
                     f.write(f"{k:<{width}} = {v}\n")
 
+            # Board-side state. Not in config.py -- it is reported BY the
+            # board, not set from here -- but it is just as much a part of
+            # "what produced this data": the filter registers decide what the
+            # out traces are, and the metrics say whether the board was
+            # keeping up while the window was captured.
+            self._dump_board(f, width)
+
+
+    @staticmethod
+    def _dump_board(f, width):
+        """Append the board's last config read-back and metrics.
+
+        Both come from net as plain dicts assigned by the net thread, so a
+        None here means "nothing received yet" -- either the link is down or,
+        for the filter, nobody has pressed Read. Said explicitly rather than
+        left as an empty section, because a blank section reads like a value
+        of zero.
+        """
+        cfg = net.last_config
+        f.write("\n[board filter registers (read back from fabric)]\n")
+        if cfg is None:
+            f.write("# none received -- press Read on the Board tab\n")
+        else:
+            for k in ("n_channels", "shift", "ctrl", "status"):
+                v = cfg.get(k, 0)
+                extra = ""
+                if k == "ctrl":
+                    extra = f"  # swap={bool(v & 0x1)} clear={bool(v & 0x2)}"
+                elif k == "shift":
+                    extra = "  # alpha = 1/2**shift; 0 = bypass"
+                elif k == "status":
+                    f.write(f"{k:<{width}} = 0x{v:08x}\n")
+                    continue
+                f.write(f"{k:<{width}} = {v}{extra}\n")
+
+        met = net.last_metrics
+        f.write("\n[board metrics (last 1 Hz report)]\n")
+        if met is None:
+            f.write("# none received -- board not connected?\n")
+        else:
+            for k, v in met.items():
+                f.write(f"{k:<{width}} = {v}\n")
+
     def refresh(self):
         self.sync()
+        # Board tab is driven from here rather than its own timer: it needs a
+        # main-thread tick and this is already one. It self-skips when nothing
+        # new has arrived, so calling it at FRAME_RATE for 1 Hz data is free.
+        self.signal_control_panel.poll_board()
         canvas = self.fig.canvas
 
         # ECG_SAMPLING_RATE (x-axis tick labels), PLOT_MIN/PLOT_MAX

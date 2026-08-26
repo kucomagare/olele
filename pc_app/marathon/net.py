@@ -11,7 +11,9 @@ import queue
 
 import config
 from config import HOST, PORT, RECONNECT_DELAY
-from packet_format import PacketReceiver
+from packet_format import (CONFIG_OP_READ, CONFIG_OP_WRITE, CONFIG_TYPE,
+                            DATA_TYPE, METRICS_TYPE, PacketReceiver,
+                            build_config_packet)
 from signal_gen import generate_signal_packet
 
 # Receive-path sizing. These are not arbitrary: the relay (tcp_server_app.cpp)
@@ -41,6 +43,30 @@ SOCK_RCVBUF = 4 * 1024 * 1024
 # SEND_RATE, where 50 ms can be less than one packet period.
 SEND_CATCHUP_MAX_S = 0.05
 SEND_CATCHUP_MIN_PKTS = 8
+
+# Config requests queued by the GUI, drained by the net thread. A Queue rather
+# than a bare variable because the GUI thread writes it and the net thread
+# reads it, and a request must not be lost if two arrive between passes.
+config_out_q = queue.Queue(maxsize=16)
+
+# Latest config read-back and metrics from the board, or None. Plain attribute
+# assignment, which is atomic in CPython, so the GUI can poll them without a
+# lock -- worst case it renders one refresh out of date.
+last_config = None
+last_metrics = None
+
+
+def request_config(op=CONFIG_OP_READ, n_channels=0, shift=0, ctrl=0):
+    """Queue a config packet for the board. Called from the GUI thread.
+
+    Returns False if the queue is full, which means the link is down and
+    requests are piling up -- better to tell the caller than to block the GUI.
+    """
+    try:
+        config_out_q.put_nowait((op, n_channels, shift, ctrl))
+        return True
+    except queue.Full:
+        return False
 
 
 def send_some(sock, view):
@@ -130,6 +156,24 @@ def _run_session(sock, plot_in_q, plot_out_q, stop_event):
 
     while not stop_event.is_set():
         now = time.perf_counter()
+
+        # Config requests go out ahead of stream data and are not rate-limited:
+        # they are a handful of bytes and the whole point is that they stay
+        # responsive while the data stream is saturating the link.
+        if pending is None:
+            try:
+                op, nch, sh, ctrl = config_out_q.get_nowait()
+            except queue.Empty:
+                pass
+            else:
+                try:
+                    leftover = send_some(sock, memoryview(
+                        build_config_packet(op, nch, sh, ctrl)))
+                    if leftover is not None:
+                        pending = leftover
+                except OSError as e:
+                    print(f"[net] Connection lost sending config: {e}, reconnecting...")
+                    return
 
         # Flush a leftover before starting anything new.
         if pending is not None:
@@ -236,10 +280,21 @@ def _run_session(sock, plot_in_q, plot_out_q, stop_event):
                 if received is None:
                     break
                 did_work = True
-                try:
-                    plot_out_q.put_nowait((received["ch1"], received["ch2"]))
-                except queue.Full:
-                    pass
+                ptype, records = received
+                if ptype == DATA_TYPE:
+                    try:
+                        plot_out_q.put_nowait((records["ch1"], records["ch2"]))
+                    except queue.Full:
+                        pass
+                elif ptype == CONFIG_TYPE and len(records):
+                    global last_config
+                    last_config = dict(zip(records.dtype.names,
+                                           (int(v) for v in records[0])))
+                    print(f"[net] config read-back: {last_config}")
+                elif ptype == METRICS_TYPE and len(records):
+                    global last_metrics
+                    last_metrics = dict(zip(records.dtype.names,
+                                            (int(v) for v in records[0])))
 
         # Yield only when there was nothing to do. The unconditional sleep
         # here put a hard ~1 kHz ceiling on loop passes (Linux rounds a 0.5 ms

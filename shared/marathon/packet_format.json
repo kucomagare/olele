@@ -4,16 +4,108 @@
       "name": "data",
       "description": "Streamed TDM frames; 'length' in the wire header [type:u16][length:u16] is the number of repeats of this field group. One repeat = one FRAME: a timestamp followed by one sample per channel. Slots are 32 bits (not 16 as in sizif): a uint16 timestamp wraps every 32 s at 2048 Hz, and real EEG front-ends such as the TI ADS1299 are 24-bit, which 16-bit slots would throw away. All slots share one width because the PL filter is time-division multiplexed -- one slot per clock, slot 0 passing through unfiltered. Adding a channel means adding a chN field here; that regenerates the C header and the numpy dtypes together. NOTE: the DMA buffer must be a whole number of frames AND a multiple of 32 bytes for cache maintenance; 8 frames satisfies both for any channel count, so keep the per-packet frame count a multiple of 8.",
       "fields": [
-        { "name": "ts",  "bits": 32, "signed": false },
-        { "name": "ch1", "bits": 32, "signed": false },
-        { "name": "ch2", "bits": 32, "signed": false }
+        {
+          "name": "ts",
+          "bits": 32,
+          "signed": false
+        },
+        {
+          "name": "ch1",
+          "bits": 32,
+          "signed": false
+        },
+        {
+          "name": "ch2",
+          "bits": 32,
+          "signed": false
+        }
       ]
     },
     "1": {
       "name": "config",
-      "description": "Placeholder -- not yet acted on by the firmware, just a reserved shape for future use. 'length' is always 1 (one record).",
+      "description": "Filter configuration, PC <-> board, same layout in both directions. op=0 READ: the board ignores every other field and replies with its current registers. op=1 WRITE: the board applies n_channels/shift/ctrl and then replies the same way. The reply is always a read-back of the actual hardware registers, never an echo of what was asked for, so a value the fabric clamped or ignored shows up as a mismatch instead of being invisible. status is read-only (the filter's STATUS word) and is ignored on the way in.",
       "fields": [
-        { "name": "reserved", "bits": 16, "signed": false }
+        {
+          "name": "op",
+          "bits": 32,
+          "signed": false
+        },
+        {
+          "name": "n_channels",
+          "bits": 32,
+          "signed": false
+        },
+        {
+          "name": "shift",
+          "bits": 32,
+          "signed": false
+        },
+        {
+          "name": "ctrl",
+          "bits": 32,
+          "signed": false
+        },
+        {
+          "name": "status",
+          "bits": 32,
+          "signed": false
+        }
+      ]
+    },
+    "2": {
+      "name": "metrics",
+      "description": "Board health, pushed once per second, board -> PC only. The PC never sends this and the board never expects a reply. Same numbers the [S] console line prints, so the serial console and the GUI can never disagree -- both are built from one computation in main.c. Every rate is normalized by window_ms rather than assumed to be exactly 1000 ms, because the stats check runs once per main-loop pass and the window always overshoots slightly.",
+      "fields": [
+        {
+          "name": "uptime_s",
+          "bits": 32,
+          "signed": false
+        },
+        {
+          "name": "window_ms",
+          "bits": 32,
+          "signed": false
+        },
+        {
+          "name": "rx_pps",
+          "bits": 32,
+          "signed": false
+        },
+        {
+          "name": "tx_pps",
+          "bits": 32,
+          "signed": false
+        },
+        {
+          "name": "rx_sps",
+          "bits": 32,
+          "signed": false
+        },
+        {
+          "name": "rx_bps",
+          "bits": 32,
+          "signed": false
+        },
+        {
+          "name": "loop_ps",
+          "bits": 32,
+          "signed": false
+        },
+        {
+          "name": "ring_used",
+          "bits": 32,
+          "signed": false
+        },
+        {
+          "name": "ring_peak",
+          "bits": 32,
+          "signed": false
+        },
+        {
+          "name": "resyncs",
+          "bits": 32,
+          "signed": false
+        }
       ]
     }
   }

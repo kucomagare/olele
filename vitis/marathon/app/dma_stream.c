@@ -94,6 +94,15 @@ void dma_stream_set_filter(uint32_t n_channels, uint32_t shift, uint32_t ctrl)
     Xil_Out32(TDM_FILTER_BASE + TDM_REG_CTRL,  ctrl);
 }
 
+void dma_stream_get_filter(uint32_t *n_channels, uint32_t *shift,
+                           uint32_t *ctrl, uint32_t *status)
+{
+    if (n_channels) *n_channels = Xil_In32(TDM_FILTER_BASE + TDM_REG_NCHAN);
+    if (shift)      *shift      = Xil_In32(TDM_FILTER_BASE + TDM_REG_SHIFT);
+    if (ctrl)       *ctrl       = Xil_In32(TDM_FILTER_BASE + TDM_REG_CTRL);
+    if (status)     *status     = Xil_In32(TDM_FILTER_BASE + TDM_REG_STATUS);
+}
+
 /* ============================================================
    INIT
    ============================================================ */

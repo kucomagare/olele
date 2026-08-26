@@ -40,6 +40,7 @@
 #include "lwip/inet.h"
 #include "lwip/sys.h"
 #include "lwip_comm_client_raw.h"
+#include "rx_ring.h"   /* rx_ring_used() -- ring occupancy for the metrics packet */
 #include "mono_clock.h"
 
 /* Compact count for the [STATS] line: 873, 2.4k, 130k, 1.2M. Integer only
@@ -174,6 +175,10 @@ int main(void)
        ~437 ns per AXI-Lite transaction (~22 cycles @ 50 MHz), which is the
        real per-sample cost and the eventual hard ceiling. */
     uint32_t loop_passes = 0;
+    /* Peak ring occupancy over the window, sampled once per main-loop pass.
+       rx_ring_used() at the instant the stats fire would almost always read
+       near zero -- the interesting moment is the burst in between. */
+    uint32_t ring_peak = 0;
 
     while (1) {
 
@@ -191,6 +196,10 @@ int main(void)
          so their timing is unaffected. This is also how Xilinx's own
          raw-mode lwIP examples are written. */
       loop_passes++;
+      {
+        uint32_t used = rx_ring_used();
+        if (used > ring_peak) ring_peak = used;
+      }
 
       if (TcpFastTmrFlag) {
         tcp_fasttmr();
@@ -257,6 +266,25 @@ int main(void)
                  (unsigned long)rx_pps, smp,
                  (unsigned long)rx_mb_int, (unsigned long)rx_mb_frac,
                  lps, extra);
+
+        /* Same numbers as the [S] line above, pushed to the GUI. Built here
+           rather than recomputed anywhere else so the serial console and the
+           PC can never disagree about what the board is doing. Sent before
+           the counters are cleared, obviously. */
+        packet_metrics_t m;
+        m.uptime_s  = (uint32_t)(stats_now / 1000ULL);
+        m.window_ms = elapsed;
+        m.rx_pps    = rx_pps;
+        m.tx_pps    = tx_pps;
+        m.rx_sps    = rx_sps;
+        m.rx_bps    = (uint32_t)rx_bps;
+        m.loop_ps   = loops_ps;
+        m.ring_used = rx_ring_used();
+        m.ring_peak = ring_peak;
+        m.resyncs   = comm_resyncs;
+        comm_send_metrics(&m);
+
+        ring_peak = 0;
 
         packets_rx = packets_tx = 0;
         samples_rx = samples_tx = 0;
