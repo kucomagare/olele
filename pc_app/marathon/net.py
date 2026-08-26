@@ -6,7 +6,6 @@
 # require manually restarting this whole app.
 
 import socket
-import select
 import time
 import queue
 
@@ -15,15 +14,57 @@ from config import HOST, PORT, RECONNECT_DELAY
 from packet_format import PacketReceiver
 from signal_gen import generate_signal_packet
 
+# Receive-path sizing. These are not arbitrary: the relay (tcp_server_app.cpp)
+# forwards with a blocking send() capped at SEND_TIMEOUT_SEC = 2, so if this
+# loop stops draining its socket for two seconds the relay drops the
+# connection outright. The old code did one recv(4096) per loop pass and then
+# slept unconditionally, which capped intake at roughly 4-7 MB/s -- fine at
+# small chunk sizes, and exactly the wall hit at SEND_RATE=800 x CHUNK_SIZE=800
+# (7.68 MB/s each way).
+RECV_BUF = 262144    # bytes per recv() -- 64x the old 4096
+RECV_BURST = 64      # max recv() calls per loop pass, so a fast sender
+                     # cannot starve the send path below
+PACKET_BURST = 64    # max packets reassembled per loop pass, same reasoning
+SOCK_RCVBUF = 4 * 1024 * 1024
 
-def send_all(sock, data):
-    view = memoryview(data)
+# How much send backlog the scheduler will replay after a stall before giving
+# up on the rest. Expressed as a DURATION, not a packet count: the point is to
+# tell routine jitter apart from a real stall, and that boundary lives in
+# milliseconds, not packets. A packet count means the threshold shrinks as
+# SEND_RATE rises -- at 1400 pkt/s the original 8 packets worked out to 5.7 ms,
+# which is less than a single plot refresh (~8.8 ms measured), so ordinary
+# frames were tripping a limiter meant for multi-second stalls and losing 7.6%
+# of the stream to it.
+#
+# 50 ms comfortably absorbs a plot refresh, a GC pause or a scheduler slice
+# while still abandoning anything pathological. The floor keeps it sane at low
+# SEND_RATE, where 50 ms can be less than one packet period.
+SEND_CATCHUP_MAX_S = 0.05
+SEND_CATCHUP_MIN_PKTS = 8
+
+
+def send_some(sock, view):
+    """Push as much of `view` as the socket will take right now; return what
+    is left over (None when it all went out).
+
+    Deliberately never blocks. This runs in the same loop that drains the
+    receive side, so waiting here for the send buffer to open stalls
+    reception too -- which backs up the relay, which is what filled the send
+    buffer to begin with. The version this replaces called
+    select(..., timeout=0.01) on a full buffer: a 10 ms stop in a loop whose
+    packet period at 1400 pkt/s is 0.71 ms, i.e. ~14 packets lost per
+    occurrence, and it showed up as the process missing its rate while
+    sitting at under half a core.
+    """
     while view:
         try:
             sent = sock.send(view)
-            view = view[sent:]
         except BlockingIOError:
-            select.select([], [sock], [], 0.01)
+            return view
+        if sent == 0:
+            return view
+        view = view[sent:]
+    return None
 
 
 def _connect():
@@ -34,6 +75,14 @@ def _connect():
     # board's lwIP) the pipeline degenerated into one packet per round
     # trip -- a hard ~33 pkt/s ceiling regardless of SEND_RATE.
     sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+    # Ask for a large kernel receive buffer so a scheduling hiccup here has
+    # somewhere to absorb into instead of immediately backing up into the
+    # relay's 2-second send timeout. The kernel may grant less (and may halve
+    # what it reports); that is fine, it is a cushion, not a guarantee.
+    try:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, SOCK_RCVBUF)
+    except OSError:
+        pass
     sock.connect((HOST, PORT))
     sock.setblocking(False)
     return sock
@@ -70,22 +119,42 @@ def _run_session(sock, plot_in_q, plot_out_q, stop_event):
     next_send = time.perf_counter()
 
     packets_sent = 0
+    backlog_dropped = 0
+    send_stalls = 0
+    # Remainder of a packet the socket could not take in one go. A partial
+    # packet must be finished before another is started -- the wire format is
+    # a stream of [type][length][payload] frames with no resync marker, so a
+    # half-written one would desynchronise the relay and the board.
+    pending = None
     last_report = time.time()
 
     while not stop_event.is_set():
         now = time.perf_counter()
 
-        if config.SEND_ENABLED and now >= next_send:
+        # Flush a leftover before starting anything new.
+        if pending is not None:
+            try:
+                pending = send_some(sock, pending)
+            except OSError as e:
+                print(f"[net] Connection lost while sending: {e}, reconnecting...")
+                return
+            if pending is not None:
+                send_stalls += 1
+            else:
+                packets_sent += 1
+
+        if pending is None and config.SEND_ENABLED and now >= next_send:
             try:
                 packet, ch1, ch2 = generate_signal_packet(counter, now)
-                send_all(sock, packet)
-                packets_sent += 1
+                pending = send_some(sock, memoryview(packet))
+                if pending is None:
+                    packets_sent += 1
+                else:
+                    send_stalls += 1
                 try:
                     plot_in_q.put_nowait((ch1, ch2))
                 except queue.Full:
                     pass
-            except BlockingIOError:
-                pass
             except OSError as e:
                 print(f"[net] Connection lost while sending: {e}, reconnecting...")
                 return
@@ -94,32 +163,87 @@ def _run_session(sock, plot_in_q, plot_out_q, stop_event):
             # Read live each cycle (not cached once before the loop) so a
             # SEND_RATE change from the control panel takes effect on the
             # very next send.
-            next_send += 1.0 / config.SEND_RATE
+            period = 1.0 / config.SEND_RATE
+            next_send += period
+
+            # Fixed-increment schedule: after any stall next_send sits in the
+            # past, and this loop then fires one packet per iteration until it
+            # catches up -- replaying the whole backlog at loop speed, far
+            # above SEND_RATE, for as long again as the stall lasted.
+            # Measured: a ~10 s stall at 1300 pkt/s produced ~30 s of
+            # 1600-2250 pkt/s before settling back to 1300, which is not a
+            # rate error but does wreck any throughput reading taken during
+            # it. A few packets of catch-up are worth keeping (they absorb
+            # ordinary jitter and hold the long-run average honest); beyond
+            # that, abandon the backlog -- packets due seconds ago cannot be
+            # sent "on time" retroactively, and replaying them only overruns
+            # the board.
+            catchup_limit = max(SEND_CATCHUP_MIN_PKTS * period, SEND_CATCHUP_MAX_S)
+            if now - next_send > catchup_limit:
+                backlog_dropped += int((now - next_send) / period)
+                next_send = now + period
 
         t = time.time()
-        if t - last_report >= 1.0:
-            print("Python sent:", packets_sent, "pkts/s")
+        elapsed = t - last_report
+        if elapsed >= 1.0:
+            # The dropped count is the interesting half: a nonzero value is
+            # the direct signal that this loop stalled, and how badly.
+            note = f" (dropped {backlog_dropped} late)" if backlog_dropped else ""
+            # send_stalls counts passes where the socket would not take the
+            # whole packet. A few are normal; a lot means the far end (relay,
+            # link, or board) is the limit, not this loop.
+            if send_stalls:
+                note += f" ({send_stalls} send-stalls)"
+            # Normalized by the window that actually elapsed, not assumed to
+            # be exactly 1000 ms: the check runs once per loop pass, so the
+            # window always overshoots by a varying amount. The firmware's
+            # [S] line has always done this (see main.c); this one did not,
+            # which is why a dead-on 1400 pkt/s setpoint kept alternating
+            # 1400/1401 -- measurement noise, not the stream.
+            print(f"Python sent: {packets_sent / elapsed:.0f} pkts/s{note}")
             packets_sent = 0
+            backlog_dropped = 0
+            send_stalls = 0
             last_report = t
 
+        did_work = False
+
         if config.RECEIVE_ENABLED:
+            # Drain the socket until it is actually empty rather than taking
+            # one buffer per loop pass -- see the RECV_* comment above for why
+            # the single-read version became a throughput limit.
             try:
-                data = sock.recv(4096)
-                if not data:
-                    print("[net] Server closed the connection, reconnecting...")
-                    return
-                receiver.push(data)
+                for _ in range(RECV_BURST):
+                    data = sock.recv(RECV_BUF)
+                    if not data:
+                        print("[net] Server closed the connection, reconnecting...")
+                        return
+                    receiver.push(data)
+                    did_work = True
+                    if len(data) < RECV_BUF:
+                        break   # short read == socket drained
             except BlockingIOError:
                 pass
             except OSError as e:
                 print(f"[net] Connection lost while receiving: {e}, reconnecting...")
                 return
 
-            received = receiver.next_packet()
-            if received is not None:
+            # Reassembly was a second, independent one-per-pass cap at the
+            # same order of magnitude, so draining the socket alone would just
+            # have moved the backlog into receiver's buffer.
+            for _ in range(PACKET_BURST):
+                received = receiver.next_packet()
+                if received is None:
+                    break
+                did_work = True
                 try:
                     plot_out_q.put_nowait((received["ch1"], received["ch2"]))
                 except queue.Full:
                     pass
 
-        time.sleep(0.0005)
+        # Yield only when there was nothing to do. The unconditional sleep
+        # here put a hard ~1 kHz ceiling on loop passes (Linux rounds a 0.5 ms
+        # sleep up to roughly 1 ms), which is what turned the two caps above
+        # into a bandwidth limit instead of just a latency one.
+        if not did_work:
+            time.sleep(0.0005)

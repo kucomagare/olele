@@ -78,7 +78,11 @@ start_client() {
     # version-named command (e.g. "python3.8") -- the latter resolves
     # via PATH regardless of whether the venv was actually activated,
     # so it can silently run a completely different, non-venv Python.
-    nohup "$VENV_DIR/bin/python3" "$SCRIPT_DIR/python_client.py" > "$CLIENT_LOG" 2>&1 &
+    # -u: unbuffered stdout. Without it Python block-buffers when stdout is a
+    # file rather than a tty, so the once-a-second "Python sent:" line -- the
+    # only PC-side view of throughput, and now of stalls and dropped packets
+    # -- only lands in ~4 KB bursts and reads minutes stale during a run.
+    nohup "$VENV_DIR/bin/python3" -u "$SCRIPT_DIR/python_client.py" > "$CLIENT_LOG" 2>&1 &
     echo $! > "$CLIENT_PID_FILE"
     sleep 1
     if ! is_running "$CLIENT_PID_FILE" "$CLIENT_MATCH"; then
