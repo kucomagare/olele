@@ -65,8 +65,17 @@ METRICS_DTYPE = PACKET_DTYPES[METRICS_TYPE]
 CONFIG_OP_READ = 0
 CONFIG_OP_WRITE = 1
 
+# Board UART verbosity bits -- mirrors COMM_LOG_* in the firmware's comm_log.h.
+LOG_STATS  = 0x01   # [S] per-second throughput line
+LOG_ERROR  = 0x02   # [E] errors, resyncs, suppression counts
+LOG_NOTICE = 0x04   # [N] connect/reconnect/lifecycle
+LOG_CONFIG = 0x08   # [C] config read-backs
+LOG_OTHER  = 0x10   # everything else, e.g. [CLK] and boot banners
+LOG_ALL    = 0x1F
+LOG_NONE   = 0x00
 
-def build_config_packet(op, n_channels=0, shift=0, ctrl=0):
+
+def build_config_packet(op, n_channels=0, shift=0, ctrl=0, log_mask=LOG_ALL):
     """Frame one config packet ready for the wire.
 
     status is sent as 0: it is read-only on the board and ignored inbound,
@@ -77,6 +86,7 @@ def build_config_packet(op, n_channels=0, shift=0, ctrl=0):
     rec[0]["n_channels"] = n_channels
     rec[0]["shift"] = shift
     rec[0]["ctrl"] = ctrl
+    rec[0]["log_mask"] = log_mask
     rec[0]["status"] = 0
     return struct.pack("!HH", CONFIG_TYPE, 1) + rec.tobytes()
 

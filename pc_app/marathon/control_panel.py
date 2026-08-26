@@ -45,6 +45,7 @@ from tkinter import ttk
 
 import config
 import net
+import packet_format
 
 
 class _Tooltip:
@@ -279,6 +280,22 @@ class SignalControlPanel:
                       "passes through unfiltered while set.")
         row += 1
 
+        ttk.Separator(frame, orient="horizontal").grid(
+            row=row, column=0, columnspan=2, sticky="ew", pady=6)
+        row += 1
+        ttk.Label(frame, text="UART logging", font=("", 9, "bold")).grid(
+            row=row, column=0, columnspan=2, sticky="w", pady=(0, 2))
+        row += 1
+
+        self._log_vars = {}
+        for label, bitname, tip in _LOG_ROWS:
+            var = tk.BooleanVar(value=True)
+            cb = ttk.Checkbutton(frame, text=label, variable=var)
+            cb.grid(row=row, column=0, columnspan=2, sticky="w")
+            _Tooltip(cb, tip)
+            self._log_vars[bitname] = var
+            row += 1
+
         buttons = ttk.Frame(frame)
         buttons.grid(row=row, column=0, columnspan=2, sticky="w", pady=(4, 2))
         ttk.Button(buttons, text="Apply", command=self._apply_filter_config).pack(side="left")
@@ -308,10 +325,24 @@ class SignalControlPanel:
             return
         ctrl = (0x1 if self._filter_swap.get() else 0) | \
                (0x2 if self._filter_clear.get() else 0)
-        if net.request_config(net.CONFIG_OP_WRITE, nchan, shift, ctrl):
+        if net.request_config(net.CONFIG_OP_WRITE, nchan, shift, ctrl,
+                              self._log_mask()):
             self._filter_status.set("apply sent, awaiting read-back...")
         else:
             self._filter_status.set("not sent -- link down?")
+
+    def _log_mask(self):
+        """Current UART mask from the checkboxes.
+
+        Sent on every Apply, not only when a box is clicked: one WRITE carries
+        the whole config, so a mask assembled from anything other than what is
+        on screen would quietly overwrite the board's verbosity while you were
+        changing the filter."""
+        mask = 0
+        for bitname, var in self._log_vars.items():
+            if var.get():
+                mask |= getattr(packet_format, bitname)
+        return mask
 
     def _read_filter_config(self):
         if net.request_config(net.CONFIG_OP_READ):
@@ -338,9 +369,13 @@ class SignalControlPanel:
             self._filter_shift.set(str(c["shift"]))
             self._filter_swap.set(bool(c["ctrl"] & 0x1))
             self._filter_clear.set(bool(c["ctrl"] & 0x2))
+            mask = c.get("log_mask", 0)
+            for bitname, var in self._log_vars.items():
+                var.set(bool(mask & getattr(packet_format, bitname)))
             self._filter_status.set(
                 f"read back: n={c['n_channels']} shift={c['shift']} "
-                f"ctrl=0x{c['ctrl']:x} status=0x{c['status']:08x}")
+                f"ctrl=0x{c['ctrl']:x} log=0x{c.get('log_mask', 0):02x} "
+                f"status=0x{c['status']:08x}")
 
     # ------------------------------------------------------------------
     # Basic tab: the fields from before this session's parameter survey.
@@ -776,6 +811,20 @@ class SignalControlPanel:
 
 # Board metrics, in display order: (packet field, label). Kept in wire order
 # rather than alphabetical so the boxes read like the [S] console line.
+# Board UART log categories: (label, packet_format bit, tooltip).
+_LOG_ROWS = (
+    ("[S] stats",  "LOG_STATS",  "The once-a-second throughput line. The chatty one -- "
+                                  "mute it while watching for something else."),
+    ("[E] errors", "LOG_ERROR",  "Errors, resyncs and the suppressed-message counter. "
+                                  "Leave this on unless you have a reason not to: it is "
+                                  "how the board tells you it is in trouble."),
+    ("[N] notice", "LOG_NOTICE", "Connect/reconnect and lifecycle messages."),
+    ("[C] config", "LOG_CONFIG", "Config packet read-backs, including the one that turned "
+                                  "this off."),
+    ("other",      "LOG_OTHER",  "Everything untagged -- boot banner, [CLK], and anything "
+                                  "new that has not been given a category yet."),
+)
+
 _METRIC_ROWS = (
     ("rx_pps",    "RX packets/s"),
     ("tx_pps",    "TX packets/s"),

@@ -12,7 +12,7 @@ import queue
 import config
 from config import HOST, PORT, RECONNECT_DELAY
 from packet_format import (CONFIG_OP_READ, CONFIG_OP_WRITE, CONFIG_TYPE,
-                            DATA_TYPE, METRICS_TYPE, PacketReceiver,
+                            DATA_TYPE, LOG_ALL, METRICS_TYPE, PacketReceiver,
                             build_config_packet)
 from signal_gen import generate_signal_packet
 
@@ -56,14 +56,15 @@ last_config = None
 last_metrics = None
 
 
-def request_config(op=CONFIG_OP_READ, n_channels=0, shift=0, ctrl=0):
+def request_config(op=CONFIG_OP_READ, n_channels=0, shift=0, ctrl=0,
+                   log_mask=LOG_ALL):
     """Queue a config packet for the board. Called from the GUI thread.
 
     Returns False if the queue is full, which means the link is down and
     requests are piling up -- better to tell the caller than to block the GUI.
     """
     try:
-        config_out_q.put_nowait((op, n_channels, shift, ctrl))
+        config_out_q.put_nowait((op, n_channels, shift, ctrl, log_mask))
         return True
     except queue.Full:
         return False
@@ -162,13 +163,13 @@ def _run_session(sock, plot_in_q, plot_out_q, stop_event):
         # responsive while the data stream is saturating the link.
         if pending is None:
             try:
-                op, nch, sh, ctrl = config_out_q.get_nowait()
+                op, nch, sh, ctrl, lmask = config_out_q.get_nowait()
             except queue.Empty:
                 pass
             else:
                 try:
                     leftover = send_some(sock, memoryview(
-                        build_config_packet(op, nch, sh, ctrl)))
+                        build_config_packet(op, nch, sh, ctrl, lmask)))
                     if leftover is not None:
                         pending = leftover
                 except OSError as e:

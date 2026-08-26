@@ -34,6 +34,37 @@
 static char log_buffer[LOG_BUF_SIZE];
 static int  log_len = 0;
 
+static uint32_t log_mask = COMM_LOG_ALL;
+
+/* Category of a message, taken from the "[X]" prefix its format string already
+   carries. Reading the tag rather than adding a parameter keeps every existing
+   call site unchanged and makes it impossible for a message's category to
+   disagree with the tag it prints. */
+static uint32_t log_category(const char *fmt)
+{
+    if (fmt[0] != '[')
+        return COMM_LOG_OTHER;
+    switch (fmt[1]) {
+    case 'S': return COMM_LOG_STATS;
+    case 'E': return COMM_LOG_ERROR;
+    case 'N': return COMM_LOG_NOTICE;
+    /* '[C]' is config; '[CLK]' also starts with C, hence the closing-bracket
+       check rather than matching on the letter alone. */
+    case 'C': return (fmt[2] == ']') ? COMM_LOG_CONFIG : COMM_LOG_OTHER;
+    default:  return COMM_LOG_OTHER;
+    }
+}
+
+void comm_log_set_mask(uint32_t mask)
+{
+    log_mask = mask & COMM_LOG_ALL;
+}
+
+uint32_t comm_log_get_mask(void)
+{
+    return log_mask;
+}
+
 static uint32_t budget_spent = 0;
 static uint32_t suppressed   = 0;
 static uint64_t window_start = 0;
@@ -54,6 +85,11 @@ void comm_log(const char *fmt, ...)
     va_list args;
     char tmp[256];
     int n;
+
+    /* Checked before formatting: a muted category should cost a mask test,
+       not a vsnprintf. */
+    if (!(log_mask & log_category(fmt)))
+        return;
 
     va_start(args, fmt);
     n = vsnprintf(tmp, sizeof(tmp), fmt, args);
@@ -82,7 +118,7 @@ void comm_log_flush(void)
         window_start = now;
         budget_spent = 0;
 
-        if (suppressed > 0) {
+        if (suppressed > 0 && (log_mask & COMM_LOG_ERROR)) {
             char tmp[64];
             int n = snprintf(tmp, sizeof(tmp),
                              "[E] +%lu suppressed\r\n",

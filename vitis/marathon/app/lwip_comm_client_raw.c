@@ -443,18 +443,25 @@ void comm_process(void)
         if (type == PACKET_TYPE_CONFIG) {
             if (length >= 1) {
                 packet_config_t *req = (packet_config_t *)payload_buf;
-                if (req->op == CONFIG_OP_WRITE)
+                if (req->op == CONFIG_OP_WRITE) {
                     dma_stream_set_filter(req->n_channels, req->shift, req->ctrl);
+                    comm_log_set_mask(req->log_mask);
+                }
 
                 packet_config_t rsp;
                 rsp.op = req->op;
                 dma_stream_get_filter(&rsp.n_channels, &rsp.shift,
                                       &rsp.ctrl, &rsp.status);
+                rsp.log_mask = comm_log_get_mask();
 
-                comm_log("[C] op=%lu n=%lu sh=%lu ctrl=%lu st=%08lx\r\n",
+                /* Tagged [C], so muting the config category mutes this too --
+                   which is correct: if you asked for silence, the packet that
+                   asked for it should not answer back on the UART. The reply
+                   still goes to the PC either way. */
+                comm_log("[C] op=%lu n=%lu sh=%lu ctrl=%lu log=%02lx st=%08lx\r\n",
                          (unsigned long)rsp.op, (unsigned long)rsp.n_channels,
                          (unsigned long)rsp.shift, (unsigned long)rsp.ctrl,
-                         (unsigned long)rsp.status);
+                         (unsigned long)rsp.log_mask, (unsigned long)rsp.status);
 
                 if (client_pcb && connected)
                     tcp_client_send(client_pcb, PACKET_TYPE_CONFIG, 1,
