@@ -137,7 +137,8 @@ GUI_SECTIONS = (
     )),
     ("Signal / Basic tab", (
         "SEND_RATE", "CHUNK_SIZE", "ECG_HEART_RATE", "ECG_SAMPLING_RATE",
-        "ECG_AMPLITUDE", "SEND_ENABLED", "RECEIVE_ENABLED",
+        "ECG_AMPLITUDE", "ECG_OFFSET", "ECG_ENABLED",
+        "SEND_ENABLED", "RECEIVE_ENABLED",
     )),
     ("Signal / Waveform tab", (
         "ECG_METHOD", "ECG_HEART_RATE_STD", "ECG_LFHFRATIO",
@@ -226,6 +227,8 @@ class SignalControlPanel:
         self._ecg_sample_rate = tk.StringVar(value=str(config.ECG_SAMPLING_RATE))
         self._amplitude = tk.StringVar(value=f"{config.ECG_AMPLITUDE * 100:g}")
         self._receive_enabled = tk.BooleanVar(value=config.RECEIVE_ENABLED)
+        self._offset = tk.StringVar(value=f"{config.ECG_OFFSET * 100:g}")
+        self._ecg_enabled = tk.BooleanVar(value=config.ECG_ENABLED)
 
         row = 0
         row = _add_entry(frame, row, "Send rate (pkt/s)", self._send_rate, self._apply_send_rate,
@@ -253,6 +256,23 @@ class SignalControlPanel:
                                      "signal's peak-to-peak occupies, centered at the midpoint. "
                                      "A pure wire/display scale -- it does not change the "
                                      "waveform's shape, only its size.")
+
+        row = _add_entry(frame, row, "Offset (% of FS)", self._offset,
+                          self._apply_offset,
+                          help_text="DC shift of the whole signal, as a percentage of the wire "
+                                     "format's full scale. 0 centres it; +25 puts it at "
+                                     "three-quarter scale. Independent of Amplitude -- this moves "
+                                     "the band, that sizes it. Push it far enough and the signal "
+                                     "clips at the range ends.")
+
+        ecg_on = ttk.Checkbutton(frame, text="ECG enabled", variable=self._ecg_enabled,
+                                  command=self._apply_ecg_enabled)
+        ecg_on.grid(row=row, column=0, columnspan=2, sticky="w", pady=2)
+        _Tooltip(ecg_on, "Off removes the heartbeat and leaves only the noise and sine "
+                          "generators from the Noise tab, at exactly the levels they already "
+                          "had -- their amplitudes stay referenced to the ECG's own swing, so "
+                          "nothing jumps when you toggle this.")
+        row += 1
 
         rx = ttk.Checkbutton(frame, text="Receive enabled", variable=self._receive_enabled,
                               command=self._apply_receive_enabled)
@@ -612,6 +632,18 @@ class SignalControlPanel:
     def _toggle_pause(self):
         config.SEND_ENABLED = not config.SEND_ENABLED
         self._pause_button.config(text=self._pause_label())
+
+    def _apply_offset(self):
+        try:
+            value = float(self._offset.get()) / 100.0
+        except ValueError:
+            value = config.ECG_OFFSET
+        value = max(config.ECG_OFFSET_MIN, min(config.ECG_OFFSET_MAX, value))
+        self._offset.set(f"{value * 100:g}")
+        config.ECG_OFFSET = value
+
+    def _apply_ecg_enabled(self):
+        config.ECG_ENABLED = bool(self._ecg_enabled.get())
 
     def _apply_receive_enabled(self):
         config.RECEIVE_ENABLED = self._receive_enabled.get()

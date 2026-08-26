@@ -212,6 +212,29 @@ ECG_HEART_RATE = 120      # bpm. Live-editable from the panel; signal_gen.py
 # streamed at -- streaming is SEND_RATE x CHUNK_SIZE. Raising this alone makes
 # the waveform finer-grained and the plot's time axis shorter; it does not put
 # more samples per second on the wire.
+# Switches the ECG waveform itself off while leaving every other generator
+# (the five noise colours and both sine sources) running -- what you get is
+# the "nice generators" on their own, with no heartbeat under them.
+#
+# It does NOT skip the simulation. The ECG's own peak-to-peak is what every
+# noise/sine _LEVEL is a fraction of, so it is still computed and used as the
+# reference; only its contribution to the output is zeroed. That way toggling
+# this removes the ECG and changes nothing else -- levels keep their meaning
+# and amplitudes do not jump when you switch it back on.
+ECG_ENABLED = True
+
+# DC offset, as a fraction of the wire dtype's full scale, applied after
+# ECG_AMPLITUDE scaling. 0.0 centres the signal in the range (the old fixed
+# behaviour); +0.25 shifts it to three-quarter scale; -0.25 to quarter scale.
+#
+# A fraction rather than raw counts so it means the same thing on marathon's
+# 32-bit wire as on sizif's 16-bit one. Offsetting far enough that the band
+# leaves [0, max] will clip -- the clip in _scale_to_wire() was always there
+# as a rounding guard and it will now do real work if you ask it to.
+ECG_OFFSET = 0.0
+ECG_OFFSET_MIN = -0.5
+ECG_OFFSET_MAX = 0.5
+
 ECG_SAMPLING_RATE_MIN = 50     # below this the QRS shape stops being
                                 # recognizable
 ECG_SAMPLING_RATE_MAX = 65536  # 2**16

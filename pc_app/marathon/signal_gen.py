@@ -77,6 +77,7 @@ def _config_signature():
     )
     return (
         config.ECG_DURATION_S, config.ECG_SAMPLING_RATE, config.ECG_HEART_RATE,
+        config.ECG_ENABLED,
         config.ECG_HEART_RATE_STD, config.ECG_NOISE, config.ECG_METHOD,
         config.ECG_LFHFRATIO, tuple(config.ECG_TI), tuple(config.ECG_AI),
         tuple(config.ECG_BI), config.ECG_RANDOM_SEED, noise_layers, sine_generators,
@@ -104,6 +105,20 @@ def _simulate_raw(random_state):
     # own swing" regardless of how many other layers are also active,
     # instead of compounding against an already-noisy signal.
     raw_ptp = raw.max() - raw.min()
+
+    # ECG off: drop the waveform but keep raw_ptp, so the noise and sine
+    # layers below stay scaled to the swing the ECG *would* have had. Zeroing
+    # before measuring would make raw_ptp 0, which skips the whole noise block
+    # and would leave you with silence rather than the generators. Toggling
+    # this therefore removes the heartbeat and changes nothing else.
+    if not config.ECG_ENABLED:
+        raw = np.zeros_like(raw)
+        # With no ECG there is nothing to be a fraction OF, so the reference
+        # becomes full scale: every generator's _LEVEL is then its own
+        # peak-to-peak as a share of the plot's whole range. 0.5 means a sine
+        # that fills half the plot, and it means that no matter which other
+        # generators are running.
+        raw_ptp = 1.0
     if raw_ptp > 0:
         total_noise = np.zeros_like(raw)
         for i, (beta, enabled_attr, level_attr) in enumerate(_NOISE_LAYERS):
@@ -133,7 +148,12 @@ def _simulate_raw(random_state):
                 total_noise[:n] += noise[:n] * (level * raw_ptp / noise_ptp)
         raw = raw + total_noise
 
-    return raw
+    # raw_ptp goes back with the buffer: it is the CLEAN ECG's swing, and the
+    # sine layer added in _raw_buffers() needs the same reference the noise
+    # layers used here. Recomputing it from the returned buffer would give a
+    # different number once noise is mixed in, and zero when ECG_ENABLED is
+    # off -- which silently sized the sine to nothing.
+    return raw, raw_ptp
 
 
 def _sine_contribution(n, raw_ptp):
@@ -174,18 +194,31 @@ def _raw_buffers():
     sig, ch1_entry, ch2_entry = _cache
     current_sig = _config_signature()
     if sig != current_sig:
-        ch1_raw = _simulate_raw(random_state=config.ECG_RANDOM_SEED)
-        ch2_raw = _simulate_raw(random_state=config.ECG_RANDOM_SEED + 1)
+        ch1_raw, ch1_ecg_ptp = _simulate_raw(random_state=config.ECG_RANDOM_SEED)
+        ch2_raw, _ = _simulate_raw(random_state=config.ECG_RANDOM_SEED + 1)
 
-        # Reference ptp for sine amplitude is ch1's -- arbitrary which
-        # channel, just needs to be the SAME one for both so the sine
-        # itself ends up bit-identical on both channels.
-        sine = _sine_contribution(len(ch1_raw), ch1_raw.max() - ch1_raw.min())
+        # Reference ptp for sine amplitude is ch1's CLEAN ECG swing -- arbitrary
+        # which channel, just needs to be the SAME one for both so the sine
+        # itself ends up bit-identical on both channels. Taken from
+        # _simulate_raw() rather than measured off ch1_raw here, so it means
+        # the same thing whether or not noise is mixed in and whether or not
+        # the ECG itself is switched off.
+        sine = _sine_contribution(len(ch1_raw), ch1_ecg_ptp)
         ch1_raw = ch1_raw + sine[:len(ch1_raw)]
         ch2_raw = ch2_raw + sine[:len(ch2_raw)]
 
-        ch1_entry = (ch1_raw, ch1_raw.min(), ch1_raw.max())
-        ch2_entry = (ch2_raw, ch2_raw.min(), ch2_raw.max())
+        if config.ECG_ENABLED:
+            ch1_entry = (ch1_raw, ch1_raw.min(), ch1_raw.max())
+            ch2_entry = (ch2_raw, ch2_raw.min(), ch2_raw.max())
+        else:
+            # FIXED reference span, not the buffer's own extremes. Auto-fitting
+            # stretches whatever is present to fill the band, which is why the
+            # sine levels had no visible effect once the ECG was gone -- a 10%
+            # sine and a 90% sine both ended up filling the plot. Pinning the
+            # span to [-0.5, +0.5] makes raw units full-scale fractions, so a
+            # level lands on screen as exactly that share of the range.
+            ch1_entry = (ch1_raw, -0.5, 0.5)
+            ch2_entry = (ch2_raw, -0.5, 0.5)
         _cache = (current_sig, ch1_entry, ch2_entry)
     return ch1_entry + ch2_entry
 
@@ -201,9 +234,18 @@ def _scale_to_wire(raw_chunk, raw_lo, raw_hi, dtype):
     packets" -- the ceiling is the wire dtype's own max, not an arbitrary
     plot constant."""
     dtype_max = np.iinfo(dtype).max
-    amplitude = max(0.0, min(1.0, config.ECG_AMPLITUDE))
-    center = dtype_max / 2.0
-    half_span = center * amplitude
+    # ECG_AMPLITUDE sizes the ECG. With the ECG switched off it would just be a
+    # second, hidden gain in front of every generator's own level, so the
+    # levels would stop being the full-scale fractions they now claim to be.
+    amplitude = (max(0.0, min(1.0, config.ECG_AMPLITUDE))
+                 if config.ECG_ENABLED else 1.0)
+    # Offset shifts the band's centre; amplitude still sizes it around the
+    # midpoint, so the two controls stay independent (changing one does not
+    # rescale the other).
+    offset = max(config.ECG_OFFSET_MIN,
+                 min(config.ECG_OFFSET_MAX, config.ECG_OFFSET))
+    center = dtype_max / 2.0 + offset * dtype_max
+    half_span = (dtype_max / 2.0) * amplitude
     out_lo, out_hi = center - half_span, center + half_span
 
     span = raw_hi - raw_lo
