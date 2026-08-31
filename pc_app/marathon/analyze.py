@@ -1,12 +1,16 @@
 #!/usr/bin/env python3
 """Offline analysis of a logged buffer: spectra, and the hardware against a model.
 
-    ./analyze.py                     # newest dump under build/logs
+    ./analyze.py                     # open the window on the newest dump
+    ./analyze.py FILE.csv            # ...on a particular one
     ./analyze.py --list              # what dumps exist
-    ./analyze.py FILE.csv            # a particular one
-    ./analyze.py --fft-size 1024 --fmax 200
-    ./analyze.py --model iir         # also run the reference model
     ./analyze.py --no-plot           # numbers only, for a terminal or a pipe
+    ./analyze.py --no-plot --model iir --peak-fmin 40
+
+Everything the flags do is also a control in the window (analyze_gui.py) --
+pick the dump, the transform size, the axis limits, where to look for the
+peak, and which model to score against, all without going back to a prompt.
+The flags remain for scripting and for a box with no display.
 
 WHY THIS IS A SEPARATE APP. The live client had a spectrum view for a while
 and it was the wrong place for it. An FFT over a rolling buffer costs
@@ -35,6 +39,10 @@ import sys
 from pathlib import Path
 
 import numpy as np
+
+# Run from anywhere: the sibling modules (spectrum, and local_proc for
+# --model) live next to this file, not necessarily in the working directory.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import spectrum
 
@@ -244,9 +252,15 @@ def compare_model(traces, ch, algorithm, shift, settle):
 # Reporting
 # ---------------------------------------------------------------------------
 
-def print_report(info, results, models):
+def format_report(info, results, models):
+    """The report as text. Returns rather than prints so the GUI can put the
+    same words in its panel -- one place to change if a number is wrong or a
+    label is unclear."""
+    out = []
+    say = out.append
+
     p = info["path"]
-    print(f"\n{p.name}   {info['samples']} samples @ {info['rate']:g} Hz")
+    say(f"{p.name}   {info['samples']} samples @ {info['rate']:g} Hz")
     bits = []
     for label, key, fmt in (("heart rate", "heart_rate", "{:.0f} bpm"),
                             ("amplitude", "amplitude", "{:.2f}"),
@@ -259,15 +273,16 @@ def print_report(info, results, models):
     if info.get("trigger") is not None:
         bits.append(f"trigger {info['trigger']}")
     if bits:
-        print("  " + ", ".join(bits))
+        say("  " + ", ".join(bits))
     for i, (en, freq, level) in enumerate(info["sines"], start=1):
         if en and en.lower() == "true":
-            print(f"  sine {i}: {freq} Hz at level {level}")
+            say(f"  sine {i}: {freq} Hz at level {level}")
 
-    print("\n  spectrum")
+    say("")
+    say("  spectrum")
     for r in results:
         if not r or "peak_hz" not in r:
-            print(f"    {r['channel'] if r else '?':8} no peak found")
+            say(f"    {r['channel'] if r else '?':8} no peak found")
             continue
         line = (f"    {r['channel']:8} N={r['n']:<6} {r['resolution']:.2f} Hz/bin"
                 f"   peak {r['peak_hz']:8.2f} Hz")
@@ -277,70 +292,28 @@ def print_report(info, results, models):
             line += f"   out {r['out_dbfs']:7.2f}"
         if "delta_db" in r:
             line += f"   delta {r['delta_db']:7.2f} dB"
-        print(line)
+        say(line)
 
-    if models:
-        print("\n  model vs recorded output")
+    if any(models):
+        say("")
+        say("  model vs recorded output")
         for m in models:
             if not m:
                 continue
-            print(f"    {m['channel']:8} {m['algorithm']} shift={m['shift']}"
-                  f"   n={m['compared']}")
-            print(f"             max |err| {m['max_abs']:.1f} counts "
-                  f"({m['pct_of_span']:.4f}% of span),"
-                  f" mean |err| {m['mean_abs']:.1f}")
-            print(f"             mean signed err {m['mean_err']:+.1f} counts"
-                  f"   correlation {m['corr']:.6f}")
+            say(f"    {m['channel']:8} {m['algorithm']} shift={m['shift']}"
+                f"   n={m['compared']}")
+            say(f"             max |err| {m['max_abs']:.1f} counts "
+                f"({m['pct_of_span']:.4f}% of span),"
+                f" mean |err| {m['mean_abs']:.1f}")
+            say(f"             mean signed err {m['mean_err']:+.1f} counts"
+                f"   correlation {m['corr']:.6f}")
+    return "\n".join(out)
+
+
+def print_report(info, results, models):
     print()
-
-
-# ---------------------------------------------------------------------------
-# Plot
-# ---------------------------------------------------------------------------
-
-def draw(traces, info, curves_by_ch, models, fmax, db_min):
-    import matplotlib.pyplot as plt
-
-    rate = info["rate"]
-    channels = [ch for ch in ("ch1", "ch2") if f"{ch}_in" in traces or f"{ch}_out" in traces]
-    fig, axes = plt.subplots(len(channels), 2, figsize=(13, 3.2 * len(channels)),
-                             squeeze=False)
-    fig.canvas.manager.set_window_title(info["path"].name)
-
-    model_by_ch = {m["channel"]: m for m in models if m}
-    for row, ch in enumerate(channels):
-        ax_t, ax_f = axes[row]
-        t = np.arange(info["samples"]) / rate
-        for direction, color in (("in", "tab:blue"), ("out", "tab:red")):
-            key = f"{ch}_{direction}"
-            if key in traces:
-                ax_t.plot(t, traces[key], color=color, lw=0.9, label=direction)
-        m = model_by_ch.get(ch)
-        if m is not None:
-            # Dashed over the recorded output: where they separate is the
-            # whole point, and a dashed line lets the solid one show through
-            # wherever they agree.
-            ax_t.plot(t, m["modelled"], color="tab:green", lw=0.9, ls="--",
-                      label=f"model ({m['algorithm']})")
-        ax_t.set_title(f"{ch} — time")
-        ax_t.set_xlabel("Time (s)")
-        ax_t.legend(fontsize=8)
-        ax_t.grid(alpha=0.3)
-
-        for direction, color in (("in", "tab:blue"), ("out", "tab:red")):
-            if direction in curves_by_ch.get(ch, {}):
-                f, db = curves_by_ch[ch][direction]
-                ax_f.plot(f, db, color=color, lw=0.8, label=direction)
-        ax_f.set_title(f"{ch} — spectrum")
-        ax_f.set_xlabel("Frequency (Hz)")
-        ax_f.set_ylabel("dBFS")
-        ax_f.set_xlim(0, fmax if fmax else rate / 2)
-        ax_f.set_ylim(db_min, 6)
-        ax_f.legend(fontsize=8)
-        ax_f.grid(alpha=0.3)
-
-    fig.tight_layout()
-    plt.show()
+    print(format_report(info, results, models))
+    print()
 
 
 def main(argv=None):
@@ -365,7 +338,9 @@ def main(argv=None):
     ap.add_argument("--settle", type=int, default=200,
                     help="samples to skip before scoring the model, since it "
                          "starts from zeroed state and the board did not")
-    ap.add_argument("--no-plot", action="store_true")
+    ap.add_argument("--no-plot", action="store_true",
+                    help="print the report and exit instead of opening the "
+                         "window -- for a terminal, a pipe, or a headless box")
     args = ap.parse_args(argv)
 
     dumps = find_dumps(args.log_dir)
@@ -386,6 +361,18 @@ def main(argv=None):
     if not path.exists():
         print(f"{path}: not found", file=sys.stderr)
         return 1
+
+    if not args.no_plot:
+        # The window is the normal way to use this: every flag below is a
+        # control in it, so a question that needs three different settings
+        # to answer does not need three command lines. The CLI stays for
+        # scripting and for boxes with no display.
+        import analyze_gui
+        analyze_gui.AnalyzeWindow(
+            log_dir=Path(args.log_dir), path=path, fft_size=args.fft_size,
+            fmax=args.fmax, db_min=args.db_min, peak_fmin=args.peak_fmin,
+            model=args.model, shift=args.shift, settle=args.settle).run()
+        return 0
 
     traces, info = load_dump(path)
     full_scale = wire_full_scale(traces)
@@ -408,8 +395,6 @@ def main(argv=None):
             models.append(compare_model(traces, ch, args.model, shift, args.settle))
 
     print_report(info, results, models)
-    if not args.no_plot:
-        draw(traces, info, curves_by_ch, models, args.fmax, args.db_min)
     return 0
 
 

@@ -20,6 +20,8 @@ local_proc.py          local processing mode: generate/process/plot in-process,
 spectrum.py            rfft -> dBFS magnitudes + peak finder (used by analyze.py)
 analyze.py            OFFLINE analysis of a logged buffer: spectra, tone
                       attenuation, and the hardware scored against a model
+analyze_gui.py        its window -- same shape as the client's, but static:
+                      no blitting, no frame rate, every control recomputes once
 tcp_server_app.cpp    C++ relay — forwards raw bytes between whichever two
                       peers are connected (identifies the board by source IP);
                       a 127.0.0.1 connection instead gets echoed straight back
@@ -112,11 +114,39 @@ is free and the same capture can be examined ten different ways:
 
 ```bash
 source build/venv/bin/activate
-./analyze.py                        # newest dump under build/logs
+./analyze.py                        # window, on the newest dump
+./analyze.py FILE.csv               # ...on a particular one
+```
+
+It opens a **window shaped like the client's** — matplotlib's own canvas
+with a Tk control column beside it — but nothing in it is live. There is no
+blitting, no animated artist and no frame rate, because there is no stream;
+every control just recomputes from the file and redraws once. A 2×2 grid
+shows time on the left and spectrum on the right, per channel, with the
+report underneath in a panel you can select and copy out of.
+
+The controls, all of which are also flags:
+
+| Control | What it does |
+|---|---|
+| **Dump** + Rescan / Open… | which capture; newest first, or any file |
+| **Size** | samples transformed, `capture` or 128…8192 |
+| **F max**, **dB min** | spectrum axis limits (`F max` 0 = Nyquist) |
+| **Peak from (Hz)** | where to start looking for the peak |
+| **Algorithm**, **Shift**, **Settle** | the reference-model comparison |
+
+`--peak-fmin` deserves a note, because it is the one that looks like a bug
+the first time. With the ECG enabled its harmonics are genuinely stronger
+than an injected tone at level 0.1, so the peak lands on the ECG (6 Hz at
+120 bpm) and the reported attenuation is the filter's response *there*, not
+at your tone. Set **Peak from** above the ECG band — 40 Hz — and the same
+capture reports the tone.
+
+For scripting or a box with no display, the flags still work:
+
+```bash
 ./analyze.py --list
-./analyze.py FILE.csv --fft-size 1024 --fmax 200
-./analyze.py --model iir            # also score the model against the board
-./analyze.py --no-plot              # numbers only
+./analyze.py --no-plot --model iir --peak-fmin 40
 ```
 
 It reads both halves of a dump — the CSV of samples and the
