@@ -97,7 +97,11 @@ def _get_kernel():
     _kernel = _iir_scalar
     try:
         from numba import njit
-        compiled = njit(cache=True)(_iir_scalar)
+        # nogil=True matters more than the speed here: this loop is the one
+        # place the local worker spends real time, and without it the plot
+        # thread cannot run at all while a chunk is being filtered. The
+        # kernel touches no Python objects, so dropping the GIL is safe.
+        compiled = njit(cache=True, nogil=True)(_iir_scalar)
         # Force compilation now, on a throwaway input, so a failure lands
         # here as a caught exception instead of mid-stream.
         compiled(np.zeros(4, dtype=np.int64), 0, 4)
@@ -240,10 +244,35 @@ def local_thread(plot_in_q, plot_out_q, stop_event):
             chunks = samples = backlog_dropped = 0
             last_report = t
 
-        # Sleep to the next due chunk rather than a fixed tick: unlike
-        # net.py there is no socket to drain here, so there is nothing
-        # useful to do in between. Capped so stop_event and a mode change
-        # are still noticed promptly at very low SEND_RATE.
-        delay = next_send - time.perf_counter()
-        if delay > 0:
-            time.sleep(min(delay, 0.05))
+        # Yield before looping. This MUST always yield -- an earlier version
+        # slept only when it was ahead of schedule, which meant two states
+        # where it never slept at all and spun at 100% of a core holding the
+        # GIL, starving the plot thread until the whole window looked frozen:
+        #
+        #   * PAUSED. next_send stops advancing (nothing is generated), so
+        #     the "time until the next chunk" it was sleeping on went
+        #     steadily more negative and the sleep was skipped forever.
+        #     Measured: 101% of a core while doing nothing at all.
+        #   * BEHIND. Whenever generation cannot keep up, the deadline is
+        #     always in the past, so the same branch never fires.
+        #
+        # Three cases, deliberately different:
+        if not config.SEND_ENABLED:
+            # Paused: nothing is scheduled, so there is nothing to be on
+            # time for. Wake often enough to notice Resume/Stop/a mode
+            # change, and cost nothing meanwhile.
+            time.sleep(0.02)
+        else:
+            delay = next_send - time.perf_counter()
+            if delay > 0:
+                # Ahead of schedule: sleep to the deadline. Capped so
+                # stop_event and a mode change are still seen promptly at
+                # very low SEND_RATE.
+                time.sleep(min(delay, 0.05))
+            else:
+                # Behind: yield the GIL without throttling. sleep(0) drops
+                # it long enough for the GUI thread to take a turn and
+                # returns immediately, so the rate is still limited by the
+                # work rather than by this call -- which a minimum sleep
+                # would not be (0.5 ms would cap the loop at 2000 chunks/s).
+                time.sleep(0)
