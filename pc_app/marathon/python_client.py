@@ -3,11 +3,19 @@ import queue
 import time
 
 import config
+import runctl
 from plot import DualPlot
 from net import tcp_thread
+from local_proc import local_thread
 
 
 def main():
+    # The gate is cleared at import, so the window below comes up with
+    # nothing generated, connected or sent -- see runctl.py. AUTOSTART is
+    # the opt-out.
+    if config.AUTOSTART:
+        runctl.start()
+
     plotter = DualPlot(config.PLOT_BUFFER)
 
     plot_in_q  = queue.Queue(maxsize=1000)
@@ -15,14 +23,23 @@ def main():
 
     stop_event = threading.Event()
 
-    # net.tcp_thread owns the socket entirely, including the initial
-    # connect and any reconnects -- the plot window comes up immediately
-    # and just waits (retrying in the background) if the board/relay
-    # isn't reachable yet, rather than this script exiting.
-    t_tcp = threading.Thread(target=tcp_thread,
-                             args=(plot_in_q, plot_out_q, stop_event),
-                             daemon=True)
-    t_tcp.start()
+    # Both workers are started unconditionally and each idles unless it
+    # owns config.PROCESSING_MODE -- so switching between board and local is
+    # an attribute write from the panel with no thread lifecycle to get
+    # wrong, and no way to end up with two of them driving the plot at once.
+    #
+    # net.tcp_thread owns the socket entirely, including the initial connect
+    # and any reconnects -- the plot window comes up immediately and just
+    # waits (retrying in the background) if the board/relay isn't reachable
+    # yet, rather than this script exiting.
+    workers = [
+        threading.Thread(target=tcp_thread, name="net",
+                         args=(plot_in_q, plot_out_q, stop_event), daemon=True),
+        threading.Thread(target=local_thread, name="local",
+                         args=(plot_in_q, plot_out_q, stop_event), daemon=True),
+    ]
+    for t in workers:
+        t.start()
 
     next_frame = time.perf_counter()
 
@@ -54,11 +71,12 @@ def main():
 
             time.sleep(0.001)
 
-        print("tcp_thread stopped, exiting.")
+        print("workers stopped, exiting.")
     except KeyboardInterrupt:
         stop_event.set()
     finally:
-        t_tcp.join(timeout=2.0)
+        for t in workers:
+            t.join(timeout=2.0)
 
 
 if __name__ == "__main__":

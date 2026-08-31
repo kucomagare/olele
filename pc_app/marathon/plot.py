@@ -30,6 +30,7 @@ from matplotlib.ticker import FuncFormatter
 
 import config
 import net
+import spectrum
 from config import PLOT_ENVELOPE_BLOCKS, PLOT_MODE
 from packet_format import CH1_DTYPE, CH2_DTYPE
 from control_panel import GUI_SECTIONS, SignalControlPanel, PlotControlPanel
@@ -63,7 +64,24 @@ class DualPlot:
         self.buffer_size = buffer_size
 
         plt.ion()
-        self.fig, (self.ax1, self.ax2) = plt.subplots(2, 1, sharex=True)
+        # TWO gridspecs over one figure, rather than one layout or one
+        # figure per mode. Toggling the spectrum column is then a
+        # set_subplotspec() on the two time axes plus show/hide on the two
+        # spectrum axes -- and tight_layout() still does the margin work in
+        # both cases, which matters here because the y tick labels run to
+        # ten digits (PLOT_MAX is 2**32-1) and hand-picked margins clip them.
+        #
+        # The obvious alternative -- one 2-column gridspec with the second
+        # column's width ratio driven to ~0 -- was measured and rejected:
+        # tight_layout's padding maths against a near-zero column pushes the
+        # visible axes past the right edge of the figure.
+        self.fig = plt.figure()
+        self._gs_time = self.fig.add_gridspec(2, 1)
+        self._gs_both = self.fig.add_gridspec(2, 2)
+        self.ax1 = self.fig.add_subplot(self._gs_both[0, 0])
+        self.ax2 = self.fig.add_subplot(self._gs_both[1, 0], sharex=self.ax1)
+        self.ax_f1 = self.fig.add_subplot(self._gs_both[0, 1])
+        self.ax_f2 = self.fig.add_subplot(self._gs_both[1, 1], sharex=self.ax_f1)
         plt.show(block=False)
 
         # Pack both control panels as siblings of the canvas widget inside
@@ -117,12 +135,48 @@ class DualPlot:
         # way (see prior discussion), this just makes each individual
         # sample's value visually distinct rather than implying a value in
         # between two samples that was never actually measured/sent.
+        #
+        # Set here as the starting value only: _apply_drawstyle() below
+        # switches it per frame based on how many pixels each sample gets,
+        # because steps-mid is invisible -- and not free -- once the window
+        # holds more samples than the axes has pixels.
         self.line_ch1_in,  = self.ax1.plot(self.ch1_in[-buffer_size:],  color="blue", label="in",  animated=True, drawstyle="steps-mid")
         self.line_ch1_out, = self.ax1.plot(self.ch1_out[-buffer_size:], color="red",  label="out", animated=True, drawstyle="steps-mid")
         self.line_ch2_in,  = self.ax2.plot(self.ch2_in[-buffer_size:],  color="blue", label="in",  animated=True, drawstyle="steps-mid")
         self.line_ch2_out, = self.ax2.plot(self.ch2_out[-buffer_size:], color="red",  label="out", animated=True, drawstyle="steps-mid")
         self._lines_ax1 = (self.line_ch1_in, self.line_ch1_out)
         self._lines_ax2 = (self.line_ch2_in, self.line_ch2_out)
+
+        # Spectrum traces. Empty to start and always updated with set_data()
+        # rather than set_ydata(): an rfft of n samples has n//2+1 bins, so
+        # the x-data changes whenever PLOT_BUFFER does, and an empty line
+        # simply draws nothing while the buffers are still filling.
+        # Thinner than the time traces because a spectrum is mostly detail.
+        self.line_f1_in,  = self.ax_f1.plot([], [], color="blue", label="in",  animated=True, lw=0.8)
+        self.line_f1_out, = self.ax_f1.plot([], [], color="red",  label="out", animated=True, lw=0.8)
+        self.line_f2_in,  = self.ax_f2.plot([], [], color="blue", label="in",  animated=True, lw=0.8)
+        self.line_f2_out, = self.ax_f2.plot([], [], color="red",  label="out", animated=True, lw=0.8)
+
+        self._lines_axf1 = (self.line_f1_in, self.line_f1_out)
+        self._lines_axf2 = (self.line_f2_in, self.line_f2_out)
+
+        # NOTE: the peak readout is a Tk label in the plot bar, NOT a Text
+        # artist on these axes. It started as the latter and that was the
+        # single most expensive thing in the whole app: matplotlib's Agg
+        # backend re-lays out and re-rasterises every glyph on every
+        # draw_artist(), with no useful caching, so one four-line box cost
+        # ~7.8 ms per blit -- 19 ms per frame for the two of them, against
+        # 0.24 ms for all four rffts and 1.4 ms for the spectrum lines
+        # themselves. Measured 2026-08-31 at PLOT_BUFFER=2000: turning the
+        # spectrum column on took a frame from 18 ms to 40 ms, and ~85% of
+        # that increase was text. A Tk label updates for free.
+
+        for ax in (self.ax_f1, self.ax_f2):
+            ax.set_ylabel("dBFS")
+            ax.grid(True, alpha=0.3)
+        self.ax_f1.set_title("Channel 1 spectrum")
+        self.ax_f2.set_title("Channel 2 spectrum")
+        self.ax_f2.set_xlabel("Frequency (Hz)")
 
         self.ax1.set_title("Channel 1")
         self.ax2.set_title("Channel 2")
@@ -147,7 +201,9 @@ class DualPlot:
             ax.xaxis.set_major_formatter(FuncFormatter(self._format_time_tick))
         self.ax1.set_xlim(0, buffer_size - 1)
         self.ax2.set_xlabel("Time (s)")
-        self.fig.tight_layout()
+        self._fft_on = None          # forces the first _apply_fft_layout()
+        self._fft_view = None        # (fmax, db_min) as last applied
+        self._apply_fft_layout()
 
         # Cache each axis's static background separately (their bboxes
         # differ), then re-cache whenever matplotlib does a full draw of
@@ -155,6 +211,8 @@ class DualPlot:
         # would paint onto a stale image.
         self._bg1 = None
         self._bg2 = None
+        self._bgf1 = None
+        self._bgf2 = None
         self.fig.canvas.mpl_connect("draw_event", self._on_draw)
         self.fig.canvas.draw()
 
@@ -167,6 +225,16 @@ class DualPlot:
         self._last_ylim = (config.PLOT_MIN, config.PLOT_MAX)
         self._last_buffer_size = buffer_size
 
+        # Last spectrum measurement per channel, as
+        # (freq_hz, in_db, out_db, delta_db) or None -- filled by
+        # _update_spectra(), read by the buffer dump so a capture carries
+        # the number that was on screen when it was taken.
+        self._drawstyle = "steps-mid"   # matches the plot() calls above
+        self._peaks = []
+        self._next_fft = 0.0        # perf_counter deadline for the next
+                                     # spectrum update (see sync())
+        self._fft_updated = False   # did this frame recompute them?
+
         # True when the buffers hold data set_ydata() hasn't been given
         # yet -- see sync().
         self._dirty = False
@@ -175,6 +243,111 @@ class DualPlot:
     def _format_time_tick(x, _pos):
         rate = config.ECG_SAMPLING_RATE
         return f"{x / rate:.2f}" if rate > 0 else ""
+
+    def _apply_drawstyle(self):
+        """Pick steps-mid or plain lines from the axes' current pixel width.
+
+        Re-evaluated every frame rather than only at resize, because both
+        inputs move: PLOT_BUFFER is live-editable and the window is
+        resizable. It is one bbox read and a comparison, so doing it
+        unconditionally is cheaper than tracking what might have changed.
+
+        Safe to change mid-session: the traces are `animated`, so they are
+        not part of the cached blit background and a style change needs no
+        full redraw -- it simply applies on the next blit.
+        """
+        min_px = config.PLOT_STEPS_MIN_PX
+        if min_px <= 0:
+            style = "steps-mid"
+        else:
+            per_sample = self.ax1.bbox.width / max(self.buffer_size, 1)
+            style = "steps-mid" if per_sample >= min_px else "default"
+        if style == self._drawstyle:
+            return
+        self._drawstyle = style
+        for line in self._lines_ax1 + self._lines_ax2:
+            line.set_drawstyle(style)
+
+    def _fft_limits(self):
+        """(fmax, db_min) for the frequency axes, resolving PLOT_FFT_FMAX=0
+        to Nyquist. Kept in one place because refresh() compares it against
+        what was last applied to decide whether a full redraw is due."""
+        rate = config.ECG_SAMPLING_RATE
+        fmax = config.PLOT_FFT_FMAX
+        if fmax <= 0:
+            fmax = rate / 2.0 if rate > 0 else 1.0
+        return float(fmax), float(config.PLOT_FFT_DB_MIN)
+
+    def _apply_fft_layout(self):
+        """Show or hide the spectrum column, moving the time axes between
+        the one- and two-column gridspecs so they reclaim the full width
+        when it is hidden. Caller is responsible for the full canvas.draw()
+        that re-caches the blit backgrounds afterwards."""
+        on = bool(config.PLOT_FFT)
+        fmax, db_min = self._fft_limits()
+
+        if on != self._fft_on:
+            gs = self._gs_both if on else self._gs_time
+            self.ax1.set_subplotspec(gs[0, 0])
+            self.ax2.set_subplotspec(gs[1, 0])
+            for ax in (self.ax_f1, self.ax_f2):
+                ax.set_visible(on)
+            self._fft_on = on
+
+        if on:
+            self.ax_f1.set_xlim(0, fmax)
+            for ax in (self.ax_f1, self.ax_f2):
+                ax.set_ylim(db_min, 6.0)   # a little headroom above 0 dBFS
+                                            # so a full-scale tone is not
+                                            # drawn on the frame itself
+        self._fft_view = (fmax, db_min)
+        self.fig.tight_layout()
+
+    def _update_spectra(self, off_in, off_out):
+        """Transform the four displayed windows and push them into the
+        spectrum lines. Only called when the column is visible -- four
+        rffts of PLOT_BUFFER points at FRAME_RATE is small (~0.1% of a core
+        at the defaults), but it is not free, and it is pointless work when
+        nothing is showing it."""
+        n = self.buffer_size
+        rate = config.ECG_SAMPLING_RATE
+        full_scale = float(np.iinfo(self.ch1_in.dtype).max)
+
+        pairs = (
+            (self.line_f1_in, self.line_f1_out,
+             self.ch1_in[off_in:off_in + n], self.ch1_out[off_out:off_out + n]),
+            (self.line_f2_in, self.line_f2_out,
+             self.ch2_in[off_in:off_in + n], self.ch2_out[off_out:off_out + n]),
+        )
+        self._peaks = []
+        readout = []
+        for line_in, line_out, win_in, win_out in pairs:
+            f_in, db_in = spectrum.spectrum(win_in, rate, full_scale)
+            f_out, db_out = spectrum.spectrum(win_out, rate, full_scale)
+            line_in.set_data(f_in, db_in)
+            line_out.set_data(f_out, db_out)
+
+            # The peak is located on the INPUT spectrum and then read on
+            # both, rather than located independently on each. A filter that
+            # works pushes its output peak somewhere else entirely (usually
+            # down to the baseline wander), so two independent peaks would
+            # compare two different frequencies and report nonsense
+            # attenuation.
+            i = spectrum.peak(f_in, db_in, config.PLOT_FFT_PEAK_FMIN)
+            if i is None or i >= db_out.size:
+                self._peaks.append(None)
+                readout.append(f"ch{len(self._peaks)}: no peak")
+                continue
+            delta = float(db_out[i]) - float(db_in[i])
+            self._peaks.append((float(f_in[i]), float(db_in[i]),
+                                float(db_out[i]), delta))
+            readout.append(f"ch{len(self._peaks)}  {f_in[i]:8.2f} Hz   "
+                           f"in {db_in[i]:7.2f}   out {db_out[i]:7.2f}   "
+                           f"delta {delta:7.2f} dB")
+
+        if not _SCOPE:
+            readout.append("envelope mode -- not a real spectrum")
+        self.plot_control_panel.set_peak_text("     ".join(readout))
 
     def _resize_buffers(self, new_size):
         """Reallocate the four rolling buffers to `new_size`, keeping the
@@ -208,6 +381,14 @@ class DualPlot:
     def _on_draw(self, _event):
         self._bg1 = self.fig.canvas.copy_from_bbox(self.ax1.bbox)
         self._bg2 = self.fig.canvas.copy_from_bbox(self.ax2.bbox)
+        # Only meaningful while the spectrum column is laid out; a hidden
+        # axes has a stale bbox, and caching from it would blit garbage the
+        # moment it was shown again.
+        if self.ax_f1.get_visible():
+            self._bgf1 = self.fig.canvas.copy_from_bbox(self.ax_f1.bbox)
+            self._bgf2 = self.fig.canvas.copy_from_bbox(self.ax_f2.bbox)
+        else:
+            self._bgf1 = self._bgf2 = None
 
     @staticmethod
     def _rolled(buf, values):
@@ -314,6 +495,30 @@ class DualPlot:
         self.line_ch2_in.set_ydata(self.ch2_in[off_in:off_in + n])
         self.line_ch1_out.set_ydata(self.ch1_out[off_out:off_out + n])
         self.line_ch2_out.set_ydata(self.ch2_out[off_out:off_out + n])
+        # Same windows, same trigger offsets -- the spectrum is of exactly
+        # what is on screen, so a measurement can always be checked against
+        # the trace beside it.
+        #
+        # Rate-limited independently of FRAME_RATE. Not because the
+        # transforms are expensive -- they are not, 0.24 ms for all four --
+        # but because skipping them also lets refresh() skip restoring and
+        # blitting the two spectrum axes, whose pixels then simply stay on
+        # screen untouched. That makes the spectrum's cost genuinely
+        # optional rather than merely small, and a spectrum is a slow-moving
+        # thing to look at anyway: the trace wants 24 fps, the numbers under
+        # it do not.
+        self._fft_updated = False
+        if self._fft_on:
+            now = _time.perf_counter()
+            rate = config.PLOT_FFT_RATE
+            if rate <= 0 or now >= self._next_fft:
+                self._update_spectra(off_in, off_out)
+                self._fft_updated = True
+                if rate > 0:
+                    # Schedule from now, not by incrementing: a fixed
+                    # increment would replay a backlog after any stall, which
+                    # is the exact bug net.py's catch-up limiter exists for.
+                    self._next_fft = now + 1.0 / rate
         self._dirty = False
 
     def dump_buffers(self, out_dir=None):
@@ -397,6 +602,18 @@ class DualPlot:
             ("trigger_offset_in",       off_in),
             ("trigger_offset_out",      off_out),
         ]
+        # The spectrum measurement, when the view is on. This is the number
+        # the FFT view exists to produce, and a capture of a filter sweep is
+        # worth much less without it -- recovering it from the CSV later
+        # means redoing the window, the DC removal and the dBFS reference.
+        for i, pk in enumerate(self._peaks or [], start=1):
+            if pk is None:
+                continue
+            f_hz, in_db, out_db, delta = pk
+            derived.append((f"ch{i}_peak_hz",       f"{f_hz:.3f}"))
+            derived.append((f"ch{i}_peak_in_dbfs",  f"{in_db:.2f}"))
+            derived.append((f"ch{i}_peak_out_dbfs", f"{out_db:.2f}"))
+            derived.append((f"ch{i}_peak_delta_db", f"{delta:.2f}"))
         settings = {}
         for name in sorted(dir(config)):
             # isupper() alone is not enough: underscores have no case, so
@@ -482,6 +699,25 @@ class DualPlot:
                 f.write(f"{k:<{width}} = {v}\n")
 
     def refresh(self):
+        self._apply_drawstyle()
+
+        # Layout first, then sync: turning the spectrum column on has to
+        # make _fft_on true BEFORE sync() decides whether to transform, or
+        # the first frame after the toggle comes up with empty spectra. The
+        # dirty flag is forced for the same reason -- with the stream paused
+        # there may be no new data to make sync() run at all, and the column
+        # would stay blank until something arrived.
+        fft_changed = (bool(config.PLOT_FFT) != self._fft_on
+                       or self._fft_limits() != self._fft_view)
+        if fft_changed:
+            self._apply_fft_layout()
+            self._dirty = True
+            # A layout change repaints everything, so the spectra have to be
+            # redrawn on this frame regardless of the rate limit.
+            self._next_fft = 0.0
+            if not self._fft_on:
+                self.plot_control_panel.set_peak_text("")
+
         self.sync()
         # Board tab is driven from here rather than its own timer: it needs a
         # main-thread tick and this is already one. It self-skips when nothing
@@ -495,7 +731,9 @@ class DualPlot:
         # axes/ticks/limits are baked into the cached background, so any of
         # these actually changing needs one full canvas.draw() to show up
         # and get re-cached (see _on_draw).
-        needs_full_draw = False
+        # A layout change moves every axes and invalidates all four cached
+        # backgrounds, so it always costs a full draw.
+        needs_full_draw = fft_changed
 
         time_rate = config.ECG_SAMPLING_RATE
         if time_rate != self._last_time_rate:
@@ -533,6 +771,20 @@ class DualPlot:
         for line in self._lines_ax2:
             self.ax2.draw_artist(line)
         canvas.blit(self.ax2.bbox)
+
+        # Skipped on frames where the spectra were not recomputed: their
+        # pixels are still on screen from the last update, and restoring the
+        # background would only wipe them.
+        if self._fft_on and self._fft_updated and self._bgf1 is not None:
+            canvas.restore_region(self._bgf1)
+            for artist in self._lines_axf1:
+                self.ax_f1.draw_artist(artist)
+            canvas.blit(self.ax_f1.bbox)
+
+            canvas.restore_region(self._bgf2)
+            for artist in self._lines_axf2:
+                self.ax_f2.draw_artist(artist)
+            canvas.blit(self.ax_f2.bbox)
 
         # flush_events() pumps the GUI event loop (keeps the window
         # responsive). The old plt.pause(0.001) that used to be here did

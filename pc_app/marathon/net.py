@@ -10,6 +10,7 @@ import time
 import queue
 
 import config
+import runctl
 from config import HOST, PORT, RECONNECT_DELAY
 from packet_format import (CONFIG_OP_READ, CONFIG_OP_WRITE, CONFIG_TYPE,
                             DATA_TYPE, LOG_ALL, METRICS_TYPE, PacketReceiver,
@@ -115,8 +116,23 @@ def _connect():
     return sock
 
 
+def _may_run():
+    """True when this thread owns the current mode and the session is
+    started. Both are checked in the same place because both mean the same
+    thing to the socket: do not have one open."""
+    return runctl.is_running() and config.PROCESSING_MODE == "board"
+
+
 def tcp_thread(plot_in_q, plot_out_q, stop_event):
     while not stop_event.is_set():
+        # Nothing is connected -- not even attempted -- until Start is
+        # pressed and this mode is selected. Waiting on the gate rather than
+        # polling means a press takes effect immediately, and an idle app
+        # makes no connection attempts to time out or log.
+        if not _may_run():
+            runctl.wait_for_start(0.1)
+            continue
+
         try:
             sock = _connect()
             print(f"Connected to {HOST}:{PORT}")
@@ -156,6 +172,16 @@ def _run_session(sock, plot_in_q, plot_out_q, stop_event):
     last_report = time.time()
 
     while not stop_event.is_set():
+        # Stop, or a switch to local mode, ends the session and closes the
+        # socket (tcp_thread's finally). Returning rather than idling with
+        # the connection open is deliberate: a held-open socket that nobody
+        # is draining is exactly what trips the relay's 2-second send
+        # timeout, so "stopped" would slowly become "disconnected" anyway,
+        # just less predictably.
+        if not _may_run():
+            print("[net] stopped, closing the connection")
+            return
+
         now = time.perf_counter()
 
         # Config requests go out ahead of stream data and are not rate-limited:

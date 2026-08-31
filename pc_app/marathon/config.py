@@ -94,6 +94,46 @@ PLOT_TRIGGER_LEVEL = 0.6
 PLOT_CAPTURE_FACTOR = 2
 
 
+# ---------------------------------------------------------------------------
+# Spectrum (FFT) view
+# ---------------------------------------------------------------------------
+# Adds a second column of axes showing the magnitude spectrum of the same
+# windows the scope traces show, in vs out. This is what makes the sine
+# injectors (ECG_SINE1/2) and the low-pass filter measurable against each
+# other: inject a known tone, read how far the out curve sits below the in
+# curve at that frequency, and that number IS the filter's attenuation
+# there. Step the frequency and you have its response curve.
+#
+# Live-toggleable from the plot bar. Off, the time axes span the full width
+# exactly as before; on, they share it with the spectra.
+PLOT_FFT = False
+
+# Frequency axis derived from ECG_SAMPLING_RATE, for the same reason the
+# time axis is (see the x-axis comment in plot.py): each buffer slot is one
+# sample of the simulated ECG, so slots are 1/ECG_SAMPLING_RATE apart in
+# signal time regardless of how fast SEND_RATE x CHUNK_SIZE delivers them.
+# An injected 50 Hz sine therefore lands on 50 Hz.
+PLOT_FFT_FMAX = 0.0      # upper limit of the frequency axis, Hz. 0 = Nyquist
+                          # (ECG_SAMPLING_RATE / 2), i.e. show everything.
+PLOT_FFT_DB_MIN = -120.0  # bottom of the magnitude axis, dBFS. 0 dB is a
+                          # sine spanning the full wire range, so every real
+                          # reading is below it.
+# How often the spectra are recomputed and redrawn, Hz. 0 = every frame.
+#
+# This is not about the transform's cost -- all four rffts together are
+# 0.24 ms, which is nothing. It is that skipping them also lets the plot skip
+# restoring and blitting the two spectrum axes entirely, so their pixels just
+# stay on screen and the whole column costs zero on skipped frames. A
+# spectrum is a slow-moving thing to read: the trace wants FRAME_RATE, the
+# numbers under it do not. Raise it towards FRAME_RATE if you want the
+# spectrum to track a knob as you turn it.
+PLOT_FFT_RATE = 6.0
+
+PLOT_FFT_PEAK_FMIN = 1.0  # ignore bins below this when reporting the peak.
+                          # Baseline wander and the residue of the DC removal
+                          # live down there and would otherwise always win.
+
+
 # Each received chunk is reduced to this many min/max pairs before being
 # pushed into the plot buffer (so 2*PLOT_ENVELOPE_BLOCKS points per
 # packet). Set to 0 to plot raw samples.
@@ -108,6 +148,23 @@ PLOT_CAPTURE_FACTOR = 2
 # plot work); note CHUNK_SIZE samples span only CHUNK_SIZE/sample-rate of
 # real time, so past a point you are magnifying noise.
 PLOT_ENVELOPE_BLOCKS = 1
+
+# Minimum axes pixels per sample for the traces to be drawn "steps-mid"
+# (each sample a flat segment centred on its x position) rather than as
+# plain joined points.
+#
+# steps-mid exists to stop the plot implying an interpolated value between
+# two samples that was never measured -- worth having, but it can only be
+# SEEN when a sample occupies more than a pixel or so. Above that density the
+# steps are sub-pixel and the two styles render identically, while steps-mid
+# still costs its price: it doubles the vertex count, measured at 3.03 ms per
+# 2000-point line against 1.83 ms without, i.e. ~4.8 ms of every frame for
+# the four traces (2026-08-31, PLOT_BUFFER=2000, ~800 px wide).
+#
+# So it is chosen per frame from the axes' actual pixel width: sparse
+# windows get the honest stepped rendering, dense ones get the cheap one
+# that looks the same. Set to 0 to force steps-mid always.
+PLOT_STEPS_MIN_PX = 2.0
 FRAME_RATE = 24   # Plot redraws/s. Live-editable from the panel --
                   # python_client.py reads config.FRAME_RATE each loop
                   # cycle rather than a value frozen at import time.
@@ -340,6 +397,50 @@ ECG_SINE2_LEVEL = 0.1
 # Deliberately tied to the wire dtype's own max rather than an arbitrary
 # plot constant, so it can never produce an out-of-range packet value.
 ECG_AMPLITUDE = 0.75
+
+# ---------------------------------------------------------------------------
+# Session control: what happens at launch, and where the processing runs
+# ---------------------------------------------------------------------------
+
+# False: the app comes up idle -- window, plot and panel all live, but
+# nothing generated, connected or sent until "Start" is pressed. That is
+# deliberately the default: settings dialled in BEFORE a run beats settings
+# corrected while packets are already on the wire, and it makes
+# "run / capture / stop / change one thing / run again" a workflow rather
+# than a restart. Set True for the old launch-and-go behaviour (unattended
+# throughput runs, mostly).
+AUTOSTART = False
+
+# "board" -- the real path: TCP to the relay, which forwards to the board;
+#            the board filters in fabric and echoes back (or, with
+#            BOARD_CONNECTED = False, the relay loops it straight back).
+# "local"  -- no socket, no relay, no board. The signal is generated,
+#            processed and plotted inside this process by local_proc.py.
+#
+# Local mode exists to develop processing algorithms that will later be
+# translated to VHDL, with a keystroke edit-run loop instead of a synthesis
+# run -- and to work at all when no hardware is present. Its algorithms are
+# written the way fabric has to compute (integer, fixed width, explicit
+# wrapping, per-channel state), so what is seen here is what the RTL will
+# do; see local_proc.py's header for the rule and how to add one.
+#
+# Live-switchable from the panel: both worker threads always run and each
+# idles unless it owns the current mode.
+PROCESSING_MODE = "board"
+
+# Which local_proc.ALGORITHMS entry local mode runs.
+#   "iir"    -- bit-accurate model of axi_tdm_filter.vhd, the filter the
+#               board actually runs. The reference to develop against, and
+#               the answer to "did the hardware compute what I think it did".
+#   "bypass" -- passthrough; the control case.
+LOCAL_ALGORITHM = "iir"
+
+# alpha = 1 / 2**LOCAL_SHIFT for the local filter. Local mode's counterpart
+# of the board's shift register (Board tab), kept separate because there is
+# no hardware to write to here. 0 is an exact bypass -- in the model for the
+# same reason as in the fabric: y = y + (x - y) = x.
+LOCAL_SHIFT = 4
+LOCAL_SHIFT_MAX = 31   # the register field is 5 bits (cfg_reg1[4:0])
 
 SEND_ENABLED = True
 RECEIVE_ENABLED = True

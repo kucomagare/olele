@@ -44,8 +44,10 @@ import tkinter as tk
 from tkinter import ttk
 
 import config
+import local_proc
 import net
 import packet_format
+import runctl
 
 
 class _Tooltip:
@@ -136,6 +138,12 @@ GUI_SECTIONS = (
     ("Plot bar", (
         "PLOT_MIN", "PLOT_MAX", "PLOT_BUFFER", "FRAME_RATE",
         "PLOT_TRIGGER", "PLOT_TRIGGER_LEVEL",
+        "PLOT_FFT", "PLOT_FFT_FMAX", "PLOT_FFT_DB_MIN", "PLOT_FFT_RATE",
+        "PLOT_STEPS_MIN_PX",
+        "PLOT_FFT_PEAK_FMIN",
+    )),
+    ("Session (Start / Mode, above the tabs)", (
+        "AUTOSTART", "PROCESSING_MODE",
     )),
     ("Signal / Basic tab", (
         "SEND_RATE", "CHUNK_SIZE", "ECG_HEART_RATE", "ECG_SAMPLING_RATE",
@@ -145,6 +153,9 @@ GUI_SECTIONS = (
     ("Signal / Waveform tab", (
         "ECG_METHOD", "ECG_HEART_RATE_STD", "ECG_LFHFRATIO",
         "ECG_TI", "ECG_AI", "ECG_BI", "ECG_RANDOM_SEED",
+    )),
+    ("Signal / Local tab", (
+        "LOCAL_ALGORITHM", "LOCAL_SHIFT",
     )),
     ("Signal / Noise tab", (
         "ECG_NOISE",
@@ -192,6 +203,45 @@ class SignalControlPanel:
 
         ttk.Label(self.frame, text="Signal", font=("", 10, "bold")).pack(anchor="w", pady=(0, 6))
 
+        # Start/Stop and Pause/Resume are deliberately two different
+        # controls, because they are two different things:
+        #   Start/Stop -- the SESSION. Stopped means no socket open, no
+        #                 samples generated, nothing on the wire, and (in
+        #                 local mode) a filter that will begin from cleared
+        #                 state next time. The app launches here.
+        #   Pause      -- SEND_ENABLED only. The connection stays up and the
+        #                 receive path keeps running; this just stops feeding
+        #                 it. Useful for freezing the trace mid-run.
+        self._start_button = ttk.Button(self.frame, text=self._start_label(),
+                                        command=self._toggle_run)
+        self._start_button.pack(fill="x", pady=(0, 4))
+        _Tooltip(self._start_button,
+                 "Start or stop the run. Nothing is generated, connected or "
+                 "sent until this is pressed -- set everything up first, then "
+                 "start. Stopping closes the connection (board mode) and "
+                 "clears the filter state (local mode).")
+
+        # Mode picker. Both worker threads are always alive and each idles
+        # unless it owns the mode, so switching is just this attribute
+        # write -- see python_client.py.
+        mode_row = ttk.Frame(self.frame)
+        mode_row.pack(fill="x", pady=(0, 6))
+        ttk.Label(mode_row, text="Mode").pack(side="left", padx=(0, 6))
+        self._mode = tk.StringVar(value=config.PROCESSING_MODE)
+        for label, value, tip in (
+            ("Board", "board", "The real path: TCP to the relay, which forwards "
+                                "to the board; the board filters in fabric and "
+                                "echoes back."),
+            ("Local", "local", "No socket, no relay, no board -- generate, process "
+                                "and plot inside this process. For developing an "
+                                "algorithm before it is RTL, and for working with "
+                                "no hardware present. See the Local tab."),
+        ):
+            rb = ttk.Radiobutton(mode_row, text=label, value=value,
+                                 variable=self._mode, command=self._apply_mode)
+            rb.pack(side="left")
+            _Tooltip(rb, tip)
+
         self._pause_button = ttk.Button(self.frame, text=self._pause_label(),
                                          command=self._toggle_pause)
         self._pause_button.pack(fill="x", pady=(0, 6))
@@ -212,15 +262,18 @@ class SignalControlPanel:
         waveform = ttk.Frame(notebook, padding=6)
         noise = ttk.Frame(notebook, padding=6)
         board = ttk.Frame(notebook, padding=6)
+        local = ttk.Frame(notebook, padding=6)
         notebook.add(basic, text="Basic")
         notebook.add(waveform, text="Waveform")
         notebook.add(noise, text="Noise")
         notebook.add(board, text="Board")
+        notebook.add(local, text="Local")
 
         self._build_basic_tab(basic)
         self._build_waveform_tab(waveform)
         self._build_noise_tab(noise)
         self._build_board_tab(board)
+        self._build_local_tab(local)
 
         ttk.Separator(self.frame, orient="horizontal").pack(fill="x", pady=6)
         self._rate_status = tk.StringVar()
@@ -385,6 +438,81 @@ class SignalControlPanel:
     # ------------------------------------------------------------------
     # Basic tab: the fields from before this session's parameter survey.
     # ------------------------------------------------------------------
+    # ------------------------------------------------------------------
+    # Local tab: the in-process algorithm and its parameters. Deliberately
+    # separate from the Board tab even though "iir" models the same filter
+    # -- the Board tab WRITES HARDWARE REGISTERS and reads back what the
+    # fabric actually holds, this one sets Python variables. Merging them
+    # would make it ambiguous which of those just happened.
+    # ------------------------------------------------------------------
+    def _build_local_tab(self, frame):
+        row = 0
+        ttk.Label(frame, text="In-process algorithm",
+                  font=("", 9, "bold")).grid(row=row, column=0, columnspan=2,
+                                              sticky="w", pady=(0, 4))
+        row += 1
+
+        ttk.Label(frame, text="Algorithm").grid(row=row, column=0, sticky="w", pady=2)
+        self._local_algorithm = tk.StringVar(value=config.LOCAL_ALGORITHM)
+        combo = ttk.Combobox(frame, textvariable=self._local_algorithm,
+                             values=sorted(local_proc.ALGORITHMS), width=10,
+                             state="readonly")
+        combo.grid(row=row, column=1, sticky="e", pady=2)
+        combo.bind("<<ComboboxSelected>>", self._apply_local_algorithm)
+        _Tooltip(combo,
+                 "iir: a bit-accurate model of axi_tdm_filter.vhd -- the "
+                 "filter the board actually runs, including its truncation "
+                 "bias and dead zone.\n"
+                 "bypass: passthrough, as a control case.\n"
+                 "Add your own in local_proc.ALGORITHMS and it appears here.")
+        row += 1
+
+        self._local_shift = tk.StringVar(value=str(config.LOCAL_SHIFT))
+        row = _add_entry(frame, row, "Shift", self._local_shift,
+                         self._apply_local_shift,
+                         help_text="alpha = 1/2**shift for the local filter. "
+                                   "0 is an exact bypass, in the model for the "
+                                   "same reason as in the fabric: "
+                                   "y = y + (x - y) = x. This is the local "
+                                   "counterpart of the board's shift register, "
+                                   "kept separate because there is no hardware "
+                                   "to write to here.")
+
+        ttk.Separator(frame, orient="horizontal").grid(
+            row=row, column=0, columnspan=2, sticky="ew", pady=6)
+        row += 1
+        ttk.Label(frame, wraplength=190, justify="left", foreground="#555",
+                  text="Local mode bypasses TCP, the relay and the board "
+                       "entirely. Algorithms here are written the way fabric "
+                       "has to compute -- integer, fixed width, explicit "
+                       "wrapping, per-channel state -- so what you see is "
+                       "what the RTL will do. See local_proc.py."
+                  ).grid(row=row, column=0, columnspan=2, sticky="w")
+
+    def _apply_local_algorithm(self, _event=None):
+        name = self._local_algorithm.get()
+        if name in local_proc.ALGORITHMS:
+            config.LOCAL_ALGORITHM = name
+
+    def _apply_local_shift(self):
+        try:
+            value = int(self._local_shift.get())
+        except ValueError:
+            value = config.LOCAL_SHIFT
+        value = max(0, min(value, config.LOCAL_SHIFT_MAX))
+        self._local_shift.set(str(value))
+        config.LOCAL_SHIFT = value
+
+    def _start_label(self):
+        return "Stop" if runctl.is_running() else "Start"
+
+    def _toggle_run(self):
+        runctl.toggle()
+        self._start_button.config(text=self._start_label())
+
+    def _apply_mode(self):
+        config.PROCESSING_MODE = self._mode.get()
+
     def _build_basic_tab(self, frame):
         self._send_rate = tk.StringVar(value=str(config.SEND_RATE))
         self._chunk_size = tk.StringVar(value=str(config.CHUNK_SIZE))
@@ -881,6 +1009,10 @@ class PlotControlPanel:
         self._frame_rate = tk.StringVar(value=str(config.FRAME_RATE))
         self._trigger_on = tk.BooleanVar(value=bool(config.PLOT_TRIGGER))
         self._trigger_level = tk.StringVar(value=str(config.PLOT_TRIGGER_LEVEL))
+        self._fft_on = tk.BooleanVar(value=bool(config.PLOT_FFT))
+        self._fft_fmax = tk.StringVar(value=f"{config.PLOT_FFT_FMAX:g}")
+        self._fft_db_min = tk.StringVar(value=f"{config.PLOT_FFT_DB_MIN:g}")
+        self._fft_rate = tk.StringVar(value=f"{config.PLOT_FFT_RATE:g}")
 
         col = 0
         ttk.Label(self.frame, text="Plot", font=("", 10, "bold")).grid(
@@ -905,6 +1037,26 @@ class PlotControlPanel:
         col = _add_entry_horizontal(self.frame, col, "Level (0-1)", self._trigger_level,
                                      self._apply_trigger)
 
+        # Spectrum column. The payoff of the sine injectors: put a tone in,
+        # read how far the out curve sits below the in curve at that
+        # frequency, and that is the filter's attenuation there -- a number,
+        # not an impression. The peak readout on each spectrum does the
+        # reading for you, and the Log buffer dump records it.
+        fft_check = ttk.Checkbutton(self.frame, text="FFT", variable=self._fft_on,
+                                    command=self._apply_fft)
+        fft_check.grid(row=0, column=col, sticky="w", padx=(16, 8))
+        _Tooltip(fft_check,
+                 "Show the magnitude spectrum of the same windows the scope "
+                 "traces show, in vs out. Off, the time axes span the full "
+                 "width as before.")
+        col += 1
+        col = _add_entry_horizontal(self.frame, col, "F max (Hz)", self._fft_fmax,
+                                     self._apply_fft)
+        col = _add_entry_horizontal(self.frame, col, "dB min", self._fft_db_min,
+                                     self._apply_fft)
+        col = _add_entry_horizontal(self.frame, col, "FFT rate (Hz)", self._fft_rate,
+                                     self._apply_fft)
+
         # Writes the on-screen window of all four traces to a CSV under
         # build/logs/. For inspecting a trace that looks wrong -- far more
         # useful than describing it, since the file carries the settings that
@@ -918,6 +1070,23 @@ class PlotControlPanel:
         self._dump_status = ttk.Label(self.frame, text="")
         self._dump_status.grid(row=0, column=col, sticky="w")
         col += 1
+
+        # The spectrum peak readout, on its own row spanning the bar. It
+        # lives here rather than as a Text artist inside the spectrum axes
+        # for a measured reason: matplotlib's Agg text rendering cost ~19 ms
+        # per frame for the two boxes -- more than everything else in the
+        # frame put together, and roughly 80x the cost of the transforms it
+        # was reporting. A Tk label is free to update, and a fixed-width line
+        # down here is easier to read across than two boxes floating over the
+        # curves.
+        self._peak_label = ttk.Label(self.frame, text="", font=("monospace", 9),
+                                     foreground="#333")
+        self._peak_label.grid(row=1, column=0, columnspan=col, sticky="w",
+                              pady=(4, 0))
+
+    def set_peak_text(self, text):
+        """Called by DualPlot each time the spectra are recomputed."""
+        self._peak_label.configure(text=text)
 
     def _dump_buffers(self):
         if self._plot is None:
@@ -945,6 +1114,40 @@ class PlotControlPanel:
         level = min(max(level, 0.01), 0.99)
         self._trigger_level.set(f"{level:g}")
         config.PLOT_TRIGGER_LEVEL = level
+
+    def _apply_fft(self):
+        config.PLOT_FFT = bool(self._fft_on.get())
+
+        try:
+            fmax = float(self._fft_fmax.get())
+        except ValueError:
+            fmax = config.PLOT_FFT_FMAX
+        # 0 means Nyquist and is the useful default, so it is kept rather
+        # than clamped away; anything negative is meaningless.
+        fmax = max(0.0, fmax)
+        self._fft_fmax.set(f"{fmax:g}")
+        config.PLOT_FFT_FMAX = fmax
+
+        try:
+            db_min = float(self._fft_db_min.get())
+        except ValueError:
+            db_min = config.PLOT_FFT_DB_MIN
+        # Must stay below 0: 0 dBFS is a full-scale sine and everything real
+        # is under it, so a floor at or above 0 would show an empty axis.
+        db_min = min(-6.0, max(db_min, -240.0))
+        self._fft_db_min.set(f"{db_min:g}")
+        config.PLOT_FFT_DB_MIN = db_min
+
+        try:
+            rate = float(self._fft_rate.get())
+        except ValueError:
+            rate = config.PLOT_FFT_RATE
+        # 0 means "every frame" and is kept as-is. The upper bound is only a
+        # sanity cap -- FRAME_RATE is the real ceiling, since the spectra can
+        # only be redrawn on a frame that happens.
+        rate = max(0.0, min(rate, 60.0))
+        self._fft_rate.set(f"{rate:g}")
+        config.PLOT_FFT_RATE = rate
 
     def _apply_plot_ylim(self):
         try:
