@@ -138,12 +138,13 @@ GUI_SECTIONS = (
     ("Plot bar", (
         "PLOT_MIN", "PLOT_MAX", "PLOT_BUFFER", "FRAME_RATE",
         "PLOT_TRIGGER", "PLOT_TRIGGER_LEVEL",
-        "PLOT_FFT", "PLOT_FFT_FMAX", "PLOT_FFT_DB_MIN", "PLOT_FFT_RATE",
-        "PLOT_STEPS_MIN_PX",
-        "PLOT_FFT_PEAK_FMIN",
+        "PLOT_STEPS_MIN_PX", "UI_POLL_RATE",
     )),
     ("Session (Start / Mode, above the tabs)", (
         "AUTOSTART", "PROCESSING_MODE",
+    )),
+    ("Signal / Local tab", (
+        "LOCAL_ALGORITHM", "LOCAL_SHIFT",
     )),
     ("Signal / Basic tab", (
         "SEND_RATE", "CHUNK_SIZE", "ECG_HEART_RATE", "ECG_SAMPLING_RATE",
@@ -153,9 +154,6 @@ GUI_SECTIONS = (
     ("Signal / Waveform tab", (
         "ECG_METHOD", "ECG_HEART_RATE_STD", "ECG_LFHFRATIO",
         "ECG_TI", "ECG_AI", "ECG_BI", "ECG_RANDOM_SEED",
-    )),
-    ("Signal / Local tab", (
-        "LOCAL_ALGORITHM", "LOCAL_SHIFT",
     )),
     ("Signal / Noise tab", (
         "ECG_NOISE",
@@ -244,7 +242,11 @@ class SignalControlPanel:
 
         self._pause_button = ttk.Button(self.frame, text=self._pause_label(),
                                          command=self._toggle_pause)
-        self._pause_button.pack(fill="x", pady=(0, 6))
+        self._pause_button.pack(fill="x", pady=(0, 2))
+
+        self._status_var = tk.StringVar(value="stopped")
+        ttk.Label(self.frame, textvariable=self._status_var, foreground="#06c",
+                  wraplength=200, justify="left").pack(anchor="w", pady=(0, 6))
 
         # Tabbed rather than one long stacked column -- Basic covers the
         # fields every session needs; Waveform/Noise are the nk.ecg_simulate
@@ -508,10 +510,39 @@ class SignalControlPanel:
 
     def _toggle_run(self):
         runctl.toggle()
-        self._start_button.config(text=self._start_label())
+        self.poll_state()
 
     def _apply_mode(self):
         config.PROCESSING_MODE = self._mode.get()
+
+    def _status_text(self):
+        """One line saying what the app is actually doing right now.
+
+        Exists because "I pressed Start and nothing happened" has several
+        very different causes -- still warming up, running fine but paused,
+        or in board mode failing to reach the board -- and none of them were
+        visible anywhere except the console.
+        """
+        if not runctl.is_running():
+            return "stopped" if runctl.warm.is_set() else "stopped (warming up)"
+        if not runctl.warm.is_set():
+            return "starting (warming up)"
+        paused = "" if config.SEND_ENABLED else ", paused"
+        if config.PROCESSING_MODE == "local":
+            return f"running: local, {config.LOCAL_ALGORITHM}{paused}"
+        return f"running: board, {net.link_state}{paused}"
+
+    def poll_state(self):
+        """Re-derive the run/pause labels and the status line from the real
+        state. Called every frame; each widget is only touched when its text
+        actually changes, so this costs nothing in the steady state."""
+        for widget, text in ((self._start_button, self._start_label()),
+                             (self._pause_button, self._pause_label())):
+            if widget.cget("text") != text:
+                widget.config(text=text)
+        status = self._status_text()
+        if self._status_var.get() != status:
+            self._status_var.set(status)
 
     def _build_basic_tab(self, frame):
         self._send_rate = tk.StringVar(value=str(config.SEND_RATE))
@@ -924,7 +955,7 @@ class SignalControlPanel:
 
     def _toggle_pause(self):
         config.SEND_ENABLED = not config.SEND_ENABLED
-        self._pause_button.config(text=self._pause_label())
+        self.poll_state()
 
     def _apply_offset(self):
         try:
@@ -1009,10 +1040,6 @@ class PlotControlPanel:
         self._frame_rate = tk.StringVar(value=str(config.FRAME_RATE))
         self._trigger_on = tk.BooleanVar(value=bool(config.PLOT_TRIGGER))
         self._trigger_level = tk.StringVar(value=str(config.PLOT_TRIGGER_LEVEL))
-        self._fft_on = tk.BooleanVar(value=bool(config.PLOT_FFT))
-        self._fft_fmax = tk.StringVar(value=f"{config.PLOT_FFT_FMAX:g}")
-        self._fft_db_min = tk.StringVar(value=f"{config.PLOT_FFT_DB_MIN:g}")
-        self._fft_rate = tk.StringVar(value=f"{config.PLOT_FFT_RATE:g}")
 
         col = 0
         ttk.Label(self.frame, text="Plot", font=("", 10, "bold")).grid(
@@ -1037,26 +1064,6 @@ class PlotControlPanel:
         col = _add_entry_horizontal(self.frame, col, "Level (0-1)", self._trigger_level,
                                      self._apply_trigger)
 
-        # Spectrum column. The payoff of the sine injectors: put a tone in,
-        # read how far the out curve sits below the in curve at that
-        # frequency, and that is the filter's attenuation there -- a number,
-        # not an impression. The peak readout on each spectrum does the
-        # reading for you, and the Log buffer dump records it.
-        fft_check = ttk.Checkbutton(self.frame, text="FFT", variable=self._fft_on,
-                                    command=self._apply_fft)
-        fft_check.grid(row=0, column=col, sticky="w", padx=(16, 8))
-        _Tooltip(fft_check,
-                 "Show the magnitude spectrum of the same windows the scope "
-                 "traces show, in vs out. Off, the time axes span the full "
-                 "width as before.")
-        col += 1
-        col = _add_entry_horizontal(self.frame, col, "F max (Hz)", self._fft_fmax,
-                                     self._apply_fft)
-        col = _add_entry_horizontal(self.frame, col, "dB min", self._fft_db_min,
-                                     self._apply_fft)
-        col = _add_entry_horizontal(self.frame, col, "FFT rate (Hz)", self._fft_rate,
-                                     self._apply_fft)
-
         # Writes the on-screen window of all four traces to a CSV under
         # build/logs/. For inspecting a trace that looks wrong -- far more
         # useful than describing it, since the file carries the settings that
@@ -1070,23 +1077,6 @@ class PlotControlPanel:
         self._dump_status = ttk.Label(self.frame, text="")
         self._dump_status.grid(row=0, column=col, sticky="w")
         col += 1
-
-        # The spectrum peak readout, on its own row spanning the bar. It
-        # lives here rather than as a Text artist inside the spectrum axes
-        # for a measured reason: matplotlib's Agg text rendering cost ~19 ms
-        # per frame for the two boxes -- more than everything else in the
-        # frame put together, and roughly 80x the cost of the transforms it
-        # was reporting. A Tk label is free to update, and a fixed-width line
-        # down here is easier to read across than two boxes floating over the
-        # curves.
-        self._peak_label = ttk.Label(self.frame, text="", font=("monospace", 9),
-                                     foreground="#333")
-        self._peak_label.grid(row=1, column=0, columnspan=col, sticky="w",
-                              pady=(4, 0))
-
-    def set_peak_text(self, text):
-        """Called by DualPlot each time the spectra are recomputed."""
-        self._peak_label.configure(text=text)
 
     def _dump_buffers(self):
         if self._plot is None:
@@ -1114,40 +1104,6 @@ class PlotControlPanel:
         level = min(max(level, 0.01), 0.99)
         self._trigger_level.set(f"{level:g}")
         config.PLOT_TRIGGER_LEVEL = level
-
-    def _apply_fft(self):
-        config.PLOT_FFT = bool(self._fft_on.get())
-
-        try:
-            fmax = float(self._fft_fmax.get())
-        except ValueError:
-            fmax = config.PLOT_FFT_FMAX
-        # 0 means Nyquist and is the useful default, so it is kept rather
-        # than clamped away; anything negative is meaningless.
-        fmax = max(0.0, fmax)
-        self._fft_fmax.set(f"{fmax:g}")
-        config.PLOT_FFT_FMAX = fmax
-
-        try:
-            db_min = float(self._fft_db_min.get())
-        except ValueError:
-            db_min = config.PLOT_FFT_DB_MIN
-        # Must stay below 0: 0 dBFS is a full-scale sine and everything real
-        # is under it, so a floor at or above 0 would show an empty axis.
-        db_min = min(-6.0, max(db_min, -240.0))
-        self._fft_db_min.set(f"{db_min:g}")
-        config.PLOT_FFT_DB_MIN = db_min
-
-        try:
-            rate = float(self._fft_rate.get())
-        except ValueError:
-            rate = config.PLOT_FFT_RATE
-        # 0 means "every frame" and is kept as-is. The upper bound is only a
-        # sanity cap -- FRAME_RATE is the real ceiling, since the spectra can
-        # only be redrawn on a frame that happens.
-        rate = max(0.0, min(rate, 60.0))
-        self._fft_rate.set(f"{rate:g}")
-        config.PLOT_FFT_RATE = rate
 
     def _apply_plot_ylim(self):
         try:

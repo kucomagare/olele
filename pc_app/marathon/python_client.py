@@ -41,7 +41,31 @@ def main():
     for t in workers:
         t.start()
 
+    # Pay the one-time costs now, off the GUI thread, instead of on the
+    # first Start: nk.ecg_simulate() of a 60 s buffer is ~0.9 s and the numba
+    # compile another ~0.3 s, and both used to run inside the worker on the
+    # first chunk -- holding the GIL, freezing the window, and making Start
+    # look like it had done nothing.
+    def _warm():
+        try:
+            import numpy as np
+            from signal_gen import generate_ecg_chunk
+            import local_proc
+            generate_ecg_chunk(0)
+            local_proc.iir(np.zeros(8, dtype=">u4"), np.zeros(8, dtype=">u4"),
+                           local_proc.new_state(), {"shift": 4})
+        except Exception as exc:                      # noqa: BLE001
+            # Warming is an optimisation, never a requirement -- if it fails,
+            # the worker just pays the cost itself the way it used to.
+            print(f"[warmup] skipped: {exc}")
+        finally:
+            runctl.warm.set()
+            print("[warmup] signal buffer and filter kernel ready")
+
+    threading.Thread(target=_warm, name="warmup", daemon=True).start()
+
     next_frame = time.perf_counter()
+    next_ui = next_frame
 
     try:
         while not stop_event.is_set():
@@ -61,13 +85,38 @@ def main():
             except queue.Empty:
                 pass
 
+            # GUI events are pumped on their OWN schedule, far faster than
+            # the plot redraws. They used to be pumped only inside refresh()
+            # -- so a click could wait a whole frame period to be seen, and
+            # at a low FRAME_RATE the panel felt broken rather than slow.
+            # flush_events() is 0.08 ms, so 100 Hz costs under 1% of a core
+            # and makes the buttons respond immediately regardless of how
+            # slowly the plot is drawing.
+            if now >= next_ui:
+                plotter.pump_events()
+                ui_period = 1.0 / config.UI_POLL_RATE
+                next_ui += ui_period
+                if now - next_ui > ui_period:
+                    next_ui = now + ui_period
+
             if now >= next_frame:
                 plotter.refresh()
                 # Read live each cycle (not cached once before the loop) so
                 # a FRAME_RATE change from the control panel takes effect
                 # on the very next frame -- same pattern as net.py's
                 # SEND_RATE.
-                next_frame += 1.0 / config.FRAME_RATE
+                period = 1.0 / config.FRAME_RATE
+                next_frame += period
+                # Drop a missed-frame backlog instead of replaying it. A
+                # fixed increment alone means that after any stall (the old
+                # ~1.1 s warm-up was one) the deadline sits many frames in
+                # the past, and this branch then fires every loop pass,
+                # drawing flat out until it catches up -- hundreds of ms of
+                # an unresponsive window, at 100% CPU, for frames nobody will
+                # ever see. Same failure and same fix as net.py's send
+                # catch-up limiter.
+                if now - next_frame > period:
+                    next_frame = now + period
 
             time.sleep(0.001)
 

@@ -22,6 +22,14 @@ import threading
 # behaviour (unattended throughput runs, mostly).
 _running = threading.Event()
 
+# Set once the expensive one-time costs are paid: the neurokit2 ECG buffer
+# (~0.9 s) and the numba kernel compile (~0.3 s). python_client.py does this
+# in the background at launch so that pressing Start is instant instead of
+# freezing the window for a second while those run on the worker thread --
+# which read as "the button did nothing" and invited a second press that
+# stopped it again.
+warm = threading.Event()
+
 
 def start():
     _running.set()

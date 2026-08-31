@@ -10,6 +10,8 @@
 # need channels to actually differ clinically -- this is a placeholder
 # pairing, not a modeled two-lead ECG.
 
+import threading
+
 import numpy as np
 import neurokit2 as nk
 
@@ -38,6 +40,80 @@ import struct
 # (signature tuple the raw buffers were built with, then per-channel
 #  (raw array, raw min, raw max))
 _cache = (None, None, None)
+
+# Regeneration runs on its OWN thread and the old buffers keep being served
+# until the new ones are ready.
+#
+# Why: nk.ecg_simulate() of ECG_DURATION_S=60 at 2048 Hz is ~0.74 s, twice
+# (once per channel), and it used to run inline on whichever thread happened
+# to ask for the next chunk -- holding the GIL, so the whole window froze.
+# Every heart-rate, noise or waveform edit cost that, which is what made the
+# panel feel like it was applying changes "super slowly": the change itself
+# was instant, the freeze was the simulator.
+#
+# The change now shows up a fraction of a second later instead of blocking
+# anything, which for a knob you are dragging is the difference between
+# laggy and unusable. Note the buffers are rebuilt from scratch either way,
+# so the waveform jumps at the swap -- that was already true.
+_regen_lock = threading.Lock()
+_regen_busy = False
+
+
+def _regen(signature):
+    """Build both channels' raw buffers for `signature` and publish them.
+
+    Runs on a worker thread. Publishing is a single tuple assignment, which
+    is atomic in CPython, so readers either see the whole old cache or the
+    whole new one -- never a half-swapped pair.
+    """
+    global _cache, _regen_busy
+    try:
+        while True:
+            ch1_raw, ch1_ecg_ptp = _simulate_raw(random_state=config.ECG_RANDOM_SEED)
+            ch2_raw, _ = _simulate_raw(random_state=config.ECG_RANDOM_SEED + 1)
+
+            # Reference ptp for sine amplitude is ch1's CLEAN ECG swing --
+            # arbitrary which channel, just needs to be the SAME one for both
+            # so the sine ends up bit-identical on both. Taken from
+            # _simulate_raw() rather than measured off ch1_raw here, so it
+            # means the same thing whether or not noise is mixed in and
+            # whether or not the ECG itself is switched off.
+            sine = _sine_contribution(len(ch1_raw), ch1_ecg_ptp)
+            ch1_raw = ch1_raw + sine[:len(ch1_raw)]
+            ch2_raw = ch2_raw + sine[:len(ch2_raw)]
+
+            if config.ECG_ENABLED:
+                ch1_entry = (ch1_raw, ch1_raw.min(), ch1_raw.max())
+                ch2_entry = (ch2_raw, ch2_raw.min(), ch2_raw.max())
+            else:
+                # FIXED reference span, not the buffer's own extremes.
+                # Auto-fitting stretches whatever is present to fill the
+                # band, which is why the sine levels had no visible effect
+                # once the ECG was gone -- a 10% sine and a 90% sine both
+                # ended up filling the plot. Pinning the span to [-0.5, +0.5]
+                # makes raw units full-scale fractions, so a level lands on
+                # screen as exactly that share of the range.
+                ch1_entry = (ch1_raw, -0.5, 0.5)
+                ch2_entry = (ch2_raw, -0.5, 0.5)
+
+            _cache = (signature, ch1_entry, ch2_entry)
+
+            # Settings may have moved again while that ran -- someone
+            # dragging a control generates a stream of them. Loop rather than
+            # return so the last edit always wins, instead of leaving the
+            # cache one edit behind until the next chunk happens to ask.
+            latest = _config_signature()
+            if latest == signature:
+                return
+            signature = latest
+    except Exception as exc:                          # noqa: BLE001
+        # A bad parameter combination must not kill regeneration for the
+        # rest of the session: report it and keep serving the previous
+        # buffers, which are still valid, just stale.
+        print(f"[signal] regeneration failed, keeping the previous buffers: {exc}")
+    finally:
+        with _regen_lock:
+            _regen_busy = False
 
 # Colored-noise layers: (nk.signal_noise beta, config attr for "enabled",
 # config attr for "level"). Any combination can be active simultaneously
@@ -187,39 +263,39 @@ def _sine_contribution(n, raw_ptp):
 
 
 def _raw_buffers():
-    """Return (ch1_raw, ch1_lo, ch1_hi, ch2_raw, ch2_lo, ch2_hi), regenerating
-    only if _config_signature() has changed since the last call -- this is
-    the expensive nk.ecg_simulate() step."""
-    global _cache
+    """Return (ch1_raw, ch1_lo, ch1_hi, ch2_raw, ch2_lo, ch2_hi).
+
+    Never blocks on the simulator except the very first time, when there is
+    nothing cached to serve. After that a settings change starts a
+    regeneration on its own thread (see _regen) and this keeps handing back
+    the previous buffers until the new ones are published -- so a knob on the
+    panel applies in a fraction of a second instead of freezing the whole
+    window for the ~1.5 s two channels of nk.ecg_simulate() take.
+    """
+    global _regen_busy
     sig, ch1_entry, ch2_entry = _cache
     current_sig = _config_signature()
-    if sig != current_sig:
-        ch1_raw, ch1_ecg_ptp = _simulate_raw(random_state=config.ECG_RANDOM_SEED)
-        ch2_raw, _ = _simulate_raw(random_state=config.ECG_RANDOM_SEED + 1)
 
-        # Reference ptp for sine amplitude is ch1's CLEAN ECG swing -- arbitrary
-        # which channel, just needs to be the SAME one for both so the sine
-        # itself ends up bit-identical on both channels. Taken from
-        # _simulate_raw() rather than measured off ch1_raw here, so it means
-        # the same thing whether or not noise is mixed in and whether or not
-        # the ECG itself is switched off.
-        sine = _sine_contribution(len(ch1_raw), ch1_ecg_ptp)
-        ch1_raw = ch1_raw + sine[:len(ch1_raw)]
-        ch2_raw = ch2_raw + sine[:len(ch2_raw)]
+    if sig == current_sig:
+        return ch1_entry + ch2_entry
 
-        if config.ECG_ENABLED:
-            ch1_entry = (ch1_raw, ch1_raw.min(), ch1_raw.max())
-            ch2_entry = (ch2_raw, ch2_raw.min(), ch2_raw.max())
-        else:
-            # FIXED reference span, not the buffer's own extremes. Auto-fitting
-            # stretches whatever is present to fill the band, which is why the
-            # sine levels had no visible effect once the ECG was gone -- a 10%
-            # sine and a 90% sine both ended up filling the plot. Pinning the
-            # span to [-0.5, +0.5] makes raw units full-scale fractions, so a
-            # level lands on screen as exactly that share of the range.
-            ch1_entry = (ch1_raw, -0.5, 0.5)
-            ch2_entry = (ch2_raw, -0.5, 0.5)
-        _cache = (current_sig, ch1_entry, ch2_entry)
+    if ch1_entry is None:
+        # Cold start: nothing to serve, so this one has to be synchronous.
+        # python_client.py pays it in the background at launch precisely so
+        # it does not land on a user action. _regen() publishes into _cache.
+        _regen(current_sig)
+        _, ch1_entry, ch2_entry = _cache
+        return ch1_entry + ch2_entry
+
+    with _regen_lock:
+        if not _regen_busy:
+            _regen_busy = True
+            threading.Thread(target=_regen, args=(current_sig,),
+                             name="signal-regen", daemon=True).start()
+        # If one is already running it will notice the newer signature when
+        # it finishes and go round again -- see _regen's loop. Starting a
+        # second thread here would just have both simulating at once.
+
     return ch1_entry + ch2_entry
 
 

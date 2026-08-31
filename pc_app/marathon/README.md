@@ -11,13 +11,15 @@ packet_format.py       loads packet_format.json, builds numpy dtypes, PacketRece
 signal_gen.py          ECG signal generation (neurokit2) + packet building
 plot.py                DualPlot (matplotlib, blitted + envelope-decimated)
 control_panel.py       Tkinter panel packed beside the plot -- Start/Stop, mode,
-                      live SEND_RATE, CHUNK_SIZE, heart rate, filter, FFT view
+                      live SEND_RATE, CHUNK_SIZE, heart rate, filter
 net.py                 owns the socket: connect, send/receive loop, auto-reconnect
 runctl.py              the Start/Stop gate, shared by the GUI and both workers
 local_proc.py          local processing mode: generate/process/plot in-process,
                       no socket, no relay, no board. Integer algorithms meant
                       to be translated to VHDL; "iir" models axi_tdm_filter.vhd
-spectrum.py            rfft -> dBFS magnitudes + peak finder for the FFT view
+spectrum.py            rfft -> dBFS magnitudes + peak finder (used by analyze.py)
+analyze.py            OFFLINE analysis of a logged buffer: spectra, tone
+                      attenuation, and the hardware scored against a model
 tcp_server_app.cpp    C++ relay — forwards raw bytes between whichever two
                       peers are connected (identifies the board by source IP);
                       a 127.0.0.1 connection instead gets echoed straight back
@@ -32,13 +34,11 @@ system.sh             day-to-day start/stop/status/logs for both processes
 `control_panel.py`'s two panels are packed as siblings of the plot's canvas
 widget inside the same Tk window `plot.py`'s `DualPlot` creates (see its
 `__init__`) — no second Tk root/mainloop. `SignalControlPanel` is the
-right-hand column: Start/Stop and the mode picker above five tabs —
-**Basic** (rate, chunk, heart rate, amplitude, offset), **Waveform** (the
-ECGSYN model kwargs), **Noise** (coloured noise layers and the two sine
-injectors), **Board** (live metrics, the fabric's filter registers, UART
-verbosity) and **Local** (the in-process algorithm and its shift).
-`PlotControlPanel` is the bottom bar: view range, buffer, frame rate,
-trigger, FFT and Log buffer. Everything is live: it writes straight onto `config`'s
+right-hand column: Start/Stop, the mode picker and a status line above five
+tabs — **Basic**, **Waveform**, **Noise**, **Board** (live metrics, the
+fabric's filter registers, UART verbosity) and **Local** (the in-process
+algorithm and its shift). `PlotControlPanel` is the bottom bar: view range,
+buffer, frame rate, trigger and Log buffer. Everything is live: it writes straight onto `config`'s
 module attributes, and `net.py`/`signal_gen.py` read those live (`import
 config; config.SEND_RATE`, not a value frozen at import time), so a change
 takes effect within one send cycle. `SEND_RATE × CHUNK_SIZE` is the
@@ -50,15 +50,20 @@ scrubbed away from it.
 
 The app comes up **idle**: window, plot and panel are all live, but nothing
 is generated, connected or sent until **Start** (top of the signal panel) is
-pressed. Set everything up first, then start — and "run / capture / stop /
-change one thing / run again" becomes a workflow rather than a restart. Set
-`AUTOSTART = True` in `config.py` for the old launch-and-go behaviour.
+pressed. A **status line** under the buttons says what it is actually doing
+— `stopped (warming up)`, `running: local, iir`, `running: board,
+connecting`, `, paused` — because "I pressed Start and nothing happened" has
+several very different causes and none of them used to be visible outside
+the console. Set `AUTOSTART = True` for the old launch-and-go behaviour.
 
 **Start/Stop and Pause/Resume are different controls.** Start/Stop is the
 session: stopped means no socket open, nothing generated, and (in local
 mode) a filter that begins from cleared state next time. Pause is
 `SEND_ENABLED` only — the connection stays up and the receive path keeps
 running, which is what you want to freeze the trace mid-run.
+
+The one-time costs (a ~0.9 s neurokit2 buffer and a ~0.3 s numba compile)
+are paid in the background at launch, not on the first Start.
 
 ## Board mode vs local mode
 
@@ -83,56 +88,66 @@ would not show the truncation bias, the dead zone or the overflow the
 hardware actually exhibits, so "it worked in Python" would mean nothing once
 it was RTL. The built-in `iir` is a bit-accurate model of
 `axi_tdm_filter.vhd` — it reproduces the documented −15-count steady-state
-bias at `SHIFT=4` and is an exact bypass at `SHIFT=0`, both for the same
-reasons the fabric does.
+bias at `SHIFT=4` and is an exact bypass at `SHIFT=0`.
 
-To add one: write a function taking `(ch1, ch2, state, params)` and
-returning `(out1, out2)`, register it in `local_proc.ALGORITHMS`, and it
-appears in the **Local** tab's dropdown. Keep it integer.
+To add one: write a function taking `(ch1, ch2, state, params)` returning
+`(out1, out2)`, register it in `local_proc.ALGORITHMS`, and it appears in
+the **Local** tab's dropdown. Keep it integer.
 
 Both workers are always alive and each idles unless it owns the current
 mode, so switching is a live attribute write with no thread lifecycle to get
-wrong. The first chunk in local mode takes a few seconds — a 60-second ECG
-buffer is simulated and the numba kernel is compiled — after which it runs
-at rate.
+wrong.
 
-## FFT view
+## Offline analysis — `analyze.py`
 
-The **FFT** checkbox in the plot bar adds a second column of axes showing
-the magnitude spectrum of the same (post-trigger) windows the scope traces
-show, in vs out. Off, the time axes span the full width exactly as before.
+The live client deliberately has **no spectrum view**. It had one; it was
+the wrong place for it. An FFT over a rolling buffer costs something on
+every frame, forever, to answer a question that is not actually live: inject
+a tone, read the attenuation, compare against a model. None of that needs to
+happen at 24 fps, and all of it is easier when nothing is moving.
 
-This is what makes the sine injectors (`ECG_SINE1/2`, Noise tab) and the
-low-pass filter measurable against each other: **inject a known tone, read
-how far the out curve sits below the in curve at that frequency, and that
-number is the filter's attenuation there.** Step the frequency and you have
-plotted its response curve. Each spectrum carries a peak readout doing that
-subtraction for you, and **Log buffer** records it (`chN_peak_hz`,
-`chN_peak_in_dbfs`, `chN_peak_out_dbfs`, `chN_peak_delta_db`) alongside the
-samples and the settings.
+So the client stays lean and only has to stream and draw, and the
+measurement happens offline on a **Log buffer** dump, where taking a second
+is free and the same capture can be examined ten different ways:
 
-The readout is a line in the plot bar, not text drawn on the axes — that is
-a performance decision with a measured reason. As a matplotlib `Text` artist
-it cost **~19 ms per frame** for the two boxes, against 0.24 ms for all four
-transforms: Agg re-lays out and re-rasterises every glyph on every blit. A
-Tk label is free.
+```bash
+source build/venv/bin/activate
+./analyze.py                        # newest dump under build/logs
+./analyze.py --list
+./analyze.py FILE.csv --fft-size 1024 --fmax 200
+./analyze.py --model iir            # also score the model against the board
+./analyze.py --no-plot              # numbers only
+```
 
-**FFT rate (Hz)** in the plot bar decouples the spectrum from `FRAME_RATE`
-(default 6 Hz, 0 = every frame). Skipping an update also skips restoring and
-blitting the two spectrum axes — their pixels just stay on screen — so the
-column costs nothing on skipped frames. Measured at `PLOT_BUFFER=2000`:
-turning the spectrum on costs **+5.3 ms/frame** at rate 0, about
-**+1.3 ms/frame** amortised at the 6 Hz default. Raise it towards
-`FRAME_RATE` if you want the spectrum to track a knob as you turn it.
+It reads both halves of a dump — the CSV of samples and the
+`plot_config_data_*.txt` sidecar — so the ground truth (heart rate, injected
+tones, noise levels, and the board filter registers read back from fabric)
+comes with the data instead of having to be remembered.
 
-Magnitudes are **dBFS** — 0 dB is a sine spanning the full wire range — so
-readings mean the same thing regardless of `ECG_AMPLITUDE`. DC is removed
-before transforming (the wire format centres on half full-scale, and that
-offset would otherwise sit ~120 dB above everything else). The frequency
-axis comes from `ECG_SAMPLING_RATE`, for the same reason the time axis
-does — so an injected 50 Hz sine lands on 50 Hz. Note the spectrum is only
-meaningful in `PLOT_MODE = "scope"`; in envelope mode the buffer holds
-min/max pairs, not samples, and the readout says so.
+Two things it reports:
+
+- **Spectra and tone attenuation.** The peak is located on the *input* and
+  read on both, so the delta is a comparison at one frequency: a filter that
+  works moves its output peak elsewhere entirely, and two independently
+  located peaks would report a meaningless number. Inject a tone, read the
+  delta, step the frequency, and you have the filter's response curve.
+- **The hardware against a model** (`--model iir`). Runs the bit-accurate
+  `local_proc` model on the recorded input and scores it against the
+  recorded output — max/mean error in counts, the signed mean (which is the
+  truncation bias), and correlation. This is the "did the hardware compute
+  what I think it computed" check, and a file is the right place to ask it:
+  both signals are already captured and aligned. `--shift` defaults to
+  whatever the board's register actually held, from the sidecar.
+
+## Why the panel responds immediately
+
+Editing a generation parameter used to re-run `nk.ecg_simulate()` for both
+channels inline, on whichever thread asked for the next chunk — holding the
+GIL, so the whole window froze for **736 ms** on every heart-rate or noise
+edit. `signal_gen._regen()` now runs on its own thread and the previous
+buffers keep being served until the new ones are published, so an edit
+returns in **under 1 ms**. Rapid edits coalesce: a regeneration in flight
+re-checks the signature when it finishes, so the last edit wins.
 
 ## Plot performance
 
@@ -145,16 +160,23 @@ cost roughly 8x the actual work. Two fixes:
   the four line artists, instead of `canvas.draw()` re-rendering axes,
   ticks and legend (~30 ms each, 24x/s). The background is re-cached on
   every real draw event, so resizing/zooming still works.
+- **Event pumping decoupled from redraw.** Tk events used to be serviced
+  only inside `refresh()`, so a click could wait a whole frame period to be
+  seen and lowering `FRAME_RATE` — the recommended way to save CPU — also
+  made the panel feel broken. `pump_events()` now runs on its own
+  `UI_POLL_RATE` (100 Hz, 0.08 ms a call, under 1% of a core). The frame
+  scheduler also drops a missed-frame backlog instead of replaying it, the
+  same fix as `net.py`'s send catch-up limiter: without it, any stall left
+  the deadline many frames in the past and the loop drew flat out to catch
+  up, hundreds of ms of unresponsive window for frames nobody would see.
 - **Adaptive draw style.** `drawstyle="steps-mid"` renders each sample as a
   flat segment so the plot never implies an interpolated value that was
   never measured — but that can only be *seen* while a sample gets more than
   a pixel or so, and it doubles the vertex count regardless (3.03 ms per
   2000-point line vs 1.83 ms). `_apply_drawstyle()` picks it per frame from
-  the axes' real pixel width against `PLOT_BUFFER`, so sparse windows get
-  the honest stepped rendering and dense ones get the cheap style that looks
-  identical. Measured 2026-08-31: at `PLOT_BUFFER=2000` (0.59 px/sample) a
-  frame goes **13.3 ms → 7.9 ms**; at 4000, **19.7 ms → 9.1 ms**. Set
-  `PLOT_STEPS_MIN_PX = 0` to force steps-mid always.
+  the axes' real pixel width against `PLOT_BUFFER`. Measured 2026-08-31: at
+  `PLOT_BUFFER=2000` (0.59 px/sample) a frame goes **13.3 ms → 7.9 ms**; at
+  4000, **19.7 → 9.1**. Set `PLOT_STEPS_MIN_PX = 0` to force steps-mid.
 - **Envelope decimation.** Each chunk is reduced to `PLOT_ENVELOPE_BLOCKS`
   min/max pairs (`config.py`). At 400k samples/s a 1000-point buffer
   otherwise turned over 400x per second — 2.5 ms of visible signal, i.e.

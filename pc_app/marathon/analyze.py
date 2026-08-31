@@ -1,0 +1,417 @@
+#!/usr/bin/env python3
+"""Offline analysis of a logged buffer: spectra, and the hardware against a model.
+
+    ./analyze.py                     # newest dump under build/logs
+    ./analyze.py --list              # what dumps exist
+    ./analyze.py FILE.csv            # a particular one
+    ./analyze.py --fft-size 1024 --fmax 200
+    ./analyze.py --model iir         # also run the reference model
+    ./analyze.py --no-plot           # numbers only, for a terminal or a pipe
+
+WHY THIS IS A SEPARATE APP. The live client had a spectrum view for a while
+and it was the wrong place for it. An FFT over a rolling buffer costs
+something on every frame, forever, to answer a question that is not actually
+live: inject a tone, read the attenuation, compare against a model. None of
+that needs to happen at 24 fps, and all of it is easier when nothing is
+moving. So the live client stays lean and only has to do one thing well --
+stream and draw -- and the measurement happens here, on a file, where taking
+a second is free and the same input can be examined ten different ways.
+
+WHAT IT READS. The pair of files the plot bar's "Log buffer" button writes:
+
+    plotdump_<stamp>.csv            index, time_s, and the four traces
+    plot_config_data_<stamp>.txt    every setting, plus the board's filter
+                                    registers and last metrics
+
+The sidecar is what makes a dump worth keeping: it is the ground truth for
+the samples next to it -- the exact heart rate, noise levels, injected tones
+and filter shift that produced them. This reads it rather than making you
+remember.
+"""
+
+import argparse
+import re
+import sys
+from pathlib import Path
+
+import numpy as np
+
+import spectrum
+
+TRACES = ("ch1_in", "ch1_out", "ch2_in", "ch2_out")
+DEFAULT_LOGS = Path(__file__).resolve().parent / "build" / "logs"
+
+
+# ---------------------------------------------------------------------------
+# Loading
+# ---------------------------------------------------------------------------
+
+def find_dumps(log_dir):
+    return sorted(Path(log_dir).glob("plotdump_*.csv"))
+
+
+def sidecar_for(csv_path):
+    """The settings snapshot written alongside a dump, by naming convention."""
+    name = csv_path.name.replace("plotdump_", "plot_config_data_")
+    return csv_path.with_name(name).with_suffix(".txt")
+
+
+def read_sidecar(path):
+    """Parse `key = value` lines into a dict, keeping section headings as a
+    prefix so "shift" from the board registers cannot be confused with a
+    config knob of the same name."""
+    out = {}
+    if not path.exists():
+        return out
+    section = ""
+    for line in path.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("[") and line.endswith("]"):
+            section = line[1:-1]
+            continue
+        if "=" not in line:
+            continue
+        key, _, val = line.partition("=")
+        key, val = key.strip(), val.strip()
+        out[key] = val
+        out[f"{section}::{key}"] = val
+    return out
+
+
+def load_dump(csv_path):
+    """Return (traces dict, metadata dict).
+
+    Metadata comes from the sidecar first and the CSV's own `#` header lines
+    second, so a dump still analyses correctly if its sidecar was lost.
+    """
+    meta = read_sidecar(sidecar_for(csv_path))
+
+    # Parsed by hand rather than with genfromtxt: the file leads with `#`
+    # metadata lines and then a header row, and genfromtxt's comment handling
+    # blanks those lines before names=True looks for the header, so it reads
+    # the column names off the wrong line and then rejects every data row.
+    header_meta, columns, rows = {}, None, []
+    with open(csv_path) as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            if line.startswith("#"):
+                for k, v in re.findall(r"(\w+)=([^\s]+)", line):
+                    header_meta.setdefault(k, v)
+                continue
+            fields = line.split(",")
+            if columns is None:
+                columns = fields
+                continue
+            rows.append(fields)
+
+    if columns is None or not rows:
+        raise SystemExit(f"{csv_path}: no data rows")
+
+    table = np.array(rows, dtype=np.float64)
+    traces = {name: table[:, i] for i, name in enumerate(columns)
+              if name in TRACES}
+    if not traces:
+        raise SystemExit(f"{csv_path}: no recognised trace columns "
+                         f"(expected {', '.join(TRACES)})")
+
+    def number(*keys, default=None):
+        for k in keys:
+            for src in (meta, header_meta):
+                if k in src:
+                    try:
+                        return float(src[k])
+                    except ValueError:
+                        pass
+        return default
+
+    info = {
+        "path": csv_path,
+        "samples": len(next(iter(traces.values()))),
+        "rate": number("ECG_SAMPLING_RATE", "ecg_rate", default=2048.0),
+        "shift": number("board filter registers (read back from fabric)::shift",
+                        default=None),
+        "heart_rate": number("ECG_HEART_RATE", "hr"),
+        "amplitude": number("ECG_AMPLITUDE", "amplitude"),
+        "send_rate": number("SEND_RATE", "send_rate"),
+        "chunk": number("CHUNK_SIZE", "chunk"),
+        "trigger": meta.get("PLOT_TRIGGER", header_meta.get("trigger")),
+        "sines": [(meta.get(f"ECG_SINE{i}_ENABLED"), meta.get(f"ECG_SINE{i}_FREQ"),
+                   meta.get(f"ECG_SINE{i}_LEVEL")) for i in (1, 2)],
+        "meta": meta,
+    }
+    return traces, info
+
+
+# ---------------------------------------------------------------------------
+# Analysis
+# ---------------------------------------------------------------------------
+
+def wire_full_scale(traces):
+    """The dump stores plain integers, so the wire dtype is not recorded in
+    the data itself. It IS in the sidecar, but inferring it from the values
+    is more robust and gives the same answer: marathon's slots are 32-bit,
+    sizif's were 16."""
+    peak = max(float(np.max(v)) for v in traces.values())
+    return 2.0 ** 32 - 1 if peak > 65535 else 65535.0
+
+
+def analyse_channel(traces, ch, rate, full_scale, size, peak_fmin):
+    """Spectra of one channel's in/out, plus the peak comparison between
+    them. Returns (result dict, {label: (freqs, db)})."""
+    curves, result = {}, {"channel": ch}
+    win = {}
+    for direction in ("in", "out"):
+        key = f"{ch}_{direction}"
+        if key not in traces:
+            continue
+        samples = traces[key][-size:] if size else traces[key]
+        win[direction] = samples
+        curves[direction] = spectrum.spectrum(samples, rate, full_scale)
+    if "in" not in curves and "out" not in curves:
+        return None, curves
+
+    result["n"] = len(next(iter(win.values())))
+    result["resolution"] = rate / result["n"]
+
+    # Locate on the INPUT when it is present, then read both there. A filter
+    # that works moves its output peak somewhere else entirely, so two
+    # independently located peaks would compare two different frequencies and
+    # report a meaningless attenuation.
+    ref = "in" if "in" in curves else "out"
+    f, db = curves[ref]
+    i = spectrum.peak(f, db, peak_fmin)
+    if i is None:
+        return result, curves
+    result["peak_hz"] = float(f[i])
+    for direction, (_f, _db) in curves.items():
+        if i < _db.size:
+            result[f"{direction}_dbfs"] = float(_db[i])
+    if "in_dbfs" in result and "out_dbfs" in result:
+        result["delta_db"] = result["out_dbfs"] - result["in_dbfs"]
+    return result, curves
+
+
+def compare_model(traces, ch, algorithm, shift, settle):
+    """Run a local_proc algorithm on the recorded input and score it against
+    the recorded output.
+
+    This is the question the whole rig exists to answer -- did the hardware
+    compute what I think it computed -- and a file is the right place to ask
+    it: both signals are already captured and aligned, so nothing has to be
+    live or reproducible to check.
+
+    `settle` samples are skipped before scoring: the model starts from zeroed
+    state, the board did not, so the first samples of any capture disagree
+    for a reason that says nothing about the algorithm.
+    """
+    import local_proc
+    src, ref = f"{ch}_in", f"{ch}_out"
+    if src not in traces or ref not in traces:
+        return None
+
+    dtype = ">u4"
+    x = traces[src].astype(np.uint32).astype(dtype)
+    algo = local_proc.ALGORITHMS[algorithm]
+    modelled, _ = algo(x, x, local_proc.new_state(), {"shift": shift})
+    modelled = modelled.astype(np.float64)
+
+    a = modelled[settle:]
+    b = traces[ref][settle:]
+    n = min(len(a), len(b))
+    if n < 2:
+        return None
+    a, b = a[:n], b[:n]
+
+    err = a - b
+    span = max(float(np.ptp(b)), 1.0)
+    corr = float(np.corrcoef(a, b)[0, 1]) if np.std(a) and np.std(b) else float("nan")
+    return {
+        "channel": ch, "algorithm": algorithm, "shift": shift, "compared": n,
+        "max_abs": float(np.max(np.abs(err))),
+        "mean_abs": float(np.mean(np.abs(err))),
+        "mean_err": float(np.mean(err)),      # signed: the truncation bias
+        "pct_of_span": float(np.max(np.abs(err))) / span * 100.0,
+        "corr": corr,
+        "modelled": modelled,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Reporting
+# ---------------------------------------------------------------------------
+
+def print_report(info, results, models):
+    p = info["path"]
+    print(f"\n{p.name}   {info['samples']} samples @ {info['rate']:g} Hz")
+    bits = []
+    for label, key, fmt in (("heart rate", "heart_rate", "{:.0f} bpm"),
+                            ("amplitude", "amplitude", "{:.2f}"),
+                            ("send rate", "send_rate", "{:.0f} pkt/s"),
+                            ("chunk", "chunk", "{:.0f}")):
+        if info.get(key) is not None:
+            bits.append(f"{label} {fmt.format(info[key])}")
+    if info.get("shift") is not None:
+        bits.append(f"board shift {info['shift']:.0f}")
+    if info.get("trigger") is not None:
+        bits.append(f"trigger {info['trigger']}")
+    if bits:
+        print("  " + ", ".join(bits))
+    for i, (en, freq, level) in enumerate(info["sines"], start=1):
+        if en and en.lower() == "true":
+            print(f"  sine {i}: {freq} Hz at level {level}")
+
+    print("\n  spectrum")
+    for r in results:
+        if not r or "peak_hz" not in r:
+            print(f"    {r['channel'] if r else '?':8} no peak found")
+            continue
+        line = (f"    {r['channel']:8} N={r['n']:<6} {r['resolution']:.2f} Hz/bin"
+                f"   peak {r['peak_hz']:8.2f} Hz")
+        if "in_dbfs" in r:
+            line += f"   in {r['in_dbfs']:7.2f}"
+        if "out_dbfs" in r:
+            line += f"   out {r['out_dbfs']:7.2f}"
+        if "delta_db" in r:
+            line += f"   delta {r['delta_db']:7.2f} dB"
+        print(line)
+
+    if models:
+        print("\n  model vs recorded output")
+        for m in models:
+            if not m:
+                continue
+            print(f"    {m['channel']:8} {m['algorithm']} shift={m['shift']}"
+                  f"   n={m['compared']}")
+            print(f"             max |err| {m['max_abs']:.1f} counts "
+                  f"({m['pct_of_span']:.4f}% of span),"
+                  f" mean |err| {m['mean_abs']:.1f}")
+            print(f"             mean signed err {m['mean_err']:+.1f} counts"
+                  f"   correlation {m['corr']:.6f}")
+    print()
+
+
+# ---------------------------------------------------------------------------
+# Plot
+# ---------------------------------------------------------------------------
+
+def draw(traces, info, curves_by_ch, models, fmax, db_min):
+    import matplotlib.pyplot as plt
+
+    rate = info["rate"]
+    channels = [ch for ch in ("ch1", "ch2") if f"{ch}_in" in traces or f"{ch}_out" in traces]
+    fig, axes = plt.subplots(len(channels), 2, figsize=(13, 3.2 * len(channels)),
+                             squeeze=False)
+    fig.canvas.manager.set_window_title(info["path"].name)
+
+    model_by_ch = {m["channel"]: m for m in models if m}
+    for row, ch in enumerate(channels):
+        ax_t, ax_f = axes[row]
+        t = np.arange(info["samples"]) / rate
+        for direction, color in (("in", "tab:blue"), ("out", "tab:red")):
+            key = f"{ch}_{direction}"
+            if key in traces:
+                ax_t.plot(t, traces[key], color=color, lw=0.9, label=direction)
+        m = model_by_ch.get(ch)
+        if m is not None:
+            # Dashed over the recorded output: where they separate is the
+            # whole point, and a dashed line lets the solid one show through
+            # wherever they agree.
+            ax_t.plot(t, m["modelled"], color="tab:green", lw=0.9, ls="--",
+                      label=f"model ({m['algorithm']})")
+        ax_t.set_title(f"{ch} — time")
+        ax_t.set_xlabel("Time (s)")
+        ax_t.legend(fontsize=8)
+        ax_t.grid(alpha=0.3)
+
+        for direction, color in (("in", "tab:blue"), ("out", "tab:red")):
+            if direction in curves_by_ch.get(ch, {}):
+                f, db = curves_by_ch[ch][direction]
+                ax_f.plot(f, db, color=color, lw=0.8, label=direction)
+        ax_f.set_title(f"{ch} — spectrum")
+        ax_f.set_xlabel("Frequency (Hz)")
+        ax_f.set_ylabel("dBFS")
+        ax_f.set_xlim(0, fmax if fmax else rate / 2)
+        ax_f.set_ylim(db_min, 6)
+        ax_f.legend(fontsize=8)
+        ax_f.grid(alpha=0.3)
+
+    fig.tight_layout()
+    plt.show()
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("file", nargs="?", help="dump CSV (default: the newest)")
+    ap.add_argument("--log-dir", default=str(DEFAULT_LOGS))
+    ap.add_argument("--list", action="store_true", help="list dumps and exit")
+    ap.add_argument("--fft-size", type=int, default=0,
+                    help="samples to transform, from the newest end "
+                         "(0 = the whole capture). Truncates, never zero-pads")
+    ap.add_argument("--fmax", type=float, default=0.0,
+                    help="frequency axis limit, Hz (0 = Nyquist)")
+    ap.add_argument("--db-min", type=float, default=-120.0)
+    ap.add_argument("--peak-fmin", type=float, default=1.0,
+                    help="ignore bins below this when locating the peak")
+    ap.add_argument("--model", choices=("iir", "bypass"),
+                    help="also run this local_proc algorithm on the recorded "
+                         "input and score it against the recorded output")
+    ap.add_argument("--shift", type=int,
+                    help="shift for --model (default: the board's, from the sidecar)")
+    ap.add_argument("--settle", type=int, default=200,
+                    help="samples to skip before scoring the model, since it "
+                         "starts from zeroed state and the board did not")
+    ap.add_argument("--no-plot", action="store_true")
+    args = ap.parse_args(argv)
+
+    dumps = find_dumps(args.log_dir)
+    if args.list:
+        if not dumps:
+            print(f"no dumps in {args.log_dir}")
+        for d in dumps:
+            print(d)
+        return 0
+    if args.file:
+        path = Path(args.file)
+    elif dumps:
+        path = dumps[-1]
+    else:
+        print(f"no dumps in {args.log_dir} -- press 'Log buffer' in the client "
+              f"first, or pass a file", file=sys.stderr)
+        return 1
+    if not path.exists():
+        print(f"{path}: not found", file=sys.stderr)
+        return 1
+
+    traces, info = load_dump(path)
+    full_scale = wire_full_scale(traces)
+
+    results, curves_by_ch = [], {}
+    for ch in ("ch1", "ch2"):
+        if f"{ch}_in" not in traces and f"{ch}_out" not in traces:
+            continue
+        r, curves = analyse_channel(traces, ch, info["rate"], full_scale,
+                                     args.fft_size, args.peak_fmin)
+        results.append(r)
+        curves_by_ch[ch] = curves
+
+    models = []
+    if args.model:
+        shift = args.shift
+        if shift is None:
+            shift = int(info["shift"]) if info.get("shift") is not None else 4
+        for ch in ("ch1", "ch2"):
+            models.append(compare_model(traces, ch, args.model, shift, args.settle))
+
+    print_report(info, results, models)
+    if not args.no_plot:
+        draw(traces, info, curves_by_ch, models, args.fmax, args.db_min)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

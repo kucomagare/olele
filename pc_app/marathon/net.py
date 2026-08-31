@@ -56,6 +56,11 @@ config_out_q = queue.Queue(maxsize=16)
 last_config = None
 last_metrics = None
 
+# Coarse link state for the panel's status line, so "started but nothing is
+# happening" can tell you WHY: idle (not started, or local mode),
+# connecting (retrying), connected.
+link_state = "idle"
+
 
 def request_config(op=CONFIG_OP_READ, n_channels=0, shift=0, ctrl=0,
                    log_mask=LOG_ALL):
@@ -124,17 +129,21 @@ def _may_run():
 
 
 def tcp_thread(plot_in_q, plot_out_q, stop_event):
+    global link_state
     while not stop_event.is_set():
         # Nothing is connected -- not even attempted -- until Start is
         # pressed and this mode is selected. Waiting on the gate rather than
         # polling means a press takes effect immediately, and an idle app
         # makes no connection attempts to time out or log.
         if not _may_run():
+            link_state = "idle"
             runctl.wait_for_start(0.1)
             continue
 
+        link_state = "connecting"
         try:
             sock = _connect()
+            link_state = "connected"
             print(f"Connected to {HOST}:{PORT}")
         except OSError as e:
             print(f"[net] Could not connect to {HOST}:{PORT} ({e}), "
@@ -146,6 +155,7 @@ def tcp_thread(plot_in_q, plot_out_q, stop_event):
         try:
             _run_session(sock, plot_in_q, plot_out_q, stop_event)
         finally:
+            link_state = "idle" if not _may_run() else "connecting"
             try:
                 sock.close()
             except OSError:

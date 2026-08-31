@@ -94,45 +94,12 @@ PLOT_TRIGGER_LEVEL = 0.6
 PLOT_CAPTURE_FACTOR = 2
 
 
-# ---------------------------------------------------------------------------
-# Spectrum (FFT) view
-# ---------------------------------------------------------------------------
-# Adds a second column of axes showing the magnitude spectrum of the same
-# windows the scope traces show, in vs out. This is what makes the sine
-# injectors (ECG_SINE1/2) and the low-pass filter measurable against each
-# other: inject a known tone, read how far the out curve sits below the in
-# curve at that frequency, and that number IS the filter's attenuation
-# there. Step the frequency and you have its response curve.
-#
-# Live-toggleable from the plot bar. Off, the time axes span the full width
-# exactly as before; on, they share it with the spectra.
-PLOT_FFT = False
-
-# Frequency axis derived from ECG_SAMPLING_RATE, for the same reason the
-# time axis is (see the x-axis comment in plot.py): each buffer slot is one
-# sample of the simulated ECG, so slots are 1/ECG_SAMPLING_RATE apart in
-# signal time regardless of how fast SEND_RATE x CHUNK_SIZE delivers them.
-# An injected 50 Hz sine therefore lands on 50 Hz.
-PLOT_FFT_FMAX = 0.0      # upper limit of the frequency axis, Hz. 0 = Nyquist
-                          # (ECG_SAMPLING_RATE / 2), i.e. show everything.
-PLOT_FFT_DB_MIN = -120.0  # bottom of the magnitude axis, dBFS. 0 dB is a
-                          # sine spanning the full wire range, so every real
-                          # reading is below it.
-# How often the spectra are recomputed and redrawn, Hz. 0 = every frame.
-#
-# This is not about the transform's cost -- all four rffts together are
-# 0.24 ms, which is nothing. It is that skipping them also lets the plot skip
-# restoring and blitting the two spectrum axes entirely, so their pixels just
-# stay on screen and the whole column costs zero on skipped frames. A
-# spectrum is a slow-moving thing to read: the trace wants FRAME_RATE, the
-# numbers under it do not. Raise it towards FRAME_RATE if you want the
-# spectrum to track a knob as you turn it.
-PLOT_FFT_RATE = 6.0
-
-PLOT_FFT_PEAK_FMIN = 1.0  # ignore bins below this when reporting the peak.
-                          # Baseline wander and the residue of the DC removal
-                          # live down there and would otherwise always win.
-
+# NOTE: the live app deliberately has NO spectrum view. It was built, it
+# worked, and it was the wrong place for it: an FFT on a rolling buffer costs
+# something on every frame forever, and what the measurement is actually for
+# -- inject a tone, read the attenuation, compare against a model -- does not
+# need to happen live at all. It moved to analyze.py, which reads a Log
+# buffer dump and can take as long as it likes.
 
 # Each received chunk is reduced to this many min/max pairs before being
 # pushed into the plot buffer (so 2*PLOT_ENVELOPE_BLOCKS points per
@@ -165,6 +132,14 @@ PLOT_ENVELOPE_BLOCKS = 1
 # windows get the honest stepped rendering, dense ones get the cheap one
 # that looks the same. Set to 0 to force steps-mid always.
 PLOT_STEPS_MIN_PX = 2.0
+
+# How often the Tk event loop is pumped, Hz -- button clicks, typing, hover.
+# Deliberately independent of FRAME_RATE: events used to be pumped only when
+# the plot redrew, so lowering FRAME_RATE (which is the recommended way to
+# save CPU) also made the panel feel broken, and a click could sit unhandled
+# for a whole frame period. flush_events() costs 0.08 ms, so 100 Hz is under
+# 1% of a core.
+UI_POLL_RATE = 100.0
 FRAME_RATE = 24   # Plot redraws/s. Live-editable from the panel --
                   # python_client.py reads config.FRAME_RATE each loop
                   # cycle rather than a value frozen at import time.
