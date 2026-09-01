@@ -96,12 +96,15 @@ Both also use TCP port 5001, so stop one before starting the other.
   window. It writes a pair of files under pc_app/$VARIANT/build/logs/:
   the samples, and a sidecar with every setting that produced them.
 
+  SAT (Static Analysis Tool) reads them offline. Either click the "SAT"
+  button next to "Log buffer" in the client, or run it directly:
+
   cd pc_app/marathon
   source build/venv/bin/activate
-  ./analyze.py                    window, on the newest dump
-  ./analyze.py FILE.csv           ...on a particular one
-  ./analyze.py --list             what dumps exist
-  ./analyze.py --no-plot          numbers only (scripting, or no display)
+  ./sat.py                        window, on the newest dump
+  ./sat.py FILE.csv               ...on a particular one
+  ./sat.py --list                 what dumps exist
+  ./sat.py --no-plot              numbers only (scripting, or no display)
 
   Spectra, tone attenuation, and --model iir to score the recorded board
   output against a bit-accurate model of axi_tdm_filter.vhd.

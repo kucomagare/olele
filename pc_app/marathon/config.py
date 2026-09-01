@@ -98,8 +98,8 @@ PLOT_CAPTURE_FACTOR = 2
 # worked, and it was the wrong place for it: an FFT on a rolling buffer costs
 # something on every frame forever, and what the measurement is actually for
 # -- inject a tone, read the attenuation, compare against a model -- does not
-# need to happen live at all. It moved to analyze.py, which reads a Log
-# buffer dump and can take as long as it likes.
+# need to happen live at all. It moved to sat.py (Static Analysis Tool),
+# which reads a Log buffer dump and can take as long as it likes.
 
 # Each received chunk is reduced to this many min/max pairs before being
 # pushed into the plot buffer (so 2*PLOT_ENVELOPE_BLOCKS points per

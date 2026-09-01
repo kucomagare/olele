@@ -17,10 +17,11 @@ runctl.py              the Start/Stop gate, shared by the GUI and both workers
 local_proc.py          local processing mode: generate/process/plot in-process,
                       no socket, no relay, no board. Integer algorithms meant
                       to be translated to VHDL; "iir" models axi_tdm_filter.vhd
-spectrum.py            rfft -> dBFS magnitudes + peak finder (used by analyze.py)
-analyze.py            OFFLINE analysis of a logged buffer: spectra, tone
-                      attenuation, and the hardware scored against a model
-analyze_gui.py        its window -- same shape as the client's, but static:
+spectrum.py            rfft -> dBFS magnitudes + peak finder (used by sat.py)
+sat.py                 SAT (Static Analysis Tool) -- OFFLINE analysis of a
+                      logged buffer: spectra, tone attenuation, and the
+                      hardware scored against a model
+sat_gui.py             its window -- same shape as the client's, but static:
                       no blitting, no frame rate, every control recomputes once
 tcp_server_app.cpp    C++ relay — forwards raw bytes between whichever two
                       peers are connected (identifies the board by source IP);
@@ -100,7 +101,7 @@ Both workers are always alive and each idles unless it owns the current
 mode, so switching is a live attribute write with no thread lifecycle to get
 wrong.
 
-## Offline analysis — `analyze.py`
+## Offline analysis — SAT (`sat.py`)
 
 The live client deliberately has **no spectrum view**. It had one; it was
 the wrong place for it. An FFT over a rolling buffer costs something on
@@ -109,13 +110,15 @@ a tone, read the attenuation, compare against a model. None of that needs to
 happen at 24 fps, and all of it is easier when nothing is moving.
 
 So the client stays lean and only has to stream and draw, and the
-measurement happens offline on a **Log buffer** dump, where taking a second
-is free and the same capture can be examined ten different ways:
+measurement happens offline in **SAT** (Static Analysis Tool) on a **Log
+buffer** dump, where taking a second is free and the same capture can be
+examined ten different ways. Click the **SAT** button in the client's plot
+bar to launch it as a separate process, or run it directly:
 
 ```bash
 source build/venv/bin/activate
-./analyze.py                        # window, on the newest dump
-./analyze.py FILE.csv               # ...on a particular one
+./sat.py                            # window, on the newest dump
+./sat.py FILE.csv                   # ...on a particular one
 ```
 
 It opens a **window shaped like the client's** — matplotlib's own canvas
@@ -129,7 +132,7 @@ The controls, all of which are also flags:
 
 | Control | What it does |
 |---|---|
-| **Dump** + Rescan / Open… | which capture; newest first, or any file |
+| **Dump** + Rescan / Open… / Delete all logs | which capture; newest first, or any file; delete-all asks for confirmation |
 | **Size** | samples transformed, `capture` or 128…8192 |
 | **F max**, **dB min** | spectrum axis limits (`F max` 0 = Nyquist) |
 | **Peak from (Hz)** | where to start looking for the peak |
@@ -145,8 +148,8 @@ capture reports the tone.
 For scripting or a box with no display, the flags still work:
 
 ```bash
-./analyze.py --list
-./analyze.py --no-plot --model iir --peak-fmin 40
+./sat.py --list
+./sat.py --no-plot --model iir --peak-fmin 40
 ```
 
 It reads both halves of a dump — the CSV of samples and the

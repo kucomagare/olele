@@ -8,18 +8,18 @@
 # artist and no frame rate, because there is no stream: that is the whole
 # reason the spectrum lives here instead of in the client.
 #
-# The analysis itself is in analyze.py. This file is presentation only; if a
+# The analysis itself is in sat.py. This file is presentation only; if a
 # number looks wrong, it is wrong there.
 
 import tkinter as tk
-from tkinter import filedialog, ttk
+from tkinter import filedialog, messagebox, ttk
 
 import matplotlib
 matplotlib.use("TkAgg")
 import matplotlib.pyplot as plt
 import numpy as np
 
-import analyze
+import sat
 
 FFT_SIZES = (0, 128, 256, 512, 1024, 2048, 4096, 8192)
 MODELS = ("none", "iir", "bypass")
@@ -64,7 +64,7 @@ class _Tooltip:
             self.tip = None
 
 
-class AnalyzeWindow:
+class SATWindow:
     def __init__(self, log_dir, path=None, fft_size=0, fmax=0.0, db_min=-120.0,
                  peak_fmin=1.0, model=None, shift=None, settle=200):
         self.log_dir = log_dir
@@ -145,6 +145,14 @@ class AnalyzeWindow:
             row=1, column=0, sticky="ew", pady=(4, 0), padx=(0, 2))
         ttk.Button(f, text="Open…", command=self.open_file).grid(
             row=1, column=1, sticky="ew", pady=(4, 0), padx=(2, 0))
+        del_btn = ttk.Button(f, text="Delete all logs",
+                             command=self._delete_all_dumps)
+        del_btn.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(4, 0))
+        _Tooltip(del_btn,
+                 "Deletes every plotdump_*.csv in this folder and its "
+                 "settings sidecar -- everything the client's 'Log buffer' "
+                 "button has produced. Asks for confirmation first. Cannot "
+                 "be undone.")
         f.columnconfigure(0, weight=1)
         f.columnconfigure(1, weight=1)
 
@@ -218,7 +226,7 @@ class AnalyzeWindow:
     # Data
     # ------------------------------------------------------------------
     def reload_dumps(self, select=None):
-        dumps = analyze.find_dumps(self.log_dir)
+        dumps = sat.find_dumps(self.log_dir)
         self._dumps = {p.name: p for p in reversed(dumps)}   # newest first
         self._file_box["values"] = list(self._dumps)
         if select is not None:
@@ -235,6 +243,30 @@ class AnalyzeWindow:
                       f"Press 'Log buffer' in the streaming client to make "
                       f"one, or use Open… to pick a file elsewhere.")
 
+    def _delete_all_dumps(self):
+        dumps = sat.find_dumps(self.log_dir)
+        if not dumps:
+            return
+        if not messagebox.askyesno(
+                "Delete all logs",
+                f"Delete all {len(dumps)} logged buffer(s) in "
+                f"{self.log_dir}?\n\nEach plotdump_*.csv and its settings "
+                f"sidecar will be removed. This cannot be undone."):
+            return
+        for csv_path in dumps:
+            sidecar = sat.sidecar_for(csv_path)
+            for path in (csv_path, sidecar):
+                try:
+                    path.unlink()
+                except FileNotFoundError:
+                    pass
+                except OSError as exc:
+                    print(f"[sat] could not delete {path.name}: {exc}")
+        self.traces = self.info = None
+        self._file.set("")
+        self._dumps = {}
+        self.reload_dumps()
+
     def open_file(self):
         from pathlib import Path
         name = filedialog.askopenfilename(
@@ -249,7 +281,7 @@ class AnalyzeWindow:
         if path is None:
             return
         try:
-            self.traces, self.info = analyze.load_dump(path)
+            self.traces, self.info = sat.load_dump(path)
         except Exception as exc:                          # noqa: BLE001
             # A malformed or truncated dump must not take the window down --
             # the whole point is to be able to open one and look at it.
@@ -294,12 +326,12 @@ class AnalyzeWindow:
         # once a sidecar has answered it.
         self._shift.set(str(shift))
 
-        full_scale = analyze.wire_full_scale(self.traces)
+        full_scale = sat.wire_full_scale(self.traces)
         results, curves = [], {}
         for ch in ("ch1", "ch2"):
             if f"{ch}_in" not in self.traces and f"{ch}_out" not in self.traces:
                 continue
-            r, c = analyze.analyse_channel(self.traces, ch, self.info["rate"],
+            r, c = sat.analyse_channel(self.traces, ch, self.info["rate"],
                                             full_scale, size, peak_fmin)
             results.append(r)
             curves[ch] = c
@@ -307,10 +339,10 @@ class AnalyzeWindow:
         models = []
         if model != "none":
             for ch in ("ch1", "ch2"):
-                models.append(analyze.compare_model(self.traces, ch, model,
+                models.append(sat.compare_model(self.traces, ch, model,
                                                      shift, settle))
 
-        self._say(analyze.format_report(self.info, results, models))
+        self._say(sat.format_report(self.info, results, models))
         self._draw(curves, models, fmax, db_min)
 
     def _say(self, text):

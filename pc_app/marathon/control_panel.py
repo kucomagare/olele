@@ -40,7 +40,10 @@
 # python_client.py's main loop, which need a full canvas redraw (or a
 # recomputed frame period) to apply them -- see there for why.
 
+import subprocess
+import sys
 import tkinter as tk
+from pathlib import Path
 from tkinter import ttk
 
 import config
@@ -48,6 +51,10 @@ import local_proc
 import net
 import packet_format
 import runctl
+
+# sat.py (Static Analysis Tool) lives next to this file regardless of the
+# working directory the app was launched from.
+SAT_SCRIPT = Path(__file__).resolve().parent / "sat.py"
 
 
 class _Tooltip:
@@ -1077,6 +1084,29 @@ class PlotControlPanel:
         self._dump_status = ttk.Label(self.frame, text="")
         self._dump_status.grid(row=0, column=col, sticky="w")
         col += 1
+
+        # Launches sat.py as its own process rather than importing it
+        # in-process: it opens its own Tk root and event loop, and this way a
+        # long transform or a crash in there can never take the live stream
+        # down with it. sys.executable so it runs under whichever interpreter
+        # is already running this app (the venv, with numpy etc. installed),
+        # regardless of what "python3" resolves to on PATH.
+        self._sat_button = ttk.Button(self.frame, text="SAT",
+                                      command=self._open_sat)
+        self._sat_button.grid(row=0, column=col, sticky="w", padx=(8, 4))
+        _Tooltip(self._sat_button,
+                 "SAT -- Static Analysis Tool. Opens sat.py in its own "
+                 "window, on the newest logged buffer: spectra, peak "
+                 "readout, and the board-vs-model comparison. A new click "
+                 "opens another instance.")
+        col += 1
+
+    def _open_sat(self):
+        try:
+            subprocess.Popen([sys.executable, str(SAT_SCRIPT)],
+                              cwd=str(SAT_SCRIPT.parent))
+        except OSError as exc:
+            print(f"[plot] could not launch sat.py: {exc}")
 
     def _dump_buffers(self):
         if self._plot is None:

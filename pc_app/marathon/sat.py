@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
-"""Offline analysis of a logged buffer: spectra, and the hardware against a model.
+"""SAT -- Static Analysis Tool. Offline analysis of a logged buffer: spectra,
+and the hardware against a model.
 
-    ./analyze.py                     # open the window on the newest dump
-    ./analyze.py FILE.csv            # ...on a particular one
-    ./analyze.py --list              # what dumps exist
-    ./analyze.py --no-plot           # numbers only, for a terminal or a pipe
-    ./analyze.py --no-plot --model iir --peak-fmin 40
+    ./sat.py                         # open the window on the newest dump
+    ./sat.py FILE.csv                # ...on a particular one
+    ./sat.py --list                  # what dumps exist
+    ./sat.py --no-plot               # numbers only, for a terminal or a pipe
+    ./sat.py --no-plot --model iir --peak-fmin 40
 
-Everything the flags do is also a control in the window (analyze_gui.py) --
+Everything the flags do is also a control in the window (sat_gui.py) --
 pick the dump, the transform size, the axis limits, where to look for the
 peak, and which model to score against, all without going back to a prompt.
 The flags remain for scripting and for a box with no display.
@@ -367,8 +368,8 @@ def main(argv=None):
         # control in it, so a question that needs three different settings
         # to answer does not need three command lines. The CLI stays for
         # scripting and for boxes with no display.
-        import analyze_gui
-        analyze_gui.AnalyzeWindow(
+        import sat_gui
+        sat_gui.SATWindow(
             log_dir=Path(args.log_dir), path=path, fft_size=args.fft_size,
             fmax=args.fmax, db_min=args.db_min, peak_fmin=args.peak_fmin,
             model=args.model, shift=args.shift, settle=args.settle).run()
