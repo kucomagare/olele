@@ -15,6 +15,7 @@ from config import HOST, PORT, RECONNECT_DELAY
 from packet_format import (CONFIG_OP_READ, CONFIG_OP_WRITE, CONFIG_TYPE,
                             DATA_TYPE, LOG_ALL, METRICS_TYPE, PacketReceiver,
                             build_config_packet)
+from sched import RateScheduler
 from signal_gen import generate_signal_packet
 
 # Receive-path sizing. These are not arbitrary: the relay (tcp_server_app.cpp)
@@ -30,20 +31,12 @@ RECV_BURST = 64      # max recv() calls per loop pass, so a fast sender
 PACKET_BURST = 64    # max packets reassembled per loop pass, same reasoning
 SOCK_RCVBUF = 4 * 1024 * 1024
 
-# How much send backlog the scheduler will replay after a stall before giving
-# up on the rest. Expressed as a DURATION, not a packet count: the point is to
-# tell routine jitter apart from a real stall, and that boundary lives in
-# milliseconds, not packets. A packet count means the threshold shrinks as
-# SEND_RATE rises -- at 1400 pkt/s the original 8 packets worked out to 5.7 ms,
-# which is less than a single plot refresh (~8.8 ms measured), so ordinary
-# frames were tripping a limiter meant for multi-second stalls and losing 7.6%
-# of the stream to it.
-#
-# 50 ms comfortably absorbs a plot refresh, a GC pause or a scheduler slice
-# while still abandoning anything pathological. The floor keeps it sane at low
-# SEND_RATE, where 50 ms can be less than one packet period.
-SEND_CATCHUP_MAX_S = 0.05
-SEND_CATCHUP_MIN_PKTS = 8
+# How long to idle when a loop pass found nothing to do. Only ever an UPPER
+# bound: the loop clamps it to the time remaining before the next packet is
+# due, because this value is longer than the packet period above ~1750 pkt/s
+# and would otherwise cap the send rate itself (measured: a nominal 0.5 ms
+# sleep really takes ~570 us).
+SEND_IDLE_SLEEP_S = 0.0005
 
 # Config requests queued by the GUI, drained by the net thread. A Queue rather
 # than a bare variable because the GUI thread writes it and the net thread
@@ -60,6 +53,19 @@ last_metrics = None
 # happening" can tell you WHY: idle (not started, or local mode),
 # connecting (retrying), connected.
 link_state = "idle"
+
+# Seconds since the last inbound DATA packet, while streaming; 0 when not
+# streaming or not expecting any. Read by the panel's status line.
+#
+# WHY THIS EXISTS. A healthy-looking send path is not evidence the far end is
+# alive. The relay accepts every byte and silently discards it when it has no
+# partner peer, so on 2026-09-01 the client printed "1700 pkts/s" with zero
+# drops and zero send-stalls for several minutes while the board was wedged
+# and not even answering ping. Every send-side counter was telling the truth
+# and the conclusion was still wrong.
+#
+# The receive side knew: nothing had come back. It just had no way to say so.
+rx_stale_s = 0.0
 
 
 def request_config(op=CONFIG_OP_READ, n_channels=0, shift=0, ctrl=0,
@@ -178,19 +184,32 @@ def _run_session(sock, plot_in_q, plot_out_q, stop_event):
     """One connection's worth of send/receive. Returns (instead of
     setting stop_event) on any connection loss, so the outer tcp_thread
     loop reconnects instead of the whole app exiting."""
+    global last_config, last_metrics, rx_stale_s
+
     receiver = PacketReceiver()
 
     counter = 0
-    next_send = time.perf_counter()
+    # Reads config.SEND_RATE per chunk, so a rate change from the panel takes
+    # effect on the very next packet rather than at the next reconnect.
+    schedule = RateScheduler(lambda: config.SEND_RATE)
 
     packets_sent = 0
-    backlog_dropped = 0
     send_stalls = 0
+    # Packets generated and sent, but dropped on the way to the PLOT because
+    # its queue was full. Counted rather than silently passed: these are the
+    # only samples in the whole path that actually go missing, and a "Log
+    # buffer" dump taken while it is happening is short without saying so --
+    # which matters because that dump is what SAT draws conclusions from.
+    plot_dropped = 0
+    last_rx = time.perf_counter()
     # Remainder of a packet the socket could not take in one go. A partial
     # packet must be finished before another is started -- the wire format is
     # a stream of [type][length][payload] frames with no resync marker, so a
     # half-written one would desynchronise the relay and the board.
     pending = None
+    # Whether `pending` is a data packet, so finishing it counts toward the
+    # throughput line and finishing a config packet does not.
+    pending_is_data = False
     last_report = time.time()
 
     while not stop_event.is_set():
@@ -206,6 +225,25 @@ def _run_session(sock, plot_in_q, plot_out_q, stop_event):
 
         now = time.perf_counter()
 
+        # Work done on THIS pass -- a send, a receive, or a reassembly.
+        # Declared here rather than just above the receive block: sending is
+        # work too, and treating it as idle made the sleep at the bottom of
+        # this loop a rate limiter. See that sleep for the numbers.
+        did_work = False
+
+        # Paused is not a stall -- see RateScheduler.hold().
+        if not config.SEND_ENABLED:
+            schedule.hold(now)
+
+        # Receive watchdog. Only meaningful while we are actually streaming
+        # AND expecting an echo -- with sending paused or receiving switched
+        # off, silence is the correct behaviour, not a fault.
+        if config.SEND_ENABLED and config.RECEIVE_ENABLED:
+            rx_stale_s = now - last_rx
+        else:
+            rx_stale_s = 0.0
+            last_rx = now
+
         # Config requests go out ahead of stream data and are not rate-limited:
         # they are a handful of bytes and the whole point is that they stay
         # responsive while the data stream is saturating the link.
@@ -220,6 +258,9 @@ def _run_session(sock, plot_in_q, plot_out_q, stop_event):
                         build_config_packet(op, nch, sh, ctrl, lmask)))
                     if leftover is not None:
                         pending = leftover
+                        pending_is_data = False
+                    else:
+                        did_work = True
                 except OSError as e:
                     print(f"[net] Connection lost sending config: {e}, reconnecting...")
                     return
@@ -232,61 +273,58 @@ def _run_session(sock, plot_in_q, plot_out_q, stop_event):
                 print(f"[net] Connection lost while sending: {e}, reconnecting...")
                 return
             if pending is not None:
+                # Still blocked. NOT progress -- see the sleep at the bottom:
+                # counting a refused write as work makes this loop retry a
+                # full socket at loop speed, which cannot help and costs a
+                # core (measured on hardware: 74k stalls/s at 81% CPU).
                 send_stalls += 1
-            else:
+            elif pending_is_data:
+                # Only count a DATA packet here. A config packet that had to
+                # be finished across two passes used to land in this branch
+                # and be reported as stream throughput -- a handful a session,
+                # but "pkts/s" should mean the thing the rate controls.
                 packets_sent += 1
 
-        if pending is None and config.SEND_ENABLED and now >= next_send:
+        if pending is None and config.SEND_ENABLED and schedule.due(now):
             try:
-                packet, ch1, ch2 = generate_signal_packet(counter, now)
+                packet, ch1, ch2 = generate_signal_packet(counter)
                 pending = send_some(sock, memoryview(packet))
                 if pending is None:
                     packets_sent += 1
+                    did_work = True
                 else:
+                    pending_is_data = True
                     send_stalls += 1
                 try:
                     plot_in_q.put_nowait((ch1, ch2))
                 except queue.Full:
-                    pass
+                    plot_dropped += 1
             except OSError as e:
                 print(f"[net] Connection lost while sending: {e}, reconnecting...")
                 return
 
             counter += config.CHUNK_SIZE
-            # Read live each cycle (not cached once before the loop) so a
-            # SEND_RATE change from the control panel takes effect on the
-            # very next send.
-            period = 1.0 / config.SEND_RATE
-            next_send += period
-
-            # Fixed-increment schedule: after any stall next_send sits in the
-            # past, and this loop then fires one packet per iteration until it
-            # catches up -- replaying the whole backlog at loop speed, far
-            # above SEND_RATE, for as long again as the stall lasted.
-            # Measured: a ~10 s stall at 1300 pkt/s produced ~30 s of
-            # 1600-2250 pkt/s before settling back to 1300, which is not a
-            # rate error but does wreck any throughput reading taken during
-            # it. A few packets of catch-up are worth keeping (they absorb
-            # ordinary jitter and hold the long-run average honest); beyond
-            # that, abandon the backlog -- packets due seconds ago cannot be
-            # sent "on time" retroactively, and replaying them only overruns
-            # the board.
-            catchup_limit = max(SEND_CATCHUP_MIN_PKTS * period, SEND_CATCHUP_MAX_S)
-            if now - next_send > catchup_limit:
-                backlog_dropped += int((now - next_send) / period)
-                next_send = now + period
+            schedule.advance(now)
 
         t = time.time()
         elapsed = t - last_report
         if elapsed >= 1.0:
             # The dropped count is the interesting half: a nonzero value is
             # the direct signal that this loop stalled, and how badly.
+            backlog_dropped = schedule.take_dropped()
             note = f" (dropped {backlog_dropped} late)" if backlog_dropped else ""
             # send_stalls counts passes where the socket would not take the
             # whole packet. A few are normal; a lot means the far end (relay,
             # link, or board) is the limit, not this loop.
             if send_stalls:
                 note += f" ({send_stalls} send-stalls)"
+            # The only samples in the path that actually go missing.
+            if plot_dropped:
+                note += f" ({plot_dropped} plot-drops -- a dump now is short)"
+            # Sending can look flawless into a relay whose other peer is gone.
+            # Say so, rather than reporting a perfect stream to nowhere.
+            if rx_stale_s > config.RX_WATCHDOG_S:
+                note += f"  [!] NOTHING RECEIVED for {rx_stale_s:.1f}s -- far end gone?"
             # Normalized by the window that actually elapsed, not assumed to
             # be exactly 1000 ms: the check runs once per loop pass, so the
             # window always overshoots by a varying amount. The firmware's
@@ -295,11 +333,9 @@ def _run_session(sock, plot_in_q, plot_out_q, stop_event):
             # 1400/1401 -- measurement noise, not the stream.
             print(f"Python sent: {packets_sent / elapsed:.0f} pkts/s{note}")
             packets_sent = 0
-            backlog_dropped = 0
             send_stalls = 0
+            plot_dropped = 0
             last_report = t
-
-        did_work = False
 
         if config.RECEIVE_ENABLED:
             # Drain the socket until it is actually empty rather than taking
@@ -331,23 +367,54 @@ def _run_session(sock, plot_in_q, plot_out_q, stop_event):
                 did_work = True
                 ptype, records = received
                 if ptype == DATA_TYPE:
+                    # Proof of life from the far end -- see rx_stale_s.
+                    last_rx = time.perf_counter()
                     try:
                         plot_out_q.put_nowait((records["ch1"], records["ch2"]))
                     except queue.Full:
-                        pass
+                        plot_dropped += 1
                 elif ptype == CONFIG_TYPE and len(records):
-                    global last_config
                     last_config = dict(zip(records.dtype.names,
                                            (int(v) for v in records[0])))
                     print(f"[net] config read-back: {last_config}")
                 elif ptype == METRICS_TYPE and len(records):
-                    global last_metrics
                     last_metrics = dict(zip(records.dtype.names,
                                             (int(v) for v in records[0])))
 
-        # Yield only when there was nothing to do. The unconditional sleep
-        # here put a hard ~1 kHz ceiling on loop passes (Linux rounds a 0.5 ms
-        # sleep up to roughly 1 ms), which is what turned the two caps above
-        # into a bandwidth limit instead of just a latency one.
-        if not did_work:
-            time.sleep(0.0005)
+        # Yield only when there was nothing to do -- and never past the next
+        # send deadline.
+        #
+        # Two separate traps here, both measured:
+        #
+        #   * An UNCONDITIONAL sleep put a hard ~1 kHz ceiling on loop passes,
+        #     which is what turned the two receive caps above into a bandwidth
+        #     limit instead of just a latency one. Hence `if not did_work`.
+        #   * A FIXED 0.5 ms sleep is itself a rate limiter. It really takes
+        #     ~570 us on this machine, so a loop that sleeps it whenever
+        #     nothing arrived cannot pass more than ~1750 times a second --
+        #     below the packet period above ~1750 pkt/s. Sending used not to
+        #     count as work either, so with RECEIVE_ENABLED off (a checkbox on
+        #     the panel) this capped the send rate outright, and reported the
+        #     shortfall as "(dropped N late)" -- blaming a stall for what was
+        #     this sleep.
+        #
+        # So: sleep at most until the next packet is due. Behind schedule,
+        # that clamps to 0.0, which yields the GIL without throttling.
+        if pending is not None:
+            # The socket would not take the rest of a packet. Nothing this
+            # loop does will change that -- only the far end draining will --
+            # so retrying at loop speed is pure waste. Back off a fixed
+            # amount, deliberately NOT clamped to the send deadline: when the
+            # link is the limit the deadline is always in the past, so the
+            # clamp below would come out 0 and spin.
+            #
+            # This is the one case where being behind schedule must NOT make
+            # the loop run hotter. Measured on hardware at 2000 pkt/s over a
+            # saturated link: 74k stalls/s and 81% of a core, achieving no
+            # more throughput than backing off does.
+            time.sleep(SEND_IDLE_SLEEP_S)
+        elif not did_work:
+            delay = SEND_IDLE_SLEEP_S
+            if config.SEND_ENABLED:
+                delay = min(delay, schedule.time_until())
+            time.sleep(delay)

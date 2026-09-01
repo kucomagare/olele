@@ -119,11 +119,11 @@ class PacketReceiver:
         body = bytes(self.buffer[4:total_needed])
         del self.buffer[:total_needed]
 
-        dtype = PACKET_DTYPES.get(type_r)
-        if dtype is None:
-            return None
-
+        # No dtype lookup guard here: PACKET_RECORD_SIZE and PACKET_DTYPES are
+        # built from the same PACKET_TYPES dict, so the record_size check above
+        # has already rejected every type this could fail on.
+        #
         # (type, records) rather than a bare array: there are three packet
         # types on this link now and the caller has to dispatch on it. Callers
         # that only care about data compare against DATA_TYPE.
-        return type_r, np.frombuffer(body, dtype=dtype)
+        return type_r, np.frombuffer(body, dtype=PACKET_DTYPES[type_r])

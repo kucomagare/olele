@@ -58,6 +58,42 @@ void handle_signal(int)
     if ((fd = g_python_raw_fd.load()) != -1) shutdown(fd, SHUT_RDWR);
 }
 
+// Read exactly `len` bytes, or say why not.
+//
+//    1  got all of them
+//    0  timed out having read NOTHING -- the stream is sitting at a clean
+//       frame boundary, so the caller can simply go round again
+//   -1  peer closed, the read failed, or it timed out PART-WAY through
+//
+// That last case is why this exists. MSG_WAITALL does not mean "all or
+// nothing" once SO_RCVTIMEO is set: the timeout can expire with some bytes
+// already delivered, and recv() then returns a SHORT count. The old code
+// checked only `r <= 0`, so a short read looked like a complete one -- it
+// would read a 2-byte header field having received 1 byte, act on whatever
+// was in the other byte, and leave the stream permanently misaligned. And
+// the `continue` on EAGAIN restarted the frame loop even when a previous
+// field had already been consumed, which desynchronises just as badly.
+//
+// The wire format is [type][length][payload] with no resync marker, so a
+// half-consumed frame is unrecoverable: every later packet is garbage or
+// trips the unknown-type check. Dropping the connection lets both ends
+// reconnect and resynchronise, which is the only correct answer.
+static int recv_exact(int fd, void *buf, size_t len)
+{
+    uint8_t *p = static_cast<uint8_t *>(buf);
+    size_t got = 0;
+    while (got < len) {
+        ssize_t n = recv(fd, p + got, len - got, 0);
+        if (n > 0) { got += static_cast<size_t>(n); continue; }
+        if (n == 0) return -1;                       // orderly close
+        if (errno == EINTR) continue;
+        if (errno == EAGAIN || errno == EWOULDBLOCK)
+            return got == 0 ? 0 : -1;                // boundary vs mid-frame
+        return -1;
+    }
+    return 1;
+}
+
 bool send_all(int fd, const void *buf, size_t len)
 {
     const uint8_t *p = static_cast<const uint8_t *>(buf);
@@ -127,8 +163,25 @@ void drop_peer(const std::shared_ptr<Peer> &p)
 // ============================================================
 // Client handler thread
 // ============================================================
-void handle_client(std::shared_ptr<Peer> self, const std::string &ip, int port, bool is_pcb)
+// One accepted connection's thread, plus a flag it sets on the way out so
+// main() can join and discard it. Without this the worker vector only ever
+// grew: a finished std::thread stays joinable, holding its handle until
+// someone joins it, so a relay left running across many reconnects
+// accumulated one per connection for the life of the process.
+struct Worker {
+    std::thread th;
+    std::shared_ptr<std::atomic<bool>> done;
+};
+
+void handle_client(std::shared_ptr<Peer> self, const std::string &ip, int port,
+                   bool is_pcb, std::shared_ptr<std::atomic<bool>> done)
 {
+    // Set on every exit path below, including the early breaks.
+    struct DoneGuard {
+        std::shared_ptr<std::atomic<bool>> flag;
+        ~DoneGuard() { if (flag) flag->store(true); }
+    } guard{done};
+
     const int client_fd = self->fd;
     int packet_counter = 0;
 
@@ -149,15 +202,18 @@ void handle_client(std::shared_ptr<Peer> self, const std::string &ip, int port, 
     {
         uint16_t type, length;
 
-        ssize_t r = recv(client_fd, &type, sizeof(type), MSG_WAITALL);
-        if (r <= 0) {
-            if (r < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) continue;
-            break;
-        }
+        // Only a timeout BEFORE any of the frame has been read is retryable;
+        // see recv_exact(). Once `type` is consumed, anything short of the
+        // rest of the frame means the stream is misaligned.
+        int r = recv_exact(client_fd, &type, sizeof(type));
+        if (r == 0) continue;              // idle at a frame boundary
+        if (r < 0) break;
 
-        r = recv(client_fd, &length, sizeof(length), MSG_WAITALL);
+        r = recv_exact(client_fd, &length, sizeof(length));
         if (r <= 0) {
-            if (r < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) continue;
+            if (r == 0)
+                std::cerr << "[" << ip << ":" << port << "] timed out between "
+                             "header fields, dropping connection\n";
             break;
         }
 
@@ -181,9 +237,14 @@ void handle_client(std::shared_ptr<Peer> self, const std::string &ip, int port, 
         // both the board and Python already agree on big-endian, so there is nothing to decode.
         std::vector<uint8_t> raw(static_cast<size_t>(length) * record_size);
         if (!raw.empty()) {
-            ssize_t rr = recv(client_fd, raw.data(), raw.size(), MSG_WAITALL);
+            // The header is already consumed, so there is no clean boundary
+            // to retry from here either -- a short or absent body is a
+            // dropped connection, not a `continue`.
+            int rr = recv_exact(client_fd, raw.data(), raw.size());
             if (rr <= 0) {
-                if (rr < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) continue;
+                if (rr == 0)
+                    std::cerr << "[" << ip << ":" << port << "] timed out mid-payload ("
+                              << raw.size() << " B expected), dropping connection\n";
                 break;
             }
         }
@@ -295,7 +356,7 @@ int main()
 
     std::cout << "Server waiting for connection on port " << SERVER_PORT << "..." << std::endl;
 
-    std::vector<std::thread> workers;
+    std::vector<Worker> workers;
 
     while (g_running)
     {
@@ -332,7 +393,21 @@ int main()
 
         std::cout << "Registered " << (is_pcb ? "PCB" : "Python") << " client\n";
 
-        workers.emplace_back(handle_client, peer, std::string(ip_str), client_port, is_pcb);
+        // Reap anything that has already finished, so the vector tracks live
+        // connections rather than every connection ever made. Joining here is
+        // immediate -- the flag is only set on the way out of the thread.
+        for (auto it = workers.begin(); it != workers.end(); ) {
+            if (it->done->load()) {
+                if (it->th.joinable()) it->th.join();
+                it = workers.erase(it);
+            } else {
+                ++it;
+            }
+        }
+
+        auto done = std::make_shared<std::atomic<bool>>(false);
+        workers.push_back({std::thread(handle_client, peer, std::string(ip_str),
+                                       client_port, is_pcb, done), done});
     }
 
     close(server_fd);
@@ -341,7 +416,7 @@ int main()
         if (pcb_peer)    pcb_peer->kill();
         if (python_peer) python_peer->kill();
     }
-    for (auto &t : workers) if (t.joinable()) t.join();
+    for (auto &w : workers) if (w.th.joinable()) w.th.join();
 
     std::cout << "Server stopped." << std::endl;
     return 0;

@@ -10,6 +10,7 @@
 # need channels to actually differ clinically -- this is a placeholder
 # pairing, not a modeled two-lead ECG.
 
+import struct
 import threading
 
 import numpy as np
@@ -17,8 +18,6 @@ import neurokit2 as nk
 
 import config
 from packet_format import DATA_TYPE, DATA_DTYPE, TS_MODULUS, CH1_DTYPE, CH2_DTYPE
-
-import struct
 
 # Generation (nk.ecg_simulate, expensive) and amplitude scaling (cheap) are
 # deliberately decoupled: the raw float buffer is cached and only rebuilt
@@ -367,7 +366,7 @@ def build_data_packet(ts_start, ch1, ch2):
     return header + rec.tobytes()
 
 
-def generate_signal_packet(counter, now):
+def generate_signal_packet(counter):
     """Returns (packet_bytes, ch1, ch2) for one send cycle."""
     ch1, ch2 = generate_ecg_chunk(counter)
     packet = build_data_packet(counter, ch1, ch2)

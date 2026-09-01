@@ -30,31 +30,48 @@ from matplotlib.ticker import FuncFormatter
 
 import config
 import net
-from config import PLOT_ENVELOPE_BLOCKS, PLOT_MODE
 from packet_format import CH1_DTYPE, CH2_DTYPE
 from control_panel import GUI_SECTIONS, SignalControlPanel, PlotControlPanel
 
-_SCOPE = (PLOT_MODE == "scope")
 
-
-def envelope(values, blocks=PLOT_ENVELOPE_BLOCKS):
+def envelope(values, blocks=None):
     """Reduce a chunk to `blocks` min/max pairs (2*blocks points).
 
     Keeps the visible extremes -- a plain stride-based decimation would
     alias a triangle/sine down to whatever phase the stride happened to
     land on, and would hide short transients entirely. Returns the input
     unchanged when it is already short enough to be worth plotting raw.
+
+    `blocks` defaults to config.PLOT_ENVELOPE_BLOCKS, read at CALL time. It
+    used to be a default argument, which binds once at import and so pinned
+    the value for the life of the process -- against the live-config rule
+    the rest of the app follows, and a silent no-op the day the knob is put
+    on the panel.
     """
+    if blocks is None:
+        blocks = config.PLOT_ENVELOPE_BLOCKS
     n = len(values)
     if blocks <= 0 or n == 0 or n <= 2 * blocks:
         return values
 
-    usable = (n // blocks) * blocks
-    v = values[:usable].reshape(blocks, -1)
+    per = n // blocks                      # samples per block, >= 2 here
+    usable = per * blocks
+    v = values[:usable].reshape(blocks, per)
 
     out = np.empty(2 * blocks, dtype=values.dtype)
     out[0::2] = v.min(axis=1)
     out[1::2] = v.max(axis=1)
+
+    # Fold the remainder into the last block instead of dropping it. n is
+    # rarely a multiple of `blocks`, and the leftover is the NEWEST end of
+    # the window -- the part a live trace is actually being watched for. At
+    # blocks=1 (the original PLOT_MODE="envelope" use) there is never a
+    # remainder, which is why this never mattered until the display started
+    # decimating to the axes' pixel width.
+    tail = values[usable:]
+    if tail.size:
+        out[-2] = min(out[-2], tail.min())
+        out[-1] = max(out[-1], tail.max())
     return out
 
 
@@ -286,16 +303,26 @@ class DualPlot:
     # FRAME_RATE fewer packets got dropped per frame, purely by accident of
     # timing, not because anything was actually more correct.
 
+    # config.PLOT_MODE is read here rather than frozen into a module-level
+    # flag at import, for the same reason as envelope()'s blocks argument:
+    # every other knob in this app is live-editable, and one that silently
+    # is not is worse than one that is missing.
+    @staticmethod
+    def _scope():
+        return config.PLOT_MODE == "scope"
+
     def update_input(self, ch1, ch2):
-        values1 = ch1 if _SCOPE else envelope(ch1)
-        values2 = ch2 if _SCOPE else envelope(ch2)
+        scope = self._scope()
+        values1 = ch1 if scope else envelope(ch1)
+        values2 = ch2 if scope else envelope(ch2)
         self._rolled(self.ch1_in, values1)
         self._rolled(self.ch2_in, values2)
         self._dirty = True
 
     def update_output(self, ch1, ch2):
-        values1 = ch1 if _SCOPE else envelope(ch1)
-        values2 = ch2 if _SCOPE else envelope(ch2)
+        scope = self._scope()
+        values1 = ch1 if scope else envelope(ch1)
+        values2 = ch2 if scope else envelope(ch2)
         self._rolled(self.ch1_out, values1)
         self._rolled(self.ch2_out, values2)
         self._dirty = True

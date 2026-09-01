@@ -133,6 +133,21 @@ PLOT_ENVELOPE_BLOCKS = 1
 # that looks the same. Set to 0 to force steps-mid always.
 PLOT_STEPS_MIN_PX = 2.0
 
+# Seconds of silence from the far end before the client says so, while it is
+# streaming and expecting an echo.
+#
+# Why this exists: a healthy send path proves nothing about the far end. The
+# relay accepts every byte and discards it when it has no partner peer, so on
+# 2026-09-01 the client reported "1700 pkts/s", zero drops and zero
+# send-stalls for minutes while the board was wedged and not answering ping.
+# Every send-side counter was honest; the conclusion drawn from them was
+# still wrong. Only the receive path knew, by being silent.
+#
+# 3 s is comfortably longer than any stall the catch-up limiter tolerates
+# (50 ms) or a TCP retransmission burst on this link, so it fires on "the far
+# end is gone", not on "the far end hiccuped".
+RX_WATCHDOG_S = 3.0
+
 # How often the Tk event loop is pumped, Hz -- button clicks, typing, hover.
 # Deliberately independent of FRAME_RATE: events used to be pumped only when
 # the plot redrew, so lowering FRAME_RATE (which is the recommended way to

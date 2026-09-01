@@ -46,6 +46,8 @@ import tkinter as tk
 from pathlib import Path
 from tkinter import ttk
 
+import numpy as np
+
 import config
 import local_proc
 import net
@@ -55,6 +57,13 @@ import runctl
 # sat.py (Static Analysis Tool) lives next to this file regardless of the
 # working directory the app was launched from.
 SAT_SCRIPT = Path(__file__).resolve().parent / "sat.py"
+
+# Wire sample range, for the labels that quote it. Derived from the packet
+# format (and so from shared/marathon/packet_format.json) rather than written
+# into the text -- which is how the Amplitude field came to advertise sizif's
+# uint16 range long after marathon moved to 32-bit slots.
+_WIRE_MAX = int(np.iinfo(packet_format.CH1_DTYPE).max)
+_WIRE_BITS = np.dtype(packet_format.CH1_DTYPE).itemsize * 8
 
 
 class _Tooltip:
@@ -537,6 +546,14 @@ class SignalControlPanel:
         paused = "" if config.SEND_ENABLED else ", paused"
         if config.PROCESSING_MODE == "local":
             return f"running: local, {config.LOCAL_ALGORITHM}{paused}"
+        # "connected" only means the RELAY took the connection. The relay
+        # accepts and discards everything when its other peer is gone, so a
+        # dead board looks exactly like a healthy one from the send side --
+        # it did, for minutes, on 2026-09-01. Silence on the receive path is
+        # the one signal that tells them apart, so it outranks link_state.
+        if net.rx_stale_s > config.RX_WATCHDOG_S:
+            return (f"running: board, connected but NOTHING RECEIVED for "
+                    f"{net.rx_stale_s:.0f}s -- board wedged or unplugged?{paused}")
         return f"running: board, {net.link_state}{paused}"
 
     def poll_state(self):
@@ -581,12 +598,18 @@ class SignalControlPanel:
                           help_text="Native rate the ECG waveform itself is generated at. This "
                                      "is what the plot's Time axis is calculated from -- not "
                                      "Send rate/Chunk size, which only control delivery speed.")
-        row = _add_entry(frame, row, "Amplitude (% of uint16)", self._amplitude,
+        # Range read from the wire dtype rather than written into the text:
+        # this label said "uint16 (0-65535)" long after marathon moved to
+        # 32-bit TDM slots, so the panel was quoting sizif's numbers. Taken
+        # from the same packet_format.json the firmware header is generated
+        # from, it cannot go stale again.
+        row = _add_entry(frame, row, "Amplitude (% of FS)", self._amplitude,
                           self._apply_amplitude,
-                          help_text="How much of the wire format's uint16 range (0-65535) the "
-                                     "signal's peak-to-peak occupies, centered at the midpoint. "
-                                     "A pure wire/display scale -- it does not change the "
-                                     "waveform's shape, only its size.")
+                          help_text=f"How much of the wire format's range "
+                                     f"({_WIRE_BITS}-bit, 0-{_WIRE_MAX}) the signal's "
+                                     f"peak-to-peak occupies, centered at the midpoint. "
+                                     f"A pure wire/display scale -- it does not change "
+                                     f"the waveform's shape, only its size.")
 
         row = _add_entry(frame, row, "Offset (% of FS)", self._offset,
                           self._apply_offset,

@@ -117,14 +117,19 @@ def load_dump(csv_path):
                 continue
             rows.append(fields)
 
+    # ValueError, not SystemExit: the GUI catches Exception around this call
+    # to show "could not read <file>" in its report panel, and SystemExit
+    # derives from BaseException, so it would sail straight past that handler
+    # and take the window down -- the exact opposite of what the handler is
+    # for. main() turns these into a clean CLI error below.
     if columns is None or not rows:
-        raise SystemExit(f"{csv_path}: no data rows")
+        raise ValueError(f"{csv_path}: no data rows")
 
     table = np.array(rows, dtype=np.float64)
     traces = {name: table[:, i] for i, name in enumerate(columns)
               if name in TRACES}
     if not traces:
-        raise SystemExit(f"{csv_path}: no recognised trace columns "
+        raise ValueError(f"{csv_path}: no recognised trace columns "
                          f"(expected {', '.join(TRACES)})")
 
     def number(*keys, default=None):
@@ -159,11 +164,23 @@ def load_dump(csv_path):
 # Analysis
 # ---------------------------------------------------------------------------
 
-def wire_full_scale(traces):
-    """The dump stores plain integers, so the wire dtype is not recorded in
-    the data itself. It IS in the sidecar, but inferring it from the values
-    is more robust and gives the same answer: marathon's slots are 32-bit,
-    sizif's were 16."""
+def wire_full_scale(traces, info=None):
+    """Full-scale value of the wire format the dump was captured in.
+
+    Read from the sidecar's `wire_dtype` when there is one, because inferring
+    it from the samples is only right when the capture happens to use the top
+    of its range. A quiet or offset-down 32-bit capture whose largest sample
+    is under 65535 would be read as 16-bit, and every dBFS number in the
+    report would come out 96 dB high. The inference stays as the fallback for
+    a dump whose sidecar was lost.
+    """
+    if info:
+        dtype = (info.get("meta", {}) or {}).get("wire_dtype")
+        if dtype:
+            try:
+                return float(np.iinfo(np.dtype(dtype)).max)
+            except (TypeError, ValueError):
+                pass                       # unrecognised: fall through
     peak = max(float(np.max(v)) for v in traces.values())
     return 2.0 ** 32 - 1 if peak > 65535 else 65535.0
 
@@ -225,7 +242,12 @@ def compare_model(traces, ch, algorithm, shift, settle):
     dtype = ">u4"
     x = traces[src].astype(np.uint32).astype(dtype)
     algo = local_proc.ALGORITHMS[algorithm]
-    modelled, _ = algo(x, x, local_proc.new_state(), {"shift": shift})
+    # An algorithm takes both channels, but only one is being scored here.
+    # Hand it a length-0 array as the second rather than `x` again: these are
+    # scalar per-sample recursions, so passing the same trace twice ran the
+    # slowest part of this tool twice and threw half of it away.
+    empty = x[:0]
+    modelled, _ = algo(x, empty, local_proc.new_state(), {"shift": shift})
     modelled = modelled.astype(np.float64)
 
     a = modelled[settle:]
@@ -375,8 +397,12 @@ def main(argv=None):
             model=args.model, shift=args.shift, settle=args.settle).run()
         return 0
 
-    traces, info = load_dump(path)
-    full_scale = wire_full_scale(traces)
+    try:
+        traces, info = load_dump(path)
+    except ValueError as exc:
+        print(exc, file=sys.stderr)
+        return 1
+    full_scale = wire_full_scale(traces, info)
 
     results, curves_by_ch = [], {}
     for ch in ("ch1", "ch2"):

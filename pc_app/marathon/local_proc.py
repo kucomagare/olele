@@ -38,8 +38,8 @@ import numpy as np
 
 import config
 import runctl
-from net import SEND_CATCHUP_MAX_S, SEND_CATCHUP_MIN_PKTS
 from packet_format import CH1_DTYPE, CH2_DTYPE
+from sched import RateScheduler
 from signal_gen import generate_ecg_chunk
 
 _MASK = 0xFFFFFFFF
@@ -158,10 +158,12 @@ def local_thread(plot_in_q, plot_out_q, stop_event):
     state = new_state()
     counter = 0
     active = False
-    next_send = time.perf_counter()
+    # Same schedule as the board path, from the same module -- that is what
+    # makes a rate typed into the panel mean the same thing in either mode.
+    schedule = RateScheduler(lambda: config.SEND_RATE)
     chunks = 0
     samples = 0
-    backlog_dropped = 0
+    plot_dropped = 0
     last_report = time.time()
 
     while not stop_event.is_set():
@@ -189,8 +191,8 @@ def local_thread(plot_in_q, plot_out_q, stop_event):
             # run carry the tail of the previous one and an A/B comparison
             # silently starts from the wrong place.
             state = new_state()
-            next_send = time.perf_counter()
-            chunks = samples = backlog_dropped = 0
+            schedule.reset()
+            chunks = samples = plot_dropped = 0
             last_report = time.time()
             active = True
             print(f"[local] running -- algorithm={config.LOCAL_ALGORITHM} "
@@ -198,12 +200,19 @@ def local_thread(plot_in_q, plot_out_q, stop_event):
 
         now = time.perf_counter()
 
-        if config.SEND_ENABLED and now >= next_send:
+        # Paused is not a stall -- see RateScheduler.hold().
+        if not config.SEND_ENABLED:
+            schedule.hold(now)
+
+        if config.SEND_ENABLED and schedule.due(now):
             ch1, ch2 = generate_ecg_chunk(counter)
             try:
                 plot_in_q.put_nowait((ch1, ch2))
             except queue.Full:
-                pass
+                # Counted, not swallowed -- same reason as net.py's: these are
+                # samples that genuinely go missing, and a dump taken while it
+                # is happening is short without saying so.
+                plot_dropped += 1
 
             if config.RECEIVE_ENABLED:
                 algo = ALGORITHMS.get(config.LOCAL_ALGORITHM, bypass)
@@ -221,34 +230,27 @@ def local_thread(plot_in_q, plot_out_q, stop_event):
                 try:
                     plot_out_q.put_nowait((out1, out2))
                 except queue.Full:
-                    pass
+                    plot_dropped += 1
 
             counter += config.CHUNK_SIZE
             chunks += 1
             samples += config.CHUNK_SIZE
 
-            period = 1.0 / config.SEND_RATE
-            next_send += period
-            # Same duration-based catch-up bound as net.py, and for the same
-            # reason -- see the SEND_CATCHUP_* comment there. A fixed-
-            # increment schedule replays its whole backlog at loop speed
-            # after any stall, which wrecks a throughput reading taken
-            # during it.
-            catchup_limit = max(SEND_CATCHUP_MIN_PKTS * period, SEND_CATCHUP_MAX_S)
-            if now - next_send > catchup_limit:
-                backlog_dropped += int((now - next_send) / period)
-                next_send = now + period
+            schedule.advance(now)
 
         t = time.time()
         elapsed = t - last_report
         if elapsed >= 1.0:
+            backlog_dropped = schedule.take_dropped()
             note = f" (dropped {backlog_dropped} late)" if backlog_dropped else ""
+            if plot_dropped:
+                note += f" ({plot_dropped} plot-drops -- a dump now is short)"
             # Normalized by the window that actually elapsed, like net.py's
             # line and the firmware's [S] -- the check runs once per loop
             # pass, so the window always overshoots by a varying amount.
             print(f"Local: {chunks / elapsed:.0f} chunks/s, "
                   f"{samples / elapsed:.0f} samples/s{note}")
-            chunks = samples = backlog_dropped = 0
+            chunks = samples = plot_dropped = 0
             last_report = t
 
         # Yield before looping. This MUST always yield -- an earlier version
@@ -256,10 +258,13 @@ def local_thread(plot_in_q, plot_out_q, stop_event):
         # where it never slept at all and spun at 100% of a core holding the
         # GIL, starving the plot thread until the whole window looked frozen:
         #
-        #   * PAUSED. next_send stops advancing (nothing is generated), so
-        #     the "time until the next chunk" it was sleeping on went
+        #   * PAUSED. The deadline stopped advancing (nothing is generated),
+        #     so the "time until the next chunk" it was sleeping on went
         #     steadily more negative and the sleep was skipped forever.
-        #     Measured: 101% of a core while doing nothing at all.
+        #     Measured: 101% of a core while doing nothing at all. The
+        #     schedule now holds its deadline at `now` while paused, but the
+        #     sleep below still has to be unconditional -- the second case
+        #     has nothing to do with pausing.
         #   * BEHIND. Whenever generation cannot keep up, the deadline is
         #     always in the past, so the same branch never fires.
         #
@@ -270,7 +275,7 @@ def local_thread(plot_in_q, plot_out_q, stop_event):
             # change, and cost nothing meanwhile.
             time.sleep(0.02)
         else:
-            delay = next_send - time.perf_counter()
+            delay = schedule.time_until()
             if delay > 0:
                 # Ahead of schedule: sleep to the deadline. Capped so
                 # stop_event and a mode change are still seen promptly at

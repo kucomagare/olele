@@ -326,7 +326,7 @@ class SATWindow:
         # once a sidecar has answered it.
         self._shift.set(str(shift))
 
-        full_scale = sat.wire_full_scale(self.traces)
+        full_scale = sat.wire_full_scale(self.traces, self.info)
         results, curves = [], {}
         for ch in ("ch1", "ch2"):
             if f"{ch}_in" not in self.traces and f"{ch}_out" not in self.traces:
