@@ -169,11 +169,18 @@ def local_thread(plot_in_q, plot_out_q, stop_event):
             if active:
                 print("[local] stopped")
                 active = False
-            # Wait on the gate rather than spinning: this returns the
-            # instant Start is pressed, and costs nothing meanwhile. The
-            # timeout is what lets a mode change (which is not an Event) be
-            # noticed, and what lets the thread see stop_event.
-            runctl.wait_for_start(0.1)
+            if not runctl.is_running():
+                # Not started: block on the gate. wait_for_start(0.1) genuinely
+                # sleeps here, since the flag is false, and returns the instant
+                # Start is pressed.
+                runctl.wait_for_start(0.1)
+            else:
+                # Started, but this thread does not own the mode. Event.wait()
+                # returns immediately once the flag is already true -- calling
+                # wait_for_start here would busy-loop, not idle, and starve the
+                # thread that DOES own the mode of GIL time. Use stop_event.wait
+                # instead: it sleeps up to 0.1s and still wakes early on Stop.
+                stop_event.wait(0.1)
             continue
 
         if not active:

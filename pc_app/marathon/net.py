@@ -137,7 +137,19 @@ def tcp_thread(plot_in_q, plot_out_q, stop_event):
         # makes no connection attempts to time out or log.
         if not _may_run():
             link_state = "idle"
-            runctl.wait_for_start(0.1)
+            if not runctl.is_running():
+                # Not started: block on the gate. wait_for_start(0.1) genuinely
+                # sleeps here, since the flag is false, and returns the instant
+                # Start is pressed.
+                runctl.wait_for_start(0.1)
+            else:
+                # Started, but this thread does not own the mode (Local is
+                # selected). Event.wait() returns immediately once the flag is
+                # already true -- calling wait_for_start here would busy-loop,
+                # not idle, and starve local_thread of GIL time. Use
+                # stop_event.wait instead: it sleeps up to 0.1s and still
+                # wakes early on Stop.
+                stop_event.wait(0.1)
             continue
 
         link_state = "connecting"
