@@ -44,14 +44,16 @@ hardware+firmware+PC-app stack living under `<tool>/<variant>/`. Two exist:
 for it live outside this repo, in `research_info/DMA_talk_260825.txt`.
 
 Every root script acts on **one** variant, chosen by the `VARIANT`
-environment variable, which `bootenv.sh` defaults to `sizif`:
+environment variable. Its default is set in exactly one place,
+`bootenv.sh` -- no other script or doc hardcodes a variant name as "the
+default", so changing it is a one-line edit there:
 
 ```bash
-./build_all.sh                  # sizif (the default)
-VARIANT=marathon ./build_all.sh # marathon
+./build_all.sh                    # whatever bootenv.sh defaults VARIANT to
+VARIANT=<project> ./build_all.sh  # a specific variant, one-shot
 
-export VARIANT=marathon         # ...or switch for the whole shell
-./build_all.sh                  # now builds marathon
+export VARIANT=<project>          # ...or switch for the whole shell
+./build_all.sh                    # now builds that variant
 ```
 
 `cdvivado` / `cdvitis` / `cdpcapp` follow `$VARIANT` too, and re-point

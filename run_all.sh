@@ -4,8 +4,8 @@
 # serial console for [STATS] output). Assumes build_all.sh has already
 # been run successfully for that variant. Board must be connected/powered.
 #
-# VARIANT selects the tree (bootenv.sh defaults it to "sizif"):
-#     VARIANT=marathon ./run_all.sh
+# VARIANT selects the tree; its default lives only in bootenv.sh:
+#     VARIANT=<project> ./run_all.sh
 #
 # Only ONE variant can own the board at a time -- they flash the same part.
 set -euo pipefail

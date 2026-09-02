@@ -7,8 +7,8 @@
 # pc_app/$VARIANT/tcp_server_app.cpp -- run build_all.sh instead only if the
 # Vivado bitstream or the Vitis platform itself changed.
 #
-# VARIANT selects the tree (bootenv.sh defaults it to "sizif"):
-#     VARIANT=marathon ./compile_all.sh
+# VARIANT selects the tree; its default lives only in bootenv.sh:
+#     VARIANT=<project> ./compile_all.sh
 #
 # Requires build_all.sh to have been run at least once already (needs the
 # Vitis platform export and does not create it).

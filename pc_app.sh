@@ -6,10 +6,10 @@
 #   ./pc_app.sh restart-server   # after editing tcp_server_app.cpp
 #   ./pc_app.sh status|logs|start|stop|restart
 #
-# VARIANT picks which variant's PC app (default "sizif"). All arguments are
-# passed through to system.sh untouched, so VARIANT must be an env var, not
-# a positional argument:
-#     VARIANT=marathon ./pc_app.sh start
+# VARIANT picks which variant's PC app; its default lives only in
+# bootenv.sh. All arguments are passed through to system.sh untouched, so
+# VARIANT must be an env var, not a positional argument:
+#     VARIANT=<project> ./pc_app.sh start
 #
 # Deliberately NOT named *_all.sh: every other root script acts on the whole
 # stack (board included), this one only ever touches the PC side. Use it
@@ -23,8 +23,14 @@ trap 'echo "FAILED: $BASH_COMMAND (line $LINENO)" >&2' ERR
 
 REPO_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# Not sourced from bootenv.sh here (no Xilinx tools needed), so the default
-# is repeated. Keep it in sync with bootenv.sh.
-VARIANT="${VARIANT:-sizif}"
+# Not sourced from bootenv.sh here (no Xilinx tools needed), so VARIANT
+# isn't set by it either. The default variant name lives only in
+# bootenv.sh -- source it first (or export VARIANT yourself) rather than
+# relying on this script to guess.
+if [[ -z "${VARIANT:-}" ]]; then
+    echo "VARIANT is not set. Run 'source bootenv.sh' first (sets the" >&2
+    echo "default), or pass it explicitly: VARIANT=<project> ./pc_app.sh ..." >&2
+    exit 1
+fi
 
 exec "$REPO_PATH/pc_app/$VARIANT/system.sh" "$@"

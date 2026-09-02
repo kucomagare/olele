@@ -6,9 +6,9 @@
 # Does NOT flash/run anything on hardware or start the PC app -- see
 # vitis/$VARIANT/run.sh and pc_app/$VARIANT/system.sh for that, run separately.
 #
-# VARIANT selects which <tool>/<variant>/ tree to build; bootenv.sh defaults
-# it to "sizif". Build the other one with:
-#     VARIANT=marathon ./build_all.sh
+# VARIANT selects which <tool>/<variant>/ tree to build; its default lives
+# only in bootenv.sh. Build another one with:
+#     VARIANT=<project> ./build_all.sh
 set -euo pipefail
 trap 'echo "FAILED: $BASH_COMMAND (line $LINENO)" >&2' ERR
 

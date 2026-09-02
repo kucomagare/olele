@@ -2,16 +2,22 @@
 # Wipes build/ in every <tool>/$VARIANT dir, for testing that build_all.sh
 # regenerates everything from tracked source alone.
 #
-# Acts on ONE variant only -- the other variant's build/ is left alone, so a
-# slow Vivado rebuild isn't triggered by accident. Clean the other with:
-#     VARIANT=marathon ./clean_all.sh
+# Acts on ONE variant only -- another variant's build/ is left alone, so a
+# slow Vivado rebuild isn't triggered by accident. Clean another with:
+#     VARIANT=<project> ./clean_all.sh
 set -euo pipefail
 
 REPO_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Not sourced from bootenv.sh here (this script needs no Xilinx tools), so
-# the default is repeated. Keep it in sync with bootenv.sh.
-VARIANT="${VARIANT:-sizif}"
+# VARIANT isn't set by it either. The default variant name lives only in
+# bootenv.sh -- source it first (or export VARIANT yourself) rather than
+# relying on this script to guess.
+if [[ -z "${VARIANT:-}" ]]; then
+    echo "VARIANT is not set. Run 'source bootenv.sh' first (sets the" >&2
+    echo "default), or pass it explicitly: VARIANT=<project> ./clean_all.sh" >&2
+    exit 1
+fi
 
 exec > >(tee "$REPO_PATH/clean_all.log") 2>&1
 

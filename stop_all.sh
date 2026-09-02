@@ -4,15 +4,21 @@
 # -- it keeps running until reset/reflashed (rerun ./run_all.sh) or
 # power-cycled.
 #
-# Stops ONE variant's PC app. If you started the other one, stop that too:
-#     VARIANT=marathon ./stop_all.sh
+# Stops ONE variant's PC app. If you started another one, stop that too:
+#     VARIANT=<project> ./stop_all.sh
 set -euo pipefail
 
 REPO_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# Not sourced from bootenv.sh here (no Xilinx tools needed), so the default
-# is repeated. Keep it in sync with bootenv.sh.
-VARIANT="${VARIANT:-sizif}"
+# Not sourced from bootenv.sh here (no Xilinx tools needed), so VARIANT
+# isn't set by it either. The default variant name lives only in
+# bootenv.sh -- source it first (or export VARIANT yourself) rather than
+# relying on this script to guess.
+if [[ -z "${VARIANT:-}" ]]; then
+    echo "VARIANT is not set. Run 'source bootenv.sh' first (sets the" >&2
+    echo "default), or pass it explicitly: VARIANT=<project> ./stop_all.sh" >&2
+    exit 1
+fi
 
 exec > >(tee "$REPO_PATH/stop_all.log") 2>&1
 

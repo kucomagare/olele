@@ -7,9 +7,12 @@
 # Sets:
 #   REPO_PATH             - this repo's root (wherever it's actually checked out)
 #   VARIANT               - which project variant the *_all.sh scripts act on.
-#                             Defaults to "sizif". Override per-shell with
-#                             "export VARIANT=marathon" before sourcing, or
-#                             per-command with "VARIANT=marathon ./build_all.sh".
+#                             This file is the ONLY place its default is set
+#                             (see below) -- every other script requires
+#                             VARIANT to already be in the environment.
+#                             Override per-shell with "export VARIANT=<name>"
+#                             before sourcing, or per-command with
+#                             "VARIANT=<name> ./build_all.sh".
 #   SYSTEM_CMAKE           - the system cmake, captured *before* Xilinx's
 #                             settings scripts touch PATH (the Vitis-bundled
 #                             cmake-3.24.2 needs libssl.so.10, which isn't
@@ -40,7 +43,11 @@ SYSTEM_CMAKE="$(command -v cmake || true)"
 # Which <tool>/<variant>/ tree the orchestration scripts act on.
 #   sizif    - AXI-Lite architecture (frozen reference)
 #   marathon - DMA/AXI-Stream architecture (active development)
-export VARIANT="${VARIANT:-sizif}"
+# The name on the right of ":-" below is the repo-wide default variant.
+# This is the ONLY place that name should appear -- every other script and
+# comment in the repo refers to it generically (as "the default variant" or
+# "<project>"), so changing the default is a one-line edit here.
+export VARIANT="${VARIANT:-marathon}"
 
 XILINX_VERSION="2023.2"
 XILINX_INSTALL_DIR="/tools/Xilinx"
@@ -54,7 +61,7 @@ export ARM_GNU_TOOLCHAIN_BIN="$XILINX_INSTALL_DIR/Vitis/$XILINX_VERSION/gnu/aarc
 [[ -d "$ARM_GNU_TOOLCHAIN_BIN" ]] && export PATH="$ARM_GNU_TOOLCHAIN_BIN:$PATH"
 
 # Navigation aliases. $VARIANT is deliberately NOT expanded here -- the
-# aliases expand it when invoked, so "export VARIANT=marathon" in an
+# aliases expand it when invoked, so "export VARIANT=<project>" in an
 # already-open shell immediately re-points cdvivado/cdvitis/cdpcapp.
 alias cdrepo="cd \"\$REPO_PATH\""
 alias cdvivado="cd \"\$REPO_PATH/vivado/\$VARIANT\""
@@ -63,5 +70,5 @@ alias cdpcapp="cd \"\$REPO_PATH/pc_app/\$VARIANT\""
 
 echo "bootenv: REPO_PATH=$REPO_PATH"
 echo "bootenv: SYSTEM_CMAKE=$SYSTEM_CMAKE"
-echo "bootenv: VARIANT=$VARIANT  (override: export VARIANT=marathon)"
+echo "bootenv: VARIANT=$VARIANT  (override: export VARIANT=<project>)"
 echo "bootenv: aliases: cdrepo, cdvivado, cdvitis, cdpcapp"

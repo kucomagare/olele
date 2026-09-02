@@ -111,7 +111,7 @@ apply() {
     if grep -q 'quickack' <<<"$ROUTE_LINE"; then
         echo
         echo "Applied. Existing TCP connections do NOT pick this up -- restart the"
-        echo "PC side so new ones are established:  VARIANT=marathon ./pc_app.sh restart"
+        echo "PC side so new ones are established:  VARIANT=<project> ./pc_app.sh restart"
     else
         echo "FAILED: the flags are not on the route." >&2
         exit 1
