@@ -44,4 +44,4 @@ fi
 
 echo
 echo "Done. Run ./system.sh start to launch just the PC app, or"
-echo "../../run_all.sh from the repo root to also flash+run the board."
+echo "'./proj run' from the repo root to also flash+run the board."

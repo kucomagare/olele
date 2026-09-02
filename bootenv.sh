@@ -6,13 +6,14 @@
 #
 # Sets:
 #   REPO_PATH             - this repo's root (wherever it's actually checked out)
-#   VARIANT               - which project variant the *_all.sh scripts act on.
+#   VARIANT               - which project variant ./proj acts on.
 #                             This file is the ONLY place its default is set
 #                             (see below) -- every other script requires
 #                             VARIANT to already be in the environment.
 #                             Override per-shell with "export VARIANT=<name>"
 #                             before sourcing, or per-command with
-#                             "VARIANT=<name> ./build_all.sh".
+#                             "VARIANT=<name> ./proj build", or per-command
+#                             with "./proj -v <name> build".
 #   SYSTEM_CMAKE           - the system cmake, captured *before* Xilinx's
 #                             settings scripts touch PATH (the Vitis-bundled
 #                             cmake-3.24.2 needs libssl.so.10, which isn't
@@ -22,10 +23,17 @@
 #   VIVADO_SETTINGS / VITIS_SETTINGS - sourced if present, so vivado/vitis/
 #                             xsct/xsdb land on PATH
 #
-# Also defines navigation aliases: cdrepo, cdvivado, cdvitis, cdpcapp
+# Also defines navigation aliases: repo, cdvivado, cdvitis, cdpcapp
 # (jump to the repo root / vivado/$VARIANT / vitis/$VARIANT / pc_app/$VARIANT).
 # The aliases resolve $VARIANT at use time, so changing VARIANT in an already-
 # open shell re-points them without re-sourcing.
+#
+# And shortcuts for ./proj, the repo's single entry point: proj (the
+# dispatcher itself, so "proj pc status" and "proj net apply" work from any
+# cwd), plus build / compile / run / stop / clean for the verbs used most,
+# and bootenv to re-source this file (e.g. after editing it or changing
+# VARIANT). Each cd's to the repo root first, and ./proj re-reads $VARIANT
+# itself, so no re-sourcing is needed after a VARIANT change either.
 #
 # Adjust XILINX_VERSION / XILINX_INSTALL_DIR below if your install differs.
 
@@ -63,12 +71,27 @@ export ARM_GNU_TOOLCHAIN_BIN="$XILINX_INSTALL_DIR/Vitis/$XILINX_VERSION/gnu/aarc
 # Navigation aliases. $VARIANT is deliberately NOT expanded here -- the
 # aliases expand it when invoked, so "export VARIANT=<project>" in an
 # already-open shell immediately re-points cdvivado/cdvitis/cdpcapp.
-alias cdrepo="cd \"\$REPO_PATH\""
+alias repo="cd \"\$REPO_PATH\""
 alias cdvivado="cd \"\$REPO_PATH/vivado/\$VARIANT\""
 alias cdvitis="cd \"\$REPO_PATH/vitis/\$VARIANT\""
 alias cdpcapp="cd \"\$REPO_PATH/pc_app/\$VARIANT\""
 
+# ./proj shortcuts. Same deliberately-not-expanded-here treatment: these
+# call proj by path and proj reads $VARIANT at run time. Each also cd's to
+# the repo root first, so running one from anywhere both works and leaves
+# you there.
+#
+# "proj" itself is aliased too, so the verbs without their own shortcut
+# (proj pc ..., proj net ..., proj -v sizif ...) are reachable from any cwd.
+alias bootenv="cd \"\$REPO_PATH\" && source \"\$REPO_PATH/bootenv.sh\""
+alias proj="cd \"\$REPO_PATH\" && \"\$REPO_PATH/proj\""
+alias build="cd \"\$REPO_PATH\" && \"\$REPO_PATH/proj\" build"
+alias compile="cd \"\$REPO_PATH\" && \"\$REPO_PATH/proj\" compile"
+alias run="cd \"\$REPO_PATH\" && \"\$REPO_PATH/proj\" run"
+alias stop="cd \"\$REPO_PATH\" && \"\$REPO_PATH/proj\" stop"
+alias clean="cd \"\$REPO_PATH\" && \"\$REPO_PATH/proj\" clean"
+
 echo "bootenv: REPO_PATH=$REPO_PATH"
 echo "bootenv: SYSTEM_CMAKE=$SYSTEM_CMAKE"
 echo "bootenv: VARIANT=$VARIANT  (override: export VARIANT=<project>)"
-echo "bootenv: aliases: cdrepo, cdvivado, cdvitis, cdpcapp"
+echo "bootenv: aliases: repo, cdvivado, cdvitis, cdpcapp, bootenv, proj, build, compile, run, stop, clean"

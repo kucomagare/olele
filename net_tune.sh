@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # Host-side network tuning for streaming to the Cora Z7 over Ethernet.
 #
-#   ./net_tune.sh          apply the tuning (default)
-#   ./net_tune.sh show     print the current route flags and exit
-#   ./net_tune.sh revert   remove the flags this script adds
-#   ./net_tune.sh loss     measure the current packet loss to the board
+#   ./proj net apply       apply the tuning (default)
+#   ./proj net show        print the current route flags and exit
+#   ./proj net revert      remove the flags this script adds
+#   ./proj net loss        measure the current packet loss to the board
 #
 # WHY THIS EXISTS
 # ---------------
@@ -53,7 +53,7 @@
 # it stops it from reaching the application. That loss is the ceiling on
 # pushing the rate further, and it points at the board's lwIP receive path
 # (EMAC rx descriptor count, pbuf pool sizing in the BSP), not at the PC.
-# Use `./net_tune.sh loss` to check it.
+# Use `./proj net loss` to check it.
 set -euo pipefail
 
 BOARD_IP="${BOARD_IP:-192.168.1.10}"
@@ -97,7 +97,7 @@ show() {
     if grep -q 'quickack' <<<"$ROUTE_LINE"; then
         echo "status    : TUNED"
     else
-        echo "status    : NOT TUNED  (run './net_tune.sh' to apply)"
+        echo "status    : NOT TUNED  (run './proj net apply' to apply)"
     fi
 }
 
@@ -111,7 +111,7 @@ apply() {
     if grep -q 'quickack' <<<"$ROUTE_LINE"; then
         echo
         echo "Applied. Existing TCP connections do NOT pick this up -- restart the"
-        echo "PC side so new ones are established:  VARIANT=<project> ./pc_app.sh restart"
+        echo "PC side so new ones are established:  ./proj pc restart"
     else
         echo "FAILED: the flags are not on the route." >&2
         exit 1

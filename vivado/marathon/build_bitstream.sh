@@ -20,7 +20,7 @@ fi
 # cd into build/ first so vivado's own cwd-relative artifacts (vivado.jou,
 # vivado.log, .Xil/) land there (gitignored, wiped by clean.sh) instead of
 # wherever this script happened to be invoked from -- e.g. the repo root
-# when run via build_all.sh, or vivado/<variant>/ when run directly.
+# when run via './proj build', or vivado/<variant>/ when run directly.
 cd "$BUILD_DIR"
 
 TCL_SCRIPT="$(mktemp --suffix=.tcl)"

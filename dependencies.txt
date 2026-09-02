@@ -33,7 +33,7 @@ g++        13.3.0 (Ubuntu 13.3.0-6ubuntu2~24.04.1)
 git        2.43.0
 make       (Unix Makefiles generator, used by build_app.sh)
 
-HARDWARE / JTAG-SERIAL (required for run.sh / run_all.sh)
+HARDWARE / JTAG-SERIAL (required for run.sh / './proj run')
 ------------------------------------------------------------
 PuTTY      0.84 (64-bit Unix, GTK + X11)
            used by vitis/sizif/run.sh to auto-launch a serial console

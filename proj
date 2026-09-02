@@ -1,0 +1,419 @@
+#!/usr/bin/env bash
+# proj -- the single entry point for building, running and cleaning this repo.
+#
+# Replaces the six root orchestration scripts this repo used to carry
+# (build_all.sh, compile_all.sh, run_all.sh, stop_all.sh, clean_all.sh,
+# pc_app.sh) and fronts net_tune.sh. Each of those was ~35 lines of the same
+# thing -- resolve $VARIANT, tee a log, call two or three per-variant scripts
+# in order -- which is one dispatcher's job, not six files'.
+#
+# What deliberately did NOT move in here: everything under vivado/<variant>/,
+# vitis/<variant>/ and pc_app/<variant>/, plus net_tune.sh. Those carry
+# hard-won tool-specific knowledge in their comments (the xsdb target-name
+# gotchas, the libssl.so.10 cmake trap, -DNON_YOCTO=ON, the route-line
+# handling that avoids the `metric 100` trap) and they already work
+# standalone -- each per-variant script derives its own variant from its own
+# directory. This script only ever calls them, so a variant tree stays
+# self-contained and deleting one is still just deleting directories.
+#
+#   proj build      [--stage vivado|vitis|pc] [--skip-bitstream]
+#   proj compile
+#   proj run        [--bit <path>] [--no-pc] [--no-board]
+#   proj stop
+#   proj clean      [--what vivado|vitis|pc]
+#   proj pc         start|stop|restart|restart-client|restart-server|status|logs
+#   proj net        apply|show|revert|loss
+#
+# Global options, before the verb:
+#   -v, --variant <name>   act on that variant instead of $VARIANT
+#   -h, --help             this text
+set -euo pipefail
+trap 'echo "FAILED: $BASH_COMMAND (line $LINENO)" >&2' ERR
+
+REPO_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Set by the global -v/--variant flag; empty means "use $VARIANT".
+VARIANT_ARG=""
+
+# Written out rather than sed'd out of the header comment above: a
+# line-range sed silently starts printing the wrong thing the first time
+# anyone edits that comment.
+usage() {
+    cat <<'EOF'
+proj -- one entry point for building, running and cleaning this repo.
+
+Usage: ./proj [-v <variant>] <verb> [options]
+
+Verbs:
+  build      [--stage vivado|vitis|pc] [--skip-bitstream]
+             Full stack from tracked source, no GUI steps. --stage runs
+             just one part; --skip-bitstream reuses the existing .bit/.xsa.
+  compile    Fast path: firmware C + C++ relay only. Skips the slow Vivado
+             and Vitis-platform steps, so needs a successful build first.
+  run        [--bit <path>] [--no-pc] [--no-board]
+             Starts the PC app and flashes/runs the firmware over JTAG
+             (which opens a PuTTY serial console).
+  stop       Stops the PC app and that PuTTY console. The board's firmware
+             keeps running until reflashed or power-cycled.
+  clean      [--what vivado|vitis|pc]
+             Wipes build/ for this variant only.
+  pc         start|stop|restart|restart-client|restart-server|status|logs
+             PC side only -- no board involvement, no reflash.
+  net        apply|show|revert|loss
+             Host route/NIC tuning for the board link (variant-independent).
+
+Global options (before the verb):
+  -v, --variant <name>   act on that variant instead of $VARIANT
+  -h, --help             this text
+
+The default variant lives in exactly one place, bootenv.sh. Source it once
+per shell; verbs that need the Xilinx toolchain source it themselves.
+EOF
+}
+
+# Xilinx tools (vivado, xsct, xsdb) only land on PATH once bootenv.sh has
+# been sourced, and sourcing it costs a second or two of settings64.sh. So
+# only the verbs that actually need the toolchain pay for it -- which is
+# exactly the split the old scripts had, where stop_all/clean_all/pc_app
+# deliberately did not source it.
+#
+# VARIANT is exported BEFORE sourcing on purpose: bootenv.sh assigns
+# "${VARIANT:-<default>}", so an already-set value wins and -v is honoured.
+load_bootenv() {
+    [[ -n "$VARIANT_ARG" ]] && export VARIANT="$VARIANT_ARG"
+    # shellcheck source=bootenv.sh
+    source "$REPO_PATH/bootenv.sh"
+}
+
+# For the verbs that need no toolchain: take the variant from -v or from the
+# environment (bootenv.sh put it there), and say so plainly if neither did
+# rather than guessing a default. The default name lives in exactly one
+# place, bootenv.sh, and this script is not a second one.
+resolve_variant() {
+    if [[ -n "$VARIANT_ARG" ]]; then
+        VARIANT="$VARIANT_ARG"
+    elif [[ -z "${VARIANT:-}" ]]; then
+        echo "VARIANT is not set. Run 'source bootenv.sh' first (it sets the" >&2
+        echo "default), or name one here: ./proj -v <project> ..." >&2
+        exit 1
+    fi
+    export VARIANT
+}
+
+# Catch a typo'd variant here, with the name in the message, instead of
+# letting it surface as a confusing "no such file or directory" three
+# scripts deep.
+check_tree() {
+    local d
+    for d in vivado vitis pc_app; do
+        if [[ ! -d "$REPO_PATH/$d/$VARIANT" ]]; then
+            echo "No such variant: '$VARIANT' (there is no $d/$VARIANT)" >&2
+            echo -n "Variants present: " >&2
+            (cd "$REPO_PATH/pc_app" && ls -d */ 2>/dev/null | tr -d '/' | tr '\n' ' ') >&2
+            echo >&2
+            exit 1
+        fi
+    done
+}
+
+# Log file names are unchanged from the scripts this replaces, so anything
+# that greps build_all.log / run_all.log still works.
+log_to() {
+    exec > >(tee "$REPO_PATH/$1") 2>&1
+}
+
+
+verb_build() {
+    local stage="" skip_bit=0
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --stage)          stage="${2:-}"; shift 2 ;;
+            --skip-bitstream) skip_bit=1; shift ;;
+            *) echo "build: unknown option '$1'" >&2; exit 1 ;;
+        esac
+    done
+    case "$stage" in
+        ""|vivado|vitis|pc) ;;
+        *) echo "build: --stage must be vivado, vitis or pc" >&2; exit 1 ;;
+    esac
+
+    load_bootenv
+    check_tree
+    log_to "build_all.log"
+    echo "=== variant: $VARIANT ==="
+
+    local xsa="$REPO_PATH/vivado/$VARIANT/build/tcp_client/CoraZ7_Eth_wrapper.xsa"
+
+    if [[ -z "$stage" || "$stage" == vivado ]]; then
+        echo "=== Vivado: create project ==="
+        "$REPO_PATH/vivado/$VARIANT/build.sh"
+        if (( skip_bit )); then
+            echo "=== Vivado: skipping synth/impl/bitstream (--skip-bitstream) ==="
+        else
+            echo "=== Vivado: synth + impl + bitstream + .xsa (batch, no GUI) ==="
+            "$REPO_PATH/vivado/$VARIANT/build_bitstream.sh"
+        fi
+    fi
+
+    if [[ -z "$stage" || "$stage" == vitis ]]; then
+        echo "=== Vitis: platform + throwaway app (Python API) ==="
+        "$REPO_PATH/vitis/$VARIANT/build_platform.sh" "$xsa"
+        echo "=== Vitis: firmware app ==="
+        "$REPO_PATH/vitis/$VARIANT/build_app.sh"
+    fi
+
+    if [[ -z "$stage" || "$stage" == pc ]]; then
+        echo "=== PC app: relay server + venv ==="
+        "$REPO_PATH/pc_app/$VARIANT/build.sh"
+    fi
+
+    echo
+    echo "Build complete (variant: $VARIANT)."
+    echo "  Flash + run firmware on hardware: ./proj run"
+    echo "  Start the PC app only:            ./proj pc start"
+    echo "  Changed only firmware C / relay C++ since? Use ./proj compile"
+    echo "  instead -- it skips the slow Vivado/platform steps."
+}
+
+verb_compile() {
+    if [[ $# -gt 0 ]]; then
+        echo "compile: takes no options (got '$1')" >&2
+        exit 1
+    fi
+
+    load_bootenv
+    check_tree
+    log_to "compile_all.log"
+    echo "=== variant: $VARIANT ==="
+
+    echo "=== [1/2] Vitis: rebuild firmware app from C source ==="
+    "$REPO_PATH/vitis/$VARIANT/build_app.sh"
+
+    echo "=== [2/2] PC app: rebuild C++ relay server (skips venv if present) ==="
+    "$REPO_PATH/pc_app/$VARIANT/build.sh"
+
+    echo
+    echo "Recompile complete."
+    echo "  Flash + run firmware on hardware: ./proj run"
+    echo "  Start the PC app only:            ./proj pc start"
+}
+
+verb_run() {
+    local bit="" do_pc=1 do_board=1
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --bit)      bit="${2:-}"; shift 2 ;;
+            --no-pc)    do_pc=0; shift ;;
+            --no-board) do_board=0; shift ;;
+            *) echo "run: unknown option '$1'" >&2; exit 1 ;;
+        esac
+    done
+    if (( ! do_pc && ! do_board )); then
+        echo "run: --no-pc and --no-board together leave nothing to do" >&2
+        exit 1
+    fi
+
+    load_bootenv
+    check_tree
+    log_to "run_all.log"
+    echo "=== variant: $VARIANT ==="
+
+    if (( do_pc )); then
+        if grep -q "^BOARD_CONNECTED = False" "$REPO_PATH/pc_app/$VARIANT/config.py"; then
+            echo "WARNING: pc_app/$VARIANT/config.py has BOARD_CONNECTED = False"
+            echo "         (PC-only loopback mode) -- it will not talk to the real"
+            echo "         board. Edit that line to True if you want to test against"
+            echo "         actual hardware. Continuing anyway..."
+            echo
+        fi
+        echo "=== PC app: starting relay server + Python client ==="
+        "$REPO_PATH/pc_app/$VARIANT/system.sh" start
+    fi
+
+    if (( do_board )); then
+        echo "=== Board: flashing + running firmware (opens PuTTY) ==="
+        # Only ONE variant can own the board at a time -- they flash the
+        # same part.
+        if [[ -n "$bit" ]]; then
+            "$REPO_PATH/vitis/$VARIANT/run.sh" "$bit"
+        else
+            "$REPO_PATH/vitis/$VARIANT/run.sh"
+        fi
+    fi
+
+    echo
+    echo "Done (variant: $VARIANT)."
+    echo "  PC app status/logs: ./proj pc status   |   ./proj pc logs"
+    echo "  Stop everything:    ./proj stop"
+}
+
+# Stops the PC app and the PuTTY serial console that run.sh launched. The
+# board's firmware itself has no "stop" -- it keeps running until
+# reset/reflashed (./proj run again) or power-cycled.
+verb_stop() {
+    if [[ $# -gt 0 ]]; then
+        echo "stop: takes no options (got '$1')" >&2
+        exit 1
+    fi
+
+    resolve_variant
+    check_tree
+    log_to "stop_all.log"
+    echo "=== variant: $VARIANT ==="
+
+    "$REPO_PATH/pc_app/$VARIANT/system.sh" stop
+
+    local pid_file="$REPO_PATH/vitis/$VARIANT/build/putty.pid"
+    if [[ -f "$pid_file" ]]; then
+        local pid
+        pid="$(cat "$pid_file")"
+        # Verify the PID is actually still putty before signaling it -- a
+        # stale PID file whose PID got reused by an unrelated process is
+        # unlikely but possible (e.g. after a reboot).
+        if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null \
+            && ps -p "$pid" -o args= 2>/dev/null | grep -qF putty; then
+            echo "Stopping PuTTY (PID $pid)..."
+            kill "$pid" 2>/dev/null || true
+        else
+            echo "PuTTY not running"
+        fi
+        rm -f "$pid_file"
+    else
+        echo "PuTTY not running (no PID file)"
+    fi
+}
+
+# Wipes build/ for one variant, for testing that a build regenerates
+# everything from tracked source alone. Acts on ONE variant only -- another
+# variant's build/ is left alone, so a slow Vivado rebuild isn't triggered
+# by accident.
+verb_clean() {
+    local what=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --what) what="${2:-}"; shift 2 ;;
+            *) echo "clean: unknown option '$1'" >&2; exit 1 ;;
+        esac
+    done
+    case "$what" in
+        ""|vivado|vitis|pc) ;;
+        *) echo "clean: --what must be vivado, vitis or pc" >&2; exit 1 ;;
+    esac
+
+    resolve_variant
+    check_tree
+    log_to "clean_all.log"
+    echo "=== variant: $VARIANT ==="
+
+    [[ -z "$what" || "$what" == vivado ]] && "$REPO_PATH/vivado/$VARIANT/clean.sh"
+    [[ -z "$what" || "$what" == vitis  ]] && "$REPO_PATH/vitis/$VARIANT/clean.sh"
+    [[ -z "$what" || "$what" == pc     ]] && "$REPO_PATH/pc_app/$VARIANT/clean.sh"
+
+    # Mop up stray Vivado run artifacts from old runs of build_bitstream.sh
+    # invoked from the repo root -- it now cd's into vivado/$VARIANT/build/
+    # first, so this shouldn't recur, but clean up anything already here.
+    rm -f "$REPO_PATH"/vivado*.jou "$REPO_PATH"/vivado*.log
+    rm -rf "$REPO_PATH/.Xil"
+
+    # Logs. The per-variant clean.sh scripts wipe build/ but not the *.log
+    # files sitting next to them, and nothing ever wiped the root ones, so
+    # both used to survive a clean and then read as current when they were
+    # describing a build that no longer exists.
+    #
+    # Scoped the same way the clean itself is: --what vivado clears only
+    # vivado's logs, and the root logs go only on a full clean, since they
+    # each cover the whole stack.
+    local -a logs=()
+    if [[ -z "$what" ]]; then
+        logs+=("$REPO_PATH/build_all.log" "$REPO_PATH/compile_all.log")
+        logs+=("$REPO_PATH/run_all.log" "$REPO_PATH/stop_all.log")
+    fi
+    if [[ -z "$what" || "$what" == vivado ]]; then
+        logs+=("$REPO_PATH/vivado/$VARIANT"/*.log)
+    fi
+    if [[ -z "$what" || "$what" == vitis ]]; then
+        logs+=("$REPO_PATH/vitis/$VARIANT"/*.log)
+    fi
+    if [[ -z "$what" || "$what" == pc ]]; then
+        logs+=("$REPO_PATH/pc_app/$VARIANT"/*.log)
+    fi
+
+    # An unmatched glob stays literal, so the -e test below is what filters
+    # those out -- no nullglob needed, and no "rm: no such file" noise.
+    local f n=0
+    for f in "${logs[@]}"; do
+        if [[ -e "$f" ]]; then
+            rm -f "$f"
+            n=$((n + 1))
+        fi
+    done
+
+    echo
+    echo "build/ wiped clean for variant: $VARIANT"
+    echo "$n log file(s) removed."
+    # clean_all.log is deliberately NOT in that list: tee is writing to it
+    # as this runs, and unlinking it would send the rest of this run's
+    # output to a file with no name. It stays as the record of the clean.
+    echo "Kept clean_all.log -- it is this run's own log."
+}
+
+# PC side only, no board involvement: re-run the Python client against new
+# settings without reflashing. Arguments pass straight through to
+# system.sh, which already logs to pc_app/<variant>/system.log -- a second
+# copy at the repo root would just be litter, so no log_to here.
+verb_pc() {
+    if [[ $# -eq 0 ]]; then
+        echo "pc: needs a subcommand" >&2
+        echo "    {start|stop|restart|restart-client|restart-server|status|logs}" >&2
+        exit 1
+    fi
+    resolve_variant
+    check_tree
+    exec "$REPO_PATH/pc_app/$VARIANT/system.sh" "$@"
+}
+
+# Host NIC/route tuning. Variant-independent -- it acts on the route to the
+# board, which is the same whichever variant is loaded.
+verb_net() {
+    exec "$REPO_PATH/net_tune.sh" "$@"
+}
+
+
+# --- global options, then the verb -------------------------------------
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -v|--variant)
+            if [[ -z "${2:-}" ]]; then
+                echo "-v/--variant needs a name" >&2
+                exit 1
+            fi
+            VARIANT_ARG="$2"; shift 2 ;;
+        -h|--help) usage; exit 0 ;;
+        --) shift; break ;;
+        -*) echo "unknown option '$1'" >&2; usage >&2; exit 1 ;;
+        *) break ;;
+    esac
+done
+
+if [[ $# -eq 0 ]]; then
+    usage >&2
+    exit 1
+fi
+
+VERB="$1"
+shift
+
+case "$VERB" in
+    build)   verb_build   "$@" ;;
+    compile) verb_compile "$@" ;;
+    run)     verb_run     "$@" ;;
+    stop)    verb_stop    "$@" ;;
+    clean)   verb_clean   "$@" ;;
+    pc)      verb_pc      "$@" ;;
+    net)     verb_net     "$@" ;;
+    *)
+        echo "unknown verb '$VERB'" >&2
+        usage >&2
+        exit 1 ;;
+esac

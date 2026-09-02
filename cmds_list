@@ -2,20 +2,21 @@
  olele -- commands you run from the repo root
 =======================================================================
 
-Every *_all.sh script and pc_app.sh acts on ONE variant, chosen by the
-VARIANT env var. It DEFAULTS TO "sizif", so marathon work needs it set
-every time -- either per command:
+./proj is the single entry point: one verb per thing you do. Run
+"./proj --help" for the full list. It acts on ONE variant per invocation,
+chosen by the VARIANT env var, whose default lives in exactly one place --
+bootenv.sh -- and is currently "marathon". Override it per command:
 
-    VARIANT=marathon ./run_all.sh
+    ./proj -v sizif run
 
 or once per shell:
 
     source ./bootenv.sh                # also puts the Xilinx tools on PATH
-    export VARIANT=marathon
+    export VARIANT=sizif
 
-VARIANT must be an env var, never a positional argument: pc_app.sh passes
-all its arguments straight through, so "./pc_app.sh marathon start" would
-hand "marathon" to system.sh as a subcommand and fail.
+Sourcing bootenv.sh also defines shortcuts, so the common verbs are one
+word from any directory: build, compile, run, stop, clean -- plus "proj"
+itself for the rest (proj pc status, proj net show).
 
     sizif     AXI-Lite architecture, frozen reference
     marathon  DMA / AXI-Stream architecture, active development
@@ -31,14 +32,15 @@ Both also use TCP port 5001, so stop one before starting the other.
   source ./bootenv.sh              Once per shell, before anything else.
                                    SOURCE it, do not execute it.
 
-  ./net_tune.sh                    Once per BOOT, before any throughput
+  ./proj net apply                 Once per BOOT, before any throughput
                                    work. Kernel state, so a reboot loses
                                    it and the stream goes unstable again.
 
-  VARIANT=marathon ./run_all.sh    Flash + run the board, and start the
-                                   PC app. Needs build_all.sh done first.
+  ./proj run                       Flash + run the board, and start the
+                                   PC app. Needs "proj build" done first.
+                                   --no-board / --no-pc do just one half.
 
-  VARIANT=marathon ./stop_all.sh   Stop the PC app and the serial console.
+  ./proj stop                      Stop the PC app and the serial console.
                                    The firmware keeps running until reset,
                                    reflashed or power-cycled.
 
@@ -47,39 +49,39 @@ Both also use TCP port 5001, so stop one before starting the other.
  BUILDING
 -----------------------------------------------------------------------
 
-  VARIANT=marathon ./build_all.sh    Whole stack: Vivado bitstream + .xsa,
-                                     Vitis platform + firmware ELF, relay
-                                     binary + venv. Slow. Builds only, does
-                                     not flash or start anything.
+  ./proj build                Whole stack: Vivado bitstream + .xsa, Vitis
+                              platform + firmware ELF, relay binary + venv.
+                              Slow. Builds only, does not flash or start
+                              anything.
+                                --stage vivado|vitis|pc   just one part
+                                --skip-bitstream          reuse the .bit
 
-  VARIANT=marathon ./compile_all.sh  Fast path: firmware C and the C++ relay
-                                     only. Use after editing app/src/*.c or
-                                     tcp_server_app.cpp. Skips Vivado synth
-                                     and Vitis platform creation.
+  ./proj compile              Fast path: firmware C and the C++ relay only.
+                              Use after editing app/src/*.c or
+                              tcp_server_app.cpp. Skips Vivado synth and
+                              Vitis platform creation.
 
-  VARIANT=marathon ./clean_all.sh    Wipe that variant's build/ dirs. The
-                                     other variant is left alone so a slow
-                                     Vivado rebuild is not triggered by
-                                     accident.
+  ./proj clean                Wipe this variant's build/ dirs. Another
+                              variant is left alone so a slow Vivado
+                              rebuild is not triggered by accident.
+                                --what vivado|vitis|pc    just one part
 
-  Rule of thumb: build_all.sh only when the bitstream or the Vitis platform
-  itself changed. Otherwise compile_all.sh. Neither is needed for a
-  Python-only change -- pc_app.sh restart-client covers that.
+  Rule of thumb: "proj build" only when the bitstream or the Vitis platform
+  itself changed. Otherwise "proj compile". Neither is needed for a
+  Python-only change -- "proj pc restart-client" covers that.
 
 
 -----------------------------------------------------------------------
  PC SIDE ONLY  (no reflash -- passthrough to pc_app/$VARIANT/system.sh)
 -----------------------------------------------------------------------
 
-  VARIANT=marathon ./pc_app.sh start
-                              stop
-                              restart           both relay and client
-                              restart-client    after editing config.py,
-                                                net.py, plot.py, ...
-                              restart-server    after editing
-                                                tcp_server_app.cpp
-                              status            what is running
-                              logs              tail both logs
+  ./proj pc start
+             stop
+             restart           both relay and client
+             restart-client    after editing config.py, net.py, plot.py...
+             restart-server    after editing tcp_server_app.cpp
+             status            what is running
+             logs              tail both logs
 
   restart-client is the one to prefer while experimenting: it leaves the
   relay up, so the board's TCP connection survives and the board-side [S]
@@ -123,23 +125,23 @@ Both also use TCP port 5001, so stop one before starting the other.
  NETWORK TUNING / DIAGNOSIS
 -----------------------------------------------------------------------
 
-  ./net_tune.sh          Apply. Needs sudo. Existing TCP connections do
+  ./proj net apply       Apply. Needs sudo. Existing TCP connections do
                          NOT pick it up -- restart the PC side after.
-  ./net_tune.sh show     Is it applied? No sudo needed. FIRST THING TO
+  ./proj net show        Is it applied? No sudo needed. FIRST THING TO
                          CHECK if throughput is fluctuating.
-  ./net_tune.sh loss     Live packet loss to the board. ~0.85% is the
+  ./proj net loss        Live packet loss to the board. ~0.85% is the
                          known standing figure; rising means you are
                          pushing past what the board's rx path absorbs.
-  ./net_tune.sh revert   Remove the flags.
+  ./proj net revert      Remove the flags.
 
 
 -----------------------------------------------------------------------
  WHEN SOMETHING LOOKS WRONG -- CHECK IN THIS ORDER
 -----------------------------------------------------------------------
 
-  1. ./net_tune.sh show            untuned after a reboot is the most
+  1. ./proj net show               untuned after a reboot is the most
                                    likely cause of "it fluctuates"
-  2. VARIANT=... ./pc_app.sh logs  the client line tells you WHERE:
+  2. ./proj pc logs                the client line tells you WHERE:
                                      (dropped N late)  -> local PC stall
                                      (N send-stalls)   -> far end pushing
                                                           back
@@ -148,7 +150,7 @@ Both also use TCP port 5001, so stop one before starting the other.
   3. the board's PuTTY console     [E] lines, and the [S] rate; tx= shows
                                    only when it differs from rx, and +/-1
                                    is just a window-boundary straddle
-  4. ./net_tune.sh loss            link health
+  4. ./proj net loss               link health
 
   Note the board has been the innocent party in every problem so far.
   Suspect the PC and the link first.
