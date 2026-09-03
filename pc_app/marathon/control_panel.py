@@ -15,11 +15,12 @@
 #                   P,Q,R,S,T 5-tuple), ECG_RANDOM_SEED.
 #       Noise    -- ECG_NOISE (nk.ecg_simulate()'s own built-in noise), five
 #                   independent colored-noise layers (ECG_NOISE_
-#                   {VIOLET,BLUE,WHITE,PINK,BROWN}_ENABLED/_LEVEL, any
-#                   combination active at once), and two sine-wave
-#                   interference generators (ECG_SINE{1,2}_ENABLED/_FREQ/
-#                   _PHASE/_LEVEL, e.g. for mains hum) -- see
-#                   signal_gen.py's _simulate_raw()/_sine_contribution().
+#                   {VIOLET,BLUE,WHITE,PINK,BROWN}_CH{1,2}_ENABLED/_LEVEL --
+#                   each colour picks the channels it affects), and four sine-wave
+#                   interference generators configured per channel
+#                   (ECG_SINE{1..4}_CH{1,2}_ENABLED/_FREQ/_PHASE/_LEVEL,
+#                   e.g. for mains hum) -- see signal_gen.py's
+#                   _simulate_raw()/_sine_contribution().
 #   PlotControlPanel (bottom bar, one row) -- purely how the plot displays
 #     that signal: PLOT_MIN / PLOT_MAX / PLOT_BUFFER / FRAME_RATE. None of
 #     these affect what's generated or sent on the wire, only what's drawn
@@ -54,6 +55,7 @@ import pipelines
 import net
 import packet_format
 import runctl
+import signal_gen
 
 # sat.py (Static Analysis Tool) lives next to this file regardless of the
 # working directory the app was launched from.
@@ -163,9 +165,9 @@ def _add_entry_horizontal(frame, col, label, var, on_commit, width=8,
     4294967295, ten digits, and in an 8-character box that reads
     "42949672" -- a number the user then reasonably believes is the
     current maximum. Fields have to show what they hold."""
-    ttk.Label(frame, text=label).grid(row=0, column=col, sticky="w", padx=(0, 4))
+    ttk.Label(frame, text=label).grid(row=0, column=col, sticky="w", padx=(0, 3))
     entry = ttk.Entry(frame, textvariable=var, width=width)
-    entry.grid(row=0, column=col + 1, sticky="w", padx=(0, 16))
+    entry.grid(row=0, column=col + 1, sticky="w", padx=(0, 8))
     entry.bind("<Return>", lambda _e: on_commit())
     if help_text:
         _Tooltip(entry, help_text)
@@ -184,6 +186,7 @@ GUI_SECTIONS = (
     ("Plot bar", (
         "PLOT_MIN", "PLOT_MAX", "PLOT_BUFFER", "FRAME_RATE",
         "PLOT_TRIGGER", "PLOT_TRIGGER_LEVEL",
+        "PLOT_GRID", "PLOT_GRID_MODE", "PLOT_HSPACE",
         "PLOT_STEPS_MIN_PX", "UI_POLL_RATE",
     )),
     ("Session (Start / Mode, above the tabs)", (
@@ -203,14 +206,12 @@ GUI_SECTIONS = (
     )),
     ("Signal / Noise tab", (
         "ECG_NOISE",
-        "ECG_NOISE_VIOLET_ENABLED", "ECG_NOISE_VIOLET_LEVEL",
-        "ECG_NOISE_BLUE_ENABLED",   "ECG_NOISE_BLUE_LEVEL",
-        "ECG_NOISE_WHITE_ENABLED",  "ECG_NOISE_WHITE_LEVEL",
-        "ECG_NOISE_PINK_ENABLED",   "ECG_NOISE_PINK_LEVEL",
-        "ECG_NOISE_BROWN_ENABLED",  "ECG_NOISE_BROWN_LEVEL",
-        "ECG_SINE1_ENABLED", "ECG_SINE1_FREQ", "ECG_SINE1_PHASE", "ECG_SINE1_LEVEL",
-        "ECG_SINE2_ENABLED", "ECG_SINE2_FREQ", "ECG_SINE2_PHASE", "ECG_SINE2_LEVEL",
-    )),
+    ) + tuple(f"ECG_NOISE_{colour}_CH{ch}_{field}"
+              for colour in ("VIOLET", "BLUE", "WHITE", "PINK", "BROWN")
+              for ch in (1, 2) for field in ("ENABLED", "LEVEL")
+              ) + tuple(f"ECG_SINE{n}_CH{ch}_{field}"
+              for n in range(1, 5) for ch in (1, 2)
+              for field in ("ENABLED", "FREQ", "PHASE", "LEVEL"))),
 )
 
 # Which config names each Defaults button restores -- the same ownership map,
@@ -233,23 +234,14 @@ SIGNAL_SETTINGS = tuple(n for title, names in GUI_SECTIONS
 
 # (display name, config attr for "enabled", config attr for "level", beta,
 #  short description of that color's character for its tooltip)
+# (display name, config colour key, beta, what it sounds/looks like)
 _NOISE_ROWS = (
-    ("Violet", "ECG_NOISE_VIOLET_ENABLED", "ECG_NOISE_VIOLET_LEVEL", -2,
-     "emphasizes high frequencies (hiss-like)"),
-    ("Blue", "ECG_NOISE_BLUE_ENABLED", "ECG_NOISE_BLUE_LEVEL", -1,
-     "emphasizes high frequencies, less sharply than violet"),
-    ("White", "ECG_NOISE_WHITE_ENABLED", "ECG_NOISE_WHITE_LEVEL", 0,
-     "flat across all frequencies"),
-    ("Pink", "ECG_NOISE_PINK_ENABLED", "ECG_NOISE_PINK_LEVEL", 1,
-     "emphasizes low frequencies (rumble/drift-like)"),
-    ("Brown", "ECG_NOISE_BROWN_ENABLED", "ECG_NOISE_BROWN_LEVEL", 2,
+    ("Violet", "VIOLET", -2, "emphasizes high frequencies (hiss-like)"),
+    ("Blue", "BLUE", -1, "emphasizes high frequencies, less sharply than violet"),
+    ("White", "WHITE", 0, "flat across all frequencies"),
+    ("Pink", "PINK", 1, "emphasizes low frequencies (rumble/drift-like)"),
+    ("Brown", "BROWN", 2,
      "emphasizes low frequencies more strongly, closer to real baseline wander"),
-)
-
-# (display name, config attr for "enabled", "freq", "phase", "level")
-_SINE_ROWS = (
-    ("Sine 1", "ECG_SINE1_ENABLED", "ECG_SINE1_FREQ", "ECG_SINE1_PHASE", "ECG_SINE1_LEVEL"),
-    ("Sine 2", "ECG_SINE2_ENABLED", "ECG_SINE2_FREQ", "ECG_SINE2_PHASE", "ECG_SINE2_LEVEL"),
 )
 
 _METHODS = ["ecgsyn", "simple"]  # NOT "multileads" -- see config.py's
@@ -1005,98 +997,137 @@ class SignalControlPanel:
                                      "added afterward. 0 = perfectly clean signal.")
 
         ttk.Separator(frame, orient="horizontal").grid(
-            row=row, column=0, columnspan=3, sticky="ew", pady=6)
+            row=row, column=0, columnspan=5, sticky="ew", pady=6)
         row += 1
-        ttk.Label(frame, text="Colored noise -- any combination can be active:",
+        ttk.Label(frame, text="Colored noise -- per channel, any combination:",
                   foreground="#777", font=("", 8), wraplength=180, justify="left").grid(
-            row=row, column=0, columnspan=3, sticky="w", pady=(0, 4))
+            row=row, column=0, columnspan=5, sticky="w", pady=(0, 4))
         row += 1
 
-        # One row per color: checkbox + level entry, each independently
-        # toggleable and summed together in signal_gen.py's _simulate_raw()
-        # -- this replaced a single enabled/color/level combo that only
-        # allowed one color active at a time.
+        # One row per colour, both channels on it: Ch1 on/level, Ch2 on/level.
+        # Each is independent and they sum -- see signal_gen's _simulate_raw().
+        for col, head in enumerate(("", "Ch1", "%", "Ch2", "%")):
+            ttk.Label(frame, text=head, foreground="#777",
+                      font=("", 8)).grid(row=row, column=col, sticky="w")
+        row += 1
+
         self._noise_vars = {}
-        for name, enabled_attr, level_attr, beta, character in _NOISE_ROWS:
-            enabled_var = self._cvar(tk.BooleanVar,
-                                     lambda a=enabled_attr: getattr(config, a))
-            level_var = self._cvar(
-                tk.StringVar, lambda a=level_attr: f"{getattr(config, a) * 100:g}")
-            self._noise_vars[enabled_attr] = (enabled_var, level_var)
+        for name, colour, beta, character in _NOISE_ROWS:
+            ttk.Label(frame, text=name).grid(row=row, column=0, sticky="w",
+                                             padx=(0, 4), pady=1)
+            for ch in (1, 2):
+                enabled_attr, level_attr = signal_gen.noise_attrs(colour, ch)
+                enabled_var = self._cvar(
+                    tk.BooleanVar, lambda a=enabled_attr: getattr(config, a))
+                level_var = self._cvar(
+                    tk.StringVar,
+                    lambda a=level_attr: f"{getattr(config, a) * 100:g}")
+                self._noise_vars[(colour, ch)] = (enabled_var, level_var)
 
-            cb = ttk.Checkbutton(frame, text=name, variable=enabled_var)
-            self._commits.append(lambda a=enabled_attr, v=enabled_var:
-                                 self._apply_noise_enabled(a, v))
-            self._watch(enabled_var)
-            cb.grid(row=row, column=0, sticky="w", pady=2)
-            _Tooltip(cb, f"beta={beta} -- {character}. Independent of the other colors; "
-                          f"check any combination to layer them together.")
+                cb = ttk.Checkbutton(frame, variable=enabled_var)
+                cb.grid(row=row, column=1 + (ch - 1) * 2, sticky="w", pady=1)
+                self._commits.append(lambda a=enabled_attr, v=enabled_var:
+                                     self._apply_noise_enabled(a, v))
+                self._watch(enabled_var)
+                _Tooltip(cb, f"{name} noise on channel {ch}. beta={beta} -- "
+                             f"{character}. Independent of the other colours "
+                             f"and of the same colour on the other channel; "
+                             f"any combination layers together, and the two "
+                             f"channels are decorrelated even when set "
+                             f"identically.")
 
-            entry = ttk.Entry(frame, textvariable=level_var, width=6)
-            entry.grid(row=row, column=1, sticky="e", pady=2)
-            commit = (lambda a=level_attr, v=level_var: self._apply_noise_level(a, v))
-            self._commits.append(commit)
-            self._watch(level_var)
-            entry.bind("<Return>", lambda _e: self.apply_all())
-            level_help = (f"{name} noise's strength, as a percentage of the ECG signal's OWN "
-                           f"peak-to-peak swing -- so a given percentage means the same thing "
-                           f"regardless of heart rate or Amplitude settings, and regardless of "
-                           f"how many other colors are also active. Only has any effect while "
-                           f"{name} is checked.")
-            _Tooltip(entry, level_help)
-
-            ttk.Label(frame, text="%").grid(row=row, column=2, sticky="w")
+                self._cell(frame, row, 2 + (ch - 1) * 2, level_var,
+                           lambda a=level_attr, v=level_var:
+                           self._apply_noise_level(a, v),
+                           f"{name} noise on ch{ch}, as a percentage of the "
+                           f"ECG's OWN peak-to-peak swing -- so a given "
+                           f"percentage means the same thing regardless of "
+                           f"heart rate, Amplitude, or how many other layers "
+                           f"are active. Only applies while its box is "
+                           f"ticked.")
             row += 1
 
         ttk.Separator(frame, orient="horizontal").grid(
-            row=row, column=0, columnspan=3, sticky="ew", pady=6)
+            row=row, column=0, columnspan=5, sticky="ew", pady=6)
         row += 1
-        ttk.Label(frame, text="Sine interference -- e.g. mains hum, up to 2 at once:",
+        ttk.Label(frame, text="Sine interference -- 4 generators, each set per channel:",
                   foreground="#777", font=("", 8), wraplength=180, justify="left").grid(
-            row=row, column=0, columnspan=3, sticky="w", pady=(0, 4))
+            row=row, column=0, columnspan=5, sticky="w", pady=(0, 4))
         row += 1
 
-        # Each sine gets its own checkbox + 3 stacked fields (freq, phase,
-        # amplitude). Unlike the colored-noise rows, both generators can
-        # differ in every parameter but are added IDENTICALLY to both
-        # channels -- see signal_gen.py's _sine_contribution()/comment on
-        # why (real interference like mains hum affects every channel the
-        # same way, unlike the deliberately-decorrelated colored noise).
+        # One block per generator: a name, a header row, then one compact
+        # row per channel (on / freq / phase / level). Stacking four labelled
+        # fields per channel would be 32 rows of sidebar; this is 12.
         self._sine_vars = {}
-        for name, enabled_attr, freq_attr, phase_attr, level_attr in _SINE_ROWS:
-            V = self._cvar
-            enabled_var = V(tk.BooleanVar, lambda a=enabled_attr: getattr(config, a))
-            freq_var = V(tk.StringVar, lambda a=freq_attr: f"{getattr(config, a):g}")
-            phase_var = V(tk.StringVar, lambda a=phase_attr: f"{getattr(config, a):g}")
-            level_var = V(tk.StringVar,
-                          lambda a=level_attr: f"{getattr(config, a) * 100:g}")
-            self._sine_vars[enabled_attr] = (enabled_var, freq_var, phase_var, level_var)
-
-            cb = ttk.Checkbutton(frame, text=f"{name} enabled", variable=enabled_var)
-            self._commits.append(lambda a=enabled_attr, v=enabled_var:
-                                 self._apply_sine_enabled(a, v))
-            self._watch(enabled_var)
-            cb.grid(row=row, column=0, columnspan=3, sticky="w", pady=(4, 0))
-            _Tooltip(cb, f"Adds a pure sine wave to BOTH channels identically (e.g. to "
-                          f"simulate powerline hum) -- independent of the other sine generator "
-                          f"and the colored noise above; any combination can be active.")
+        for n in range(1, signal_gen.SINE_COUNT + 1):
+            ttk.Label(frame, text=f"Sine {n}", font=("", 9, "bold")).grid(
+                row=row, column=0, columnspan=5, sticky="w", pady=(6, 0))
+            row += 1
+            for col, head in enumerate(("", "Hz", "deg", "%")):
+                ttk.Label(frame, text=head, foreground="#777",
+                          font=("", 8)).grid(row=row, column=col, sticky="w")
             row += 1
 
-            row = self._entry(frame, row, "  Frequency (Hz)", freq_var,
-                              lambda a=freq_attr, v=freq_var: self._apply_sine_freq(a, v),
-                              help_text=f"{name}'s frequency, evaluated at the ECG's own sample "
-                                         f"rate -- exact regardless of Send rate/Chunk size "
-                                         f"playback speed. Clamped below Nyquist (half the "
-                                         f"current ECG sample rate) to avoid aliasing.")
-            row = self._entry(frame, row, "  Phase (deg)", phase_var,
-                              lambda a=phase_attr, v=phase_var: self._apply_sine_phase(a, v),
-                              help_text=f"{name}'s starting phase offset in degrees.")
-            row = self._entry(frame, row, "  Amplitude (%)", level_var,
-                              lambda a=level_attr, v=level_var: self._apply_sine_level(a, v),
-                              help_text=f"{name}'s strength, as a percentage of the ECG "
-                                         f"signal's OWN peak-to-peak swing -- same convention "
-                                         f"as the colored-noise levels above. Only has any "
-                                         f"effect while \"{name} enabled\" is checked.")
+            for ch in (1, 2):
+                enabled_attr, freq_attr, phase_attr, level_attr = \
+                    signal_gen.sine_attrs(n, ch)
+                V = self._cvar
+                enabled_var = V(tk.BooleanVar,
+                                lambda a=enabled_attr: getattr(config, a))
+                freq_var = V(tk.StringVar,
+                             lambda a=freq_attr: f"{getattr(config, a):g}")
+                phase_var = V(tk.StringVar,
+                              lambda a=phase_attr: f"{getattr(config, a):g}")
+                level_var = V(tk.StringVar,
+                              lambda a=level_attr: f"{getattr(config, a) * 100:g}")
+                self._sine_vars[(n, ch)] = (enabled_var, freq_var,
+                                            phase_var, level_var)
+
+                cb = ttk.Checkbutton(frame, text=f"Ch{ch}", variable=enabled_var)
+                cb.grid(row=row, column=0, sticky="w", pady=1)
+                self._commits.append(lambda a=enabled_attr, v=enabled_var:
+                                     self._apply_sine_enabled(a, v))
+                self._watch(enabled_var)
+                _Tooltip(cb, f"Add sine {n} to channel {ch}. Every generator is "
+                             f"configured per channel: the same interference "
+                             f"reaches two leads with a different amplitude and "
+                             f"phase, and that difference is what a two-channel "
+                             f"rejection scheme has to work with. Set both "
+                             f"channels identically for common-mode.")
+
+                self._cell(frame, row, 1, freq_var,
+                           lambda a=freq_attr, v=freq_var:
+                           self._apply_sine_freq(a, v),
+                           f"Frequency in Hz, evaluated at the ECG's own sample "
+                           f"rate -- exact regardless of Send rate/Chunk size. "
+                           f"Clamped below Nyquist (half the ECG sample rate).")
+                self._cell(frame, row, 2, phase_var,
+                           lambda a=phase_attr, v=phase_var:
+                           self._apply_sine_phase(a, v),
+                           f"Starting phase in degrees. A difference between "
+                           f"Ch1 and Ch2 here is what makes the interference "
+                           f"non-common-mode.")
+                self._cell(frame, row, 3, level_var,
+                           lambda a=level_attr, v=level_var:
+                           self._apply_sine_level(a, v),
+                           f"Amplitude as a percentage of the clean ECG's own "
+                           f"peak-to-peak (same convention as the noise levels "
+                           f"above), referenced to ch1 for both channels so "
+                           f"equal numbers mean equal amplitudes. Only applies "
+                           f"while Ch{ch} is ticked.")
+                row += 1
+
+    def _cell(self, frame, row, col, var, on_commit, help_text=None):
+        """A bare entry at a grid position -- no label of its own, for tables
+        with column headers. Commit deferred to Apply, like _entry."""
+        entry = ttk.Entry(frame, textvariable=var, width=6)
+        entry.grid(row=row, column=col, sticky="w", padx=(0, 4), pady=1)
+        entry.bind("<Return>", lambda _e: self.apply_all())
+        self._commits.append(on_commit)
+        self._watch(var)
+        if help_text:
+            _Tooltip(entry, help_text)
+        return entry
 
     def _apply_sine_enabled(self, attr, var):
         setattr(config, attr, var.get())
@@ -1372,6 +1403,8 @@ class PlotControlPanel:
         self._frame_rate = V(S, lambda: str(config.FRAME_RATE))
         self._trigger_on = V(B, lambda: bool(config.PLOT_TRIGGER))
         self._trigger_level = V(S, lambda: str(config.PLOT_TRIGGER_LEVEL))
+        self._grid_on = V(B, lambda: bool(config.PLOT_GRID))
+        self._grid_mode = V(S, lambda: config.PLOT_GRID_MODE)
 
         # Two groups, not one long grid row: the buttons are packed to the
         # RIGHT edge and the fields fill what is left. In one grid, a window
@@ -1418,6 +1451,23 @@ class PlotControlPanel:
                         variable=self._trigger_on).grid(
             row=0, column=col, sticky="w", padx=(0, 8))
         col += 1
+        grid_cb = ttk.Checkbutton(fields, text="Grid", variable=self._grid_on)
+        grid_cb.grid(row=0, column=col, sticky="w", padx=(0, 4))
+        col += 1
+        grid_combo = ttk.Combobox(fields, textvariable=self._grid_mode,
+                                  values=list(config.PLOT_GRID_MODES),
+                                  width=6, state="readonly")
+        grid_combo.grid(row=0, column=col, sticky="w", padx=(0, 10))
+        col += 1
+        self._commits.append(self._apply_grid)
+        _Tooltip(grid_cb, "Gridlines on both channel plots, for reading one "
+                          "against the other.")
+        _Tooltip(grid_combo,
+                 "normal: a line at each axis tick. fine: each of those "
+                 "subdivided into 5, the way ECG paper puts five small "
+                 "squares in every large one -- for reading an interval off "
+                 "the screen, not just lining the channels up. Only applies "
+                 "while Grid is ticked.")
         col = self._entry_h(fields, col, "Level", self._trigger_level,
                                      self._apply_trigger)
 
@@ -1462,7 +1512,8 @@ class PlotControlPanel:
                  "apply them now.")
         # Same pending-change marker as the signal panel.
         for var in (self._plot_min, self._plot_max, self._plot_buffer,
-                    self._frame_rate, self._trigger_on, self._trigger_level):
+                    self._frame_rate, self._trigger_on, self._trigger_level,
+                    self._grid_on, self._grid_mode):
             var.trace_add("write", lambda *_: self._mark_dirty())
         self._dirty = False
         _Tooltip(apply_btn,
@@ -1566,6 +1617,14 @@ class PlotControlPanel:
         level = min(max(level, 0.01), 0.99)
         self._trigger_level.set(f"{level:g}")
         config.PLOT_TRIGGER_LEVEL = level
+
+    def _apply_grid(self):
+        config.PLOT_GRID = bool(self._grid_on.get())
+        mode = self._grid_mode.get()
+        if mode not in config.PLOT_GRID_MODES:
+            mode = config.PLOT_GRID_MODE
+            self._grid_mode.set(mode)
+        config.PLOT_GRID_MODE = mode
 
     def _apply_plot_ylim(self):
         try:

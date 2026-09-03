@@ -68,18 +68,17 @@ def _regen(signature):
     global _cache, _regen_busy
     try:
         while True:
-            ch1_raw, ch1_ecg_ptp = _simulate_raw(random_state=config.ECG_RANDOM_SEED)
-            ch2_raw, _ = _simulate_raw(random_state=config.ECG_RANDOM_SEED + 1)
+            ch1_raw, ch1_ecg_ptp = _simulate_raw(config.ECG_RANDOM_SEED, 1)
+            ch2_raw, _ = _simulate_raw(config.ECG_RANDOM_SEED + 1, 2)
 
-            # Reference ptp for sine amplitude is ch1's CLEAN ECG swing --
-            # arbitrary which channel, just needs to be the SAME one for both
-            # so the sine ends up bit-identical on both. Taken from
-            # _simulate_raw() rather than measured off ch1_raw here, so it
-            # means the same thing whether or not noise is mixed in and
-            # whether or not the ECG itself is switched off.
-            sine = _sine_contribution(len(ch1_raw), ch1_ecg_ptp)
-            ch1_raw = ch1_raw + sine[:len(ch1_raw)]
-            ch2_raw = ch2_raw + sine[:len(ch2_raw)]
+            # Reference ptp for sine amplitude is ch1's CLEAN ECG swing for
+            # BOTH channels -- so a level set the same on both means the same
+            # amplitude, and the two differ only where they were configured
+            # to. Taken from _simulate_raw() rather than measured off
+            # ch1_raw, so it means the same thing whether or not noise is
+            # mixed in and whether or not the ECG itself is switched off.
+            ch1_raw = ch1_raw + _sine_contribution(len(ch1_raw), ch1_ecg_ptp, 1)
+            ch2_raw = ch2_raw + _sine_contribution(len(ch2_raw), ch1_ecg_ptp, 2)
 
             if config.ECG_ENABLED:
                 ch1_entry = (ch1_raw, ch1_raw.min(), ch1_raw.max())
@@ -118,22 +117,36 @@ def _regen(signature):
 # config attr for "level"). Any combination can be active simultaneously
 # (see config.py's ECG_NOISE_*_ENABLED/_LEVEL) -- _simulate_raw() generates
 # each enabled one separately and sums them before adding to the ECG.
-_NOISE_LAYERS = (
-    (-2, "ECG_NOISE_VIOLET_ENABLED", "ECG_NOISE_VIOLET_LEVEL"),
-    (-1, "ECG_NOISE_BLUE_ENABLED", "ECG_NOISE_BLUE_LEVEL"),
-    (0, "ECG_NOISE_WHITE_ENABLED", "ECG_NOISE_WHITE_LEVEL"),
-    (1, "ECG_NOISE_PINK_ENABLED", "ECG_NOISE_PINK_LEVEL"),
-    (2, "ECG_NOISE_BROWN_ENABLED", "ECG_NOISE_BROWN_LEVEL"),
+# (colour, beta). Config names are built from these per channel, the same way
+# the sine generators' are, so the set of colours is written once.
+NOISE_COLOURS = (
+    ("VIOLET", -2),
+    ("BLUE", -1),
+    ("WHITE", 0),
+    ("PINK", 1),
+    ("BROWN", 2),
 )
 
-# Sine-wave interference generators: (config attr for "enabled", "freq",
-# "phase", "level"). Unlike _NOISE_LAYERS, both channels get the IDENTICAL
-# sine (no per-channel decorrelation) -- see config.py's ECG_SINE1_*/
-# ECG_SINE2_* comment for why.
-_SINE_GENERATORS = (
-    ("ECG_SINE1_ENABLED", "ECG_SINE1_FREQ", "ECG_SINE1_PHASE", "ECG_SINE1_LEVEL"),
-    ("ECG_SINE2_ENABLED", "ECG_SINE2_FREQ", "ECG_SINE2_PHASE", "ECG_SINE2_LEVEL"),
-)
+
+def noise_attrs(colour, ch):
+    """The two config names for `colour` on channel `ch`."""
+    prefix = f"ECG_NOISE_{colour}_CH{ch}_"
+    return prefix + "ENABLED", prefix + "LEVEL"
+
+# Sine-wave interference generators, four of them, each configured per
+# channel: ECG_SINE<n>_CH<c>_{ENABLED,FREQ,PHASE,LEVEL}. Built rather than
+# written out, so the count is one number here and in the panel.
+SINE_COUNT = 4
+
+
+def sine_attrs(n, ch):
+    """The four config names for generator `n` (1-based) on channel `ch`."""
+    prefix = f"ECG_SINE{n}_CH{ch}_"
+    return tuple(prefix + f for f in ("ENABLED", "FREQ", "PHASE", "LEVEL"))
+
+
+_SINE_GENERATORS = tuple((n, ch) for n in range(1, SINE_COUNT + 1)
+                         for ch in (1, 2))
 
 
 def _config_signature():
@@ -142,13 +155,12 @@ def _config_signature():
     the (expensive) simulator needs to re-run. Extend this, not the cache
     tuple shape, when adding a new generation parameter."""
     noise_layers = tuple(
-        (getattr(config, enabled_attr), getattr(config, level_attr))
-        for _beta, enabled_attr, level_attr in _NOISE_LAYERS
+        tuple(getattr(config, attr) for attr in noise_attrs(colour, ch))
+        for colour, _beta in NOISE_COLOURS for ch in (1, 2)
     )
     sine_generators = tuple(
-        (getattr(config, enabled_attr), getattr(config, freq_attr),
-         getattr(config, phase_attr), getattr(config, level_attr))
-        for enabled_attr, freq_attr, phase_attr, level_attr in _SINE_GENERATORS
+        tuple(getattr(config, attr) for attr in sine_attrs(n, ch))
+        for n, ch in _SINE_GENERATORS
     )
     return (
         config.ECG_DURATION_S, config.ECG_SAMPLING_RATE, config.ECG_HEART_RATE,
@@ -159,7 +171,7 @@ def _config_signature():
     )
 
 
-def _simulate_raw(random_state):
+def _simulate_raw(random_state, channel):
     raw = nk.ecg_simulate(
         duration=config.ECG_DURATION_S,
         sampling_rate=config.ECG_SAMPLING_RATE,
@@ -196,7 +208,8 @@ def _simulate_raw(random_state):
         raw_ptp = 1.0
     if raw_ptp > 0:
         total_noise = np.zeros_like(raw)
-        for i, (beta, enabled_attr, level_attr) in enumerate(_NOISE_LAYERS):
+        for i, (colour, beta) in enumerate(NOISE_COLOURS):
+            enabled_attr, level_attr = noise_attrs(colour, channel)
             if not getattr(config, enabled_attr):
                 continue
             level = getattr(config, level_attr)
@@ -231,21 +244,22 @@ def _simulate_raw(random_state):
     return raw, raw_ptp
 
 
-def _sine_contribution(n, raw_ptp):
-    """Sum of both sine generators, sized for a buffer of length n. Computed
-    ONCE in _raw_buffers() (not per-channel in _simulate_raw()) and added
-    identically to both channels -- unlike the colored-noise layers, which
-    are deliberately decorrelated per channel, real interference like mains
-    hum affects every channel the same way. This is also why raw_ptp is a
-    parameter here rather than measured locally: using each channel's own
-    (slightly different, since they come from different random seeds) ptp
-    would make the "identical sine" promise false by a fraction of a
-    percent -- verified this was actually happening before fixing it."""
-    total = np.zeros(n)
+def _sine_contribution(n_samples, raw_ptp, channel):
+    """Sum of the four generators for ONE channel, over n_samples.
+
+    raw_ptp is a parameter, not measured here: it is ch1's clean ECG swing
+    for both channels, so equal levels on ch1 and ch2 mean equal amplitudes.
+    Measuring each channel's own ptp (they come from different seeds) made
+    equal settings differ by a fraction of a percent.
+    """
+    total = np.zeros(n_samples)
     if raw_ptp <= 0:
         return total
-    t = np.arange(n) / config.ECG_SAMPLING_RATE
-    for enabled_attr, freq_attr, phase_attr, level_attr in _SINE_GENERATORS:
+    t = np.arange(n_samples) / config.ECG_SAMPLING_RATE
+    for n, ch in _SINE_GENERATORS:
+        if ch != channel:
+            continue
+        enabled_attr, freq_attr, phase_attr, level_attr = sine_attrs(n, ch)
         if not getattr(config, enabled_attr):
             continue
         level = getattr(config, level_attr)
@@ -256,8 +270,8 @@ def _sine_contribution(n, raw_ptp):
         # level = fraction of the reference ptp that becomes the sine's OWN
         # peak-to-peak (same convention as the noise layers), so amplitude
         # (sin()'s single-sided swing) is half of that.
-        amplitude = level * raw_ptp / 2.0
-        total += amplitude * np.sin(2 * np.pi * freq * t + phase_rad)
+        total += (level * raw_ptp / 2.0) * np.sin(2 * np.pi * freq * t
+                                                  + phase_rad)
     return total
 
 

@@ -26,7 +26,7 @@ import numpy as np
 import matplotlib
 matplotlib.use("TkAgg")
 import matplotlib.pyplot as plt
-from matplotlib.ticker import FuncFormatter
+from matplotlib.ticker import AutoMinorLocator, FuncFormatter, NullLocator
 
 import config
 import guiutil
@@ -151,11 +151,25 @@ class DualPlot:
         self._lines_ax1 = (self.line_ch1_in, self.line_ch1_out)
         self._lines_ax2 = (self.line_ch2_in, self.line_ch2_out)
 
-        self.ax1.set_title("Channel 1")
-        self.ax2.set_title("Channel 2")
+        # Channel name inside the axes, not a title above it: a title lives in
+        # the gap between the two plots, and the gap is what we are trying to
+        # get rid of. Part of the static background, so blitting keeps it.
+        for ax, name in ((self.ax1, "Channel 1"), (self.ax2, "Channel 2")):
+            ax.text(0.01, 0.94, name, transform=ax.transAxes, va="top",
+                    fontsize=9, fontweight="bold", color="#444")
+
         for ax in (self.ax1, self.ax2):
-            ax.legend()
+            ax.legend(loc="upper right", fontsize=8, framealpha=0.8)
             ax.set_ylim(config.PLOT_MIN, config.PLOT_MAX)
+            # Grid behind the traces, drawn once into the cached background.
+            # Minor divisions as well as major: five y gridlines across the
+            # wire's whole range is too coarse to line two traces up against.
+            ax.set_axisbelow(True)
+            self._style_grid(ax)
+            # Engineering suffixes (2.1G) instead of matplotlib's shared
+            # "1e9" offset text, which is drawn just above the axes -- i.e.
+            # exactly in the gap the two plots no longer have.
+            ax.yaxis.set_major_formatter(FuncFormatter(self._format_count_tick))
             # x-data stays the plain buffer index (0..buffer_size-1, oldest
             # to newest) -- only the tick labels are reinterpreted as time,
             # via ECG_SAMPLING_RATE (live-editable from the panel). Avoids
@@ -174,7 +188,11 @@ class DualPlot:
             ax.xaxis.set_major_formatter(FuncFormatter(self._format_time_tick))
         self.ax1.set_xlim(0, buffer_size - 1)
         self.ax2.set_xlabel("Time (s)")
+        # tight_layout for the outer margins, then close the gap between the
+        # two axes: they share an x-axis and are meant to be read against each
+        # other, so the less that separates them the better.
         self.fig.tight_layout()
+        self.fig.subplots_adjust(hspace=config.PLOT_HSPACE)
 
         # Cache each axis's static background separately (their bboxes
         # differ), then re-cache whenever matplotlib does a full draw of
@@ -193,6 +211,7 @@ class DualPlot:
         self._last_time_rate = config.ECG_SAMPLING_RATE
         self._last_ylim = (config.PLOT_MIN, config.PLOT_MAX)
         self._last_buffer_size = buffer_size
+        self._last_grid = (config.PLOT_GRID, config.PLOT_GRID_MODE)
         # Set by invalidate_view(): also put the x range back, since the
         # toolbar zooms both axes and only fixing y would leave the window
         # showing part of the buffer with no way back but the toolbar.
@@ -270,6 +289,45 @@ class DualPlot:
         self.line_ch2_out.set_data(x, self.ch2_out[-new_size:])
         self.ax1.set_xlim(0, new_size - 1)
 
+    # Dark enough to actually see: the first attempt at #b0b0b0/alpha 0.7
+    # rendered as 215/255 grey, present in the pixels and invisible on screen.
+    _GRID_MAJOR = dict(color="#8c8c8c", linewidth=0.7)
+    _GRID_MINOR = dict(color="#bdbdbd", linewidth=0.5)
+
+    @staticmethod
+    def _style_grid(ax):
+        """Apply PLOT_GRID / PLOT_GRID_MODE to one axes.
+
+        Styles are passed ONLY when enabling: matplotlib treats
+        grid(False, color=...) as a contradiction, warns, and turns the grid
+        on anyway -- which made the checkbox a one-way switch.
+        """
+        if not config.PLOT_GRID:
+            for which in ("major", "minor"):
+                ax.grid(False, which=which)
+            for axis in (ax.xaxis, ax.yaxis):
+                axis.set_minor_locator(NullLocator())
+            return
+
+        ax.grid(True, which="major", **DualPlot._GRID_MAJOR)
+        fine = config.PLOT_GRID_MODE == "fine"
+        for axis in (ax.xaxis, ax.yaxis):
+            axis.set_minor_locator(
+                AutoMinorLocator(config.PLOT_GRID_FINE_DIVISIONS) if fine
+                else NullLocator())
+        if fine:
+            ax.grid(True, which="minor", **DualPlot._GRID_MINOR)
+        else:
+            ax.grid(False, which="minor")
+
+    @staticmethod
+    def _format_count_tick(y, _pos):
+        """Sample counts as 0 / 1.1G / 2.1G rather than 0..4 over a "1e9"."""
+        for scale, suffix in ((1e9, "G"), (1e6, "M"), (1e3, "k")):
+            if abs(y) >= scale:
+                return f"{y / scale:.3g}{suffix}"
+        return f"{y:.0f}"
+
     def invalidate_view(self):
         """Make the next refresh() re-apply every view setting from config,
         whether or not the values changed.
@@ -286,6 +344,7 @@ class DualPlot:
         """
         self._last_ylim = None
         self._last_time_rate = None
+        self._last_grid = None
         self._reset_xlim = True
 
     def _on_draw(self, _event):
@@ -622,6 +681,13 @@ class DualPlot:
         if new_buffer_size != self._last_buffer_size and new_buffer_size > 0:
             self._last_buffer_size = new_buffer_size
             self._resize_buffers(new_buffer_size)
+            needs_full_draw = True
+
+        grid = (config.PLOT_GRID, config.PLOT_GRID_MODE)
+        if grid != self._last_grid:
+            self._last_grid = grid
+            self._style_grid(self.ax1)
+            self._style_grid(self.ax2)
             needs_full_draw = True
 
         if self._reset_xlim:

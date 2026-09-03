@@ -153,8 +153,13 @@ def load_dump(csv_path):
         "send_rate": number("SEND_RATE", "send_rate"),
         "chunk": number("CHUNK_SIZE", "chunk"),
         "trigger": meta.get("PLOT_TRIGGER", header_meta.get("trigger")),
-        "sines": [(meta.get(f"ECG_SINE{i}_ENABLED"), meta.get(f"ECG_SINE{i}_FREQ"),
-                   meta.get(f"ECG_SINE{i}_LEVEL")) for i in (1, 2)],
+        # Four generators, each per channel -- a dump made before that change
+        # simply has none of these keys and the list comes out empty.
+        "sines": [(n, ch, meta.get(f"ECG_SINE{n}_CH{ch}_ENABLED"),
+                   meta.get(f"ECG_SINE{n}_CH{ch}_FREQ"),
+                   meta.get(f"ECG_SINE{n}_CH{ch}_PHASE"),
+                   meta.get(f"ECG_SINE{n}_CH{ch}_LEVEL"))
+                  for n in range(1, 5) for ch in (1, 2)],
         "meta": meta,
     }
     return traces, info
@@ -328,9 +333,10 @@ def format_report(info, results, models):
         bits.append(f"trigger {info['trigger']}")
     if bits:
         say("  " + ", ".join(bits))
-    for i, (en, freq, level) in enumerate(info["sines"], start=1):
+    for n, ch, en, freq, phase, level in info["sines"]:
         if en and en.lower() == "true":
-            say(f"  sine {i}: {freq} Hz at level {level}")
+            say(f"  sine {n} ch{ch}: {freq} Hz at level {level}, "
+                f"phase {phase} deg")
 
     say("")
     say("  spectrum")

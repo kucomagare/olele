@@ -15,9 +15,9 @@
 # ADD A PIPELINE -- two functions and one registry line, nothing else. Both
 # GUIs and SAT build their dropdowns from PIPELINES.
 #
-#     def pipe2_scipy(x, state, params): ...   # x: ONE channel, wire dtype,
-#     def pipe2_manual(x, state, params): ...  # same dtype/length out
-#     PIPELINES["pipe2"] = {"manual": pipe2_manual, "scipy": pipe2_scipy}
+#     def pipeN_scipy(x, state, params): ...   # x: ONE channel, wire dtype,
+#     def pipeN_manual(x, state, params): ...  # same dtype/length out
+#     PIPELINES["pipeN"] = {"manual": pipeN_manual, "scipy": pipeN_scipy}
 #
 # `state` is a dict that persists across chunks (filter memory); it is cleared
 # for you when the selection changes. `params` carries the panel's knobs plus
@@ -67,39 +67,39 @@ def _iir_scalar(x, y_init, shift):
     return out, y
 
 
-_kernel = None
+_kernels = {}
+
+
+def _compiled(fn, *probe):
+    """njit(fn) if numba will take it, else fn itself.
+
+    Compiled once, on a throwaway input, so a failure lands here rather than
+    mid-stream. nogil matters more than the speed: these loops are where the
+    local worker spends its time, and without it the plot thread cannot run
+    while a chunk is being filtered. They touch no Python objects, so it is
+    safe. A missing numba falls back rather than failing -- a slow local mode
+    still beats no local mode.
+    """
+    if fn in _kernels:
+        return _kernels[fn]
+    impl = fn
+    try:
+        from numba import njit
+        candidate = njit(cache=True, nogil=True)(fn)
+        candidate(*probe)
+        impl = candidate
+        print(f"[local] numba kernel compiled: {fn.__name__}")
+    except Exception as exc:                          # noqa: BLE001
+        print(f"[local] numba unavailable for {fn.__name__} ({exc}); using "
+              f"the Python loop -- fine at low sample rates, slow above "
+              f"~100k samples/s")
+    _kernels[fn] = impl
+    return impl
 
 
 def _get_kernel():
-    """Resolve the per-sample kernel once, preferring a numba-compiled one.
-
-    A scalar Python loop is fine at the real-time default (SEND_RATE 50 x
-    CHUNK_SIZE 8 = 400 samples/s) and hopeless at the rates the board has
-    been pushed to (1400 x 960 = 1.34M samples/s). numba is already a
-    dependency (build.sh), and njit turns this exact shape of loop into
-    something comparable with C. If it is missing or refuses to compile,
-    fall back rather than fail: a slow local mode still beats no local mode.
-    """
-    global _kernel
-    if _kernel is not None:
-        return _kernel
-    _kernel = _iir_scalar
-    try:
-        from numba import njit
-        # nogil=True matters more than the speed here: this loop is the one
-        # place the local worker spends real time, and without it the plot
-        # thread cannot run at all while a chunk is being filtered. The
-        # kernel touches no Python objects, so dropping the GIL is safe.
-        compiled = njit(cache=True, nogil=True)(_iir_scalar)
-        # Force compilation now, on a throwaway input, so a failure lands
-        # here as a caught exception instead of mid-stream.
-        compiled(np.zeros(4, dtype=np.int64), 0, 4)
-        _kernel = compiled
-        print("[local] numba kernel compiled")
-    except Exception as exc:                          # noqa: BLE001
-        print(f"[local] numba unavailable ({exc}); using the Python kernel "
-              f"-- fine at low sample rates, slow above ~100k samples/s")
-    return _kernel
+    """The single-pole shift kernel: y += (x - y) >> shift."""
+    return _compiled(_iir_scalar, np.zeros(4, dtype=np.int64), 0, 4)
 
 
 def iir(x, state, params):
@@ -213,6 +213,194 @@ def pipe1_manual(x, state, params):
     return _to_wire_centred(xs - lp, x.dtype)
 
 
+# --- pipe2: the ECG diagnostic band -------------------------------------
+#
+# Three stages in this order: 0.2 Hz high-pass (baseline wander), 50 Hz notch
+# (mains), 150 Hz low-pass (EMG and everything above the signal). The order is
+# not arbitrary -- drift is by far the largest thing on the wire, and removing
+# it first keeps the two later stages away from their headroom limits.
+#
+# Why these numbers, for ECG specifically:
+#   0.2 Hz HP, 2nd order. The ST segment is nearly DC, so the high-pass sits
+#       directly on top of the diagnosis: too high a corner or too steep a
+#       rolloff tilts ST and invents depression/elevation that is not there.
+#       (AHA: 0.05 Hz diagnostic, 0.5 Hz monitoring; 0.2 Hz with a gentle
+#       2nd-order response is the usual compromise.)
+#   50 Hz notch, Q = 30 (~1.7 Hz wide). Narrow on purpose -- the QRS has real
+#       energy either side of 50 Hz and a wide notch takes a bite out of it.
+#       The price of narrow is ringing after each QRS, which is why a notch is
+#       a last resort rather than a substitute for a decent electrode.
+#   150 Hz LP. The standard adult diagnostic bandwidth. Lower, and QRS
+#       amplitude and notching start to go.
+#
+# Any stage set to 0, or at/above Nyquist, is skipped: at fs = 256 there is
+# nothing at 150 Hz to remove.
+PIPE2_HP_HZ = 0.2
+PIPE2_NOTCH_HZ = 50.0
+PIPE2_NOTCH_Q = 30.0
+PIPE2_LP_HZ = 150.0
+
+
+def _pipe2_freqs(params):
+    return (float(params.get("hp_hz", PIPE2_HP_HZ)),
+            float(params.get("notch_hz", PIPE2_NOTCH_HZ)),
+            float(params.get("notch_q", PIPE2_NOTCH_Q)),
+            float(params.get("lp_hz", PIPE2_LP_HZ)),
+            float(params.get("fs", 2048.0)))
+
+
+def pipe2_scipy(x, state, params):
+    """0.2 Hz HP -> 50 Hz notch -> 150 Hz LP, float64 via scipy.signal.
+
+    One sos cascade rather than three filter calls: same maths, one state
+    array, and it is the form the manual version is written against.
+    """
+    from scipy import signal
+
+    hp_hz, notch_hz, notch_q, lp_hz, fs = _pipe2_freqs(params)
+    if "sos" not in state:
+        nyq = fs / 2.0
+        sections = []
+        if 0 < hp_hz < nyq:
+            sections.append(signal.butter(2, hp_hz / nyq, btype="highpass",
+                                          output="sos"))
+        if 0 < notch_hz < nyq:
+            b, a = signal.iirnotch(notch_hz, notch_q, fs=fs)
+            sections.append(signal.tf2sos(b, a))
+        if 0 < lp_hz < nyq:
+            sections.append(signal.butter(2, lp_hz / nyq, btype="lowpass",
+                                          output="sos"))
+        # Nothing applicable (fs below every corner): an all-pass section, so
+        # the chain stays a filter instead of becoming a special case.
+        state["sos"] = (np.vstack(sections) if sections
+                        else np.array([[1., 0., 0., 1., 0., 0.]]))
+        # From rest, not sosfilt_zi's steady state -- same reason as pipe1.
+        state["zi"] = np.zeros((state["sos"].shape[0], 2))
+
+    xs = _from_wire(x).astype(np.float64)
+    y, state["zi"] = signal.sosfilt(state["sos"], xs, zi=state["zi"])
+    return _to_wire_centred(np.rint(y), x.dtype)
+
+
+def _biquad_scalar(x, g, b1, a1, a2, shift, x1, x2, y1, y2):
+    """Integer biquad, Q-format coefficients, one shift per sample:
+
+        y[n] = (g*(x[n] + x[n-2]) + b1*x[n-1] - a1*y[n-1] - a2*y[n-2]) >> shift
+
+    One kernel, not two: a notch and a Butterworth low-pass are both
+    b = [g, b1, g], so the same recursion covers both stages.
+
+    Coefficients are pre-scaled by 2**shift so the sum stays exact until a
+    single truncating shift at the end -- shifting each term separately throws
+    away most of the precision the narrow notch depends on. Two multipliers
+    and four registers in RTL, with a ~52-bit accumulator at these widths.
+    """
+    out = np.empty(x.shape[0], dtype=np.int64)
+    for i in range(x.shape[0]):
+        xi = x[i]
+        yi = (g * (xi + x2) + b1 * x1 - a1 * y1 - a2 * y2) >> shift
+        x2, x1 = x1, xi
+        y2, y1 = y1, yi
+        out[i] = yi
+    return out, x1, x2, y1, y2
+
+
+_BIQUAD_SHIFT = 20  # coefficient fraction bits; 15 is too coarse for Q = 30
+
+
+def _quantise(b0, b1, a1, a2):
+    one = 1 << _BIQUAD_SHIFT
+    return (int(round(b0 * one)), int(round(b1 * one)),
+            int(round(a1 * one)), int(round(a2 * one)))
+
+
+def _notch_coeffs(f0, q, fs):
+    """RBJ notch, normalised to unity gain away from f0."""
+    w0 = 2.0 * np.pi * f0 / fs
+    cos_w0, alpha = np.cos(w0), np.sin(w0) / (2.0 * q)
+    a0 = 1.0 + alpha
+    return _quantise(1.0 / a0, -2.0 * cos_w0 / a0,
+                     -2.0 * cos_w0 / a0, (1.0 - alpha) / a0)
+
+
+def _lowpass_coeffs(fc, fs):
+    """RBJ 2nd-order Butterworth low-pass (Q = 1/sqrt(2)).
+
+    A biquad rather than another shift filter, because a single pole's corner
+    is quantised to fs/(2*pi*2**s): at fs = 2048 that jumps from 163 Hz (s=1)
+    straight to a bypass (s=0), so there is no 150 Hz to be had -- and 6 dB
+    per octave leaves EMG at 400 Hz barely touched. The high-pass at the other
+    end of the band is the opposite case; see pipe2_manual.
+    """
+    w0 = 2.0 * np.pi * fc / fs
+    cos_w0 = np.cos(w0)
+    alpha = np.sin(w0) / np.sqrt(2.0)
+    a0 = 1.0 + alpha
+    return _quantise((1.0 - cos_w0) / 2.0 / a0, (1.0 - cos_w0) / a0,
+                     -2.0 * cos_w0 / a0, (1.0 - alpha) / a0)
+
+
+def _shift_for(fc, fs):
+    """Nearest single-pole shift for a corner at fc: fc = fs/(2*pi*2**s)."""
+    if fc <= 0:
+        return None
+    return min(max(int(round(np.log2(fs / (2.0 * np.pi * fc)))), 0), 30)
+
+
+def _biquad_kernel():
+    return _compiled(_biquad_scalar, np.zeros(4, dtype=np.int64),
+                     1, 0, 0, 0, 1, 0, 0, 0, 0)
+
+
+def pipe2_manual(x, state, params):
+    """The same chain in integer arithmetic -- this is what becomes RTL.
+
+    Two different structures on purpose, because the two ends of the band are
+    different problems in fixed point:
+
+      HP 0.2 Hz   x - single_pole_lowpass(x): one add, one shift, no
+                  multiplier. A biquad this close to DC needs poles at radius
+                  ~0.9994, and quantising those is where fixed-point filters
+                  go to ring. The price is a corner quantised to a power of
+                  two -- 0.159 Hz at fs = 2048, not 0.2.
+      notch, LP   fixed-point biquads. Their poles sit well away from z = 1,
+                  so Q20 coefficients are plenty, and the LP gets a real
+                  12 dB/octave instead of a single pole's 6.
+
+    Flip to scipy to see what the quantisation costs.
+    """
+    hp_hz, notch_hz, notch_q, lp_hz, fs = _pipe2_freqs(params)
+    nyq = fs / 2.0
+    xs = _from_wire(x)
+
+    if "init" not in state:
+        state["init"] = True
+        state["hp_shift"] = _shift_for(hp_hz, fs) if 0 < hp_hz < nyq else None
+        state["notch"] = (_notch_coeffs(notch_hz, notch_q, fs)
+                          if 0 < notch_hz < nyq else None)
+        state["lp"] = _lowpass_coeffs(lp_hz, fs) if 0 < lp_hz < nyq else None
+        # HP seeded with the first sample, not 0 -- same reason as pipe1.
+        state["hp_y"] = int(xs[0]) if xs.size else 0
+        state["ns"] = (0, 0, 0, 0)      # notch    x1, x2, y1, y2
+        state["ls"] = (0, 0, 0, 0)      # low-pass x1, x2, y1, y2
+
+    if state["hp_shift"] is not None:
+        lp, state["hp_y"] = _get_kernel()(xs, state["hp_y"], state["hp_shift"])
+        xs = xs - lp
+
+    biquad = _biquad_kernel()
+    for coeffs, key in ((state["notch"], "ns"), (state["lp"], "ls")):
+        if coeffs is None:
+            continue
+        g, b1, a1, a2 = coeffs
+        x1, x2, y1, y2 = state[key]
+        xs, x1, x2, y1, y2 = biquad(xs, g, b1, a1, a2, _BIQUAD_SHIFT,
+                                    x1, x2, y1, y2)
+        state[key] = (x1, x2, y1, y2)
+
+    return _to_wire_centred(xs, x.dtype)
+
+
 # An entry is EITHER a bare function -- one fixed thing, no implementation to
 # choose -- OR a {implementation: function} dict offering the scipy/manual
 # pair. The distinction is real, not cosmetic:
@@ -233,6 +421,7 @@ PIPELINES = {
     "bypass": bypass,
     "iir": iir,
     "pipe1": {"manual": pipe1_manual, "scipy": pipe1_scipy},
+    "pipe2": {"manual": pipe2_manual, "scipy": pipe2_scipy},
 }
 
 # What a design pipeline always offers, in dropdown order. Named here so the

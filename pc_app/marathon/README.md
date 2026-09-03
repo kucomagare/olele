@@ -43,8 +43,13 @@ widget inside the same Tk window `plot.py`'s `DualPlot` creates (see its
 right-hand column: Start/Stop, the mode picker and a status line above five
 tabs — **Basic**, **Waveform**, **Noise**, **Board** (live metrics, the
 fabric's filter registers, UART verbosity) and **Local** (each channel's
-pipeline and implementation). `PlotControlPanel` is the bottom bar: view range,
-buffer, frame rate, trigger and Log buffer.
+pipeline and implementation). Everything on the **Noise** tab is per channel:
+five colour layers and four sine generators, each choosing which channels it
+reaches, with its own frequency, phase and level per channel — so the same
+interference can arrive on two leads at a different amplitude and phase,
+which is what a two-channel rejection scheme has to cope with. `PlotControlPanel` is the bottom bar: view range,
+buffer, frame rate, trigger, grid (off / normal / fine — fine subdivides each
+tick into 5, like ECG paper) and Log buffer.
 
 Fields are **batched**: typing or ticking changes only the widget, and
 **Apply** (or Enter in any field) commits the lot in one pass — a `●` on the

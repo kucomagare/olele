@@ -108,6 +108,22 @@ PLOT_TRIGGER_LEVEL = 0.6
 # search for no real benefit.
 PLOT_CAPTURE_FACTOR = 2
 
+# Grid on both channel plots, and how much vertical space separates them
+# (a fraction of the average axes height -- matplotlib's subplots_adjust
+# hspace). The two axes share an x-axis and are meant to be read against each
+# other, so they sit close together with a grid to carry the eye across.
+#
+# PLOT_GRID switches it on and off; PLOT_GRID_MODE picks how dense it is when
+# on. "normal" is the tick gridlines only; "fine" subdivides each of them into
+# 5, the way ECG paper puts five small squares inside every large one -- for
+# reading an interval off the screen rather than just lining the two channels
+# up. Both live-editable from the plot bar.
+PLOT_GRID = True
+PLOT_GRID_MODE = "normal"
+PLOT_GRID_MODES = ("normal", "fine")
+PLOT_GRID_FINE_DIVISIONS = 5
+PLOT_HSPACE = 0.07
+
 
 # NOTE: the live app deliberately has NO spectrum view. It was built, it
 # worked, and it was the wrong place for it: an FFT on a rolling buffer costs
@@ -362,43 +378,88 @@ ECG_RANDOM_SEED = 1         # Base seed. ch2 uses ECG_RANDOM_SEED + 1, so the
 # that layer alone is 10% of the ECG's own swing. Not tied to uint16
 # directly since it's relative to the signal, not the wire -- ECG_AMPLITUDE
 # still governs the final (ECG + noise) mix's wire range.
-ECG_NOISE_VIOLET_ENABLED = False
-ECG_NOISE_VIOLET_LEVEL = 0.1
-ECG_NOISE_BLUE_ENABLED = False
-ECG_NOISE_BLUE_LEVEL = 0.1
-ECG_NOISE_WHITE_ENABLED = False
-ECG_NOISE_WHITE_LEVEL = 0.1
-ECG_NOISE_PINK_ENABLED = False
-ECG_NOISE_PINK_LEVEL = 0.1
-ECG_NOISE_BROWN_ENABLED = False
-ECG_NOISE_BROWN_LEVEL = 0.1
+# Per channel, like the sine generators below: each colour is enabled and
+# scaled separately for ch1 and ch2. The two are decorrelated anyway (distinct
+# random_state per layer per channel), so this adds the ability to have a
+# colour on one lead and not the other, or at a different strength -- an
+# electrode going bad on one lead, rather than the same noise everywhere.
+ECG_NOISE_VIOLET_CH1_ENABLED = False
+ECG_NOISE_VIOLET_CH1_LEVEL = 0.1
+ECG_NOISE_VIOLET_CH2_ENABLED = False
+ECG_NOISE_VIOLET_CH2_LEVEL = 0.1
+ECG_NOISE_BLUE_CH1_ENABLED = False
+ECG_NOISE_BLUE_CH1_LEVEL = 0.1
+ECG_NOISE_BLUE_CH2_ENABLED = False
+ECG_NOISE_BLUE_CH2_LEVEL = 0.1
+ECG_NOISE_WHITE_CH1_ENABLED = False
+ECG_NOISE_WHITE_CH1_LEVEL = 0.1
+ECG_NOISE_WHITE_CH2_ENABLED = False
+ECG_NOISE_WHITE_CH2_LEVEL = 0.1
+ECG_NOISE_PINK_CH1_ENABLED = False
+ECG_NOISE_PINK_CH1_LEVEL = 0.1
+ECG_NOISE_PINK_CH2_ENABLED = False
+ECG_NOISE_PINK_CH2_LEVEL = 0.1
+ECG_NOISE_BROWN_CH1_ENABLED = False
+ECG_NOISE_BROWN_CH1_LEVEL = 0.1
+ECG_NOISE_BROWN_CH2_ENABLED = False
+ECG_NOISE_BROWN_CH2_LEVEL = 0.1
 
-# Two independent sine-wave interference generators, added on top of the
-# ECG (and any colored noise above) -- e.g. to simulate powerline hum
-# (50/60 Hz) or another discrete periodic artifact, as opposed to the
-# colored noise's broadband randomness. See signal_gen.py's
-# _simulate_raw(). Evaluated at t = sample_index / ECG_SAMPLING_RATE, the
-# same time base the raw ECG buffer itself is built on, so a given
-# frequency is exact regardless of playback speed (SEND_RATE/CHUNK_SIZE)
-# -- that's the "in sync with the sampling rate" this was asked for.
-# Both channels get the identical sine (same freq/phase/level, no
-# per-channel decorrelation like the colored-noise layers use) since real
-# interference like mains hum affects every channel the same way.
+# Four independent sine-wave interference generators, each configured
+# SEPARATELY PER CHANNEL -- e.g. powerline hum (50/60 Hz) or another discrete
+# periodic artifact, as opposed to the colored noise's broadband randomness.
+# See signal_gen.py's _sine_contribution().
 #
-# _LEVEL is the sine's amplitude, as a fraction of the *clean ECG signal's*
-# own peak-to-peak (same convention as ECG_NOISE_*_LEVEL above) -- so the
-# sine's own peak-to-peak swing is 2 * _LEVEL * (ECG's ptp).
-# _PHASE is in degrees for readability; converted to radians in
-# signal_gen.py.
-ECG_SINE1_ENABLED = False
-ECG_SINE1_FREQ = 50.0    # Hz -- default matches EU/UK/most-of-world mains
-ECG_SINE1_PHASE = 0.0    # degrees
-ECG_SINE1_LEVEL = 0.1
+# Per channel means per channel in everything: ch1 and ch2 each have their own
+# enable, frequency, phase and level for every generator. Real interference
+# does not arrive identically on two leads -- it couples in with a different
+# amplitude and a different phase, and a phase difference between the two is
+# exactly the thing a two-channel rejection scheme has to cope with. Set both
+# channels the same to get common-mode interference back.
+#
+# Evaluated at t = sample_index / ECG_SAMPLING_RATE, the same time base the raw
+# ECG buffer is built on, so a frequency is exact regardless of playback speed
+# (SEND_RATE/CHUNK_SIZE).
+#
+# _LEVEL is the sine's amplitude as a fraction of the *clean ECG's* own
+# peak-to-peak (same convention as ECG_NOISE_*_LEVEL above), so the sine's own
+# peak-to-peak swing is 2 * _LEVEL * (ECG ptp). The reference is ch1's clean
+# ECG for both channels, so equal levels mean equal amplitudes.
+# _PHASE is in degrees; converted to radians in signal_gen.py.
+ECG_SINE1_CH1_ENABLED = False
+ECG_SINE1_CH1_FREQ = 50.0     # Hz -- EU/UK/most-of-world mains
+ECG_SINE1_CH1_PHASE = 0.0     # degrees
+ECG_SINE1_CH1_LEVEL = 0.1
+ECG_SINE1_CH2_ENABLED = False
+ECG_SINE1_CH2_FREQ = 50.0
+ECG_SINE1_CH2_PHASE = 0.0
+ECG_SINE1_CH2_LEVEL = 0.1
 
-ECG_SINE2_ENABLED = False
-ECG_SINE2_FREQ = 60.0    # Hz -- default matches US/North America mains
-ECG_SINE2_PHASE = 0.0    # degrees
-ECG_SINE2_LEVEL = 0.1
+ECG_SINE2_CH1_ENABLED = False
+ECG_SINE2_CH1_FREQ = 60.0     # Hz -- US/North America mains
+ECG_SINE2_CH1_PHASE = 0.0
+ECG_SINE2_CH1_LEVEL = 0.1
+ECG_SINE2_CH2_ENABLED = False
+ECG_SINE2_CH2_FREQ = 60.0
+ECG_SINE2_CH2_PHASE = 0.0
+ECG_SINE2_CH2_LEVEL = 0.1
+
+ECG_SINE3_CH1_ENABLED = False
+ECG_SINE3_CH1_FREQ = 100.0    # Hz -- 2nd harmonic of 50, what a notch at the
+ECG_SINE3_CH1_PHASE = 0.0     # fundamental alone leaves behind
+ECG_SINE3_CH1_LEVEL = 0.05
+ECG_SINE3_CH2_ENABLED = False
+ECG_SINE3_CH2_FREQ = 100.0
+ECG_SINE3_CH2_PHASE = 0.0
+ECG_SINE3_CH2_LEVEL = 0.05
+
+ECG_SINE4_CH1_ENABLED = False
+ECG_SINE4_CH1_FREQ = 150.0    # Hz -- 3rd harmonic, and pipe2's LP corner
+ECG_SINE4_CH1_PHASE = 0.0
+ECG_SINE4_CH1_LEVEL = 0.05
+ECG_SINE4_CH2_ENABLED = False
+ECG_SINE4_CH2_FREQ = 150.0
+ECG_SINE4_CH2_PHASE = 0.0
+ECG_SINE4_CH2_LEVEL = 0.05
 
 # Fraction (0.0-1.0) of each channel's wire dtype range (uint16 -> 0..65535)
 # that the signal's peak-to-peak amplitude occupies, centered at the
