@@ -6,6 +6,7 @@
 # in the client. Presentation only -- the analysis itself is in sat.py.
 
 import tkinter as tk
+import tkinter.font as tkfont
 from tkinter import filedialog, messagebox, ttk
 
 import matplotlib
@@ -290,8 +291,8 @@ class SATWindow:
         return row + 1
 
     def _build_controls(self):
-        # Apply/Defaults packed first from the bottom, then a scrolling
-        # body -- reversed, Tk drops the bottom button entirely rather than
+        # Apply/Defaults packed first from the bottom, then the notebook --
+        # reversed, Tk drops the bottom button entirely rather than
         # clipping it once the column exceeds the window. See guiutil.ScrollFrame.
         recompute = ttk.Button(self.controls, text="Apply / Recompute",
                                command=self.refresh)
@@ -302,25 +303,22 @@ class SATWindow:
         _Tooltip(defaults,
                  "Put every field back to what this window opened with "
                  "(sat.py's defaults, unless overridden on the command "
-                 "line) and recompute. The loaded dump is kept.")
+                 "line) and recompute. The loaded dump is kept, and the "
+                 "filter corners go back to the ones it recorded.")
         _Tooltip(recompute,
-                 "Apply every field above and redraw. Nothing typed or "
-                 "selected here takes effect until this is pressed (Enter "
-                 "in any field does the same). Choosing a different dump "
-                 "loads it immediately -- that is picking what to look at, "
-                 "not changing how it is analysed.")
+                 "Apply every field in every tab and redraw. Nothing typed "
+                 "or selected takes effect until this is pressed (Enter in "
+                 "any field does the same). Choosing a different dump loads "
+                 "it immediately -- that is picking what to look at, not "
+                 "changing how it is analysed.")
 
-        scroller = guiutil.ScrollFrame(self.controls, max_req_height=320,
-                                       padding=0)
-        scroller.outer.pack(side="top", fill="both", expand=True)
-        c = scroller.body
-        ttk.Label(c, text="Analysis", font=("", 10, "bold")).pack(anchor="w", pady=(0, 6))
-
-        # --- view -----------------------------------------------------
-        v = ttk.Frame(c)
-        v.pack(fill="x", pady=(0, 8))
-        ttk.Label(v, text="View").grid(row=0, column=0, sticky="w")
-        view_box = ttk.Combobox(v, textvariable=self._view, width=10,
+        # View sits above the notebook rather than in it: it decides which
+        # tabs exist, so it cannot live inside one of them.
+        head = ttk.Frame(self.controls, padding=(0, 0, 0, 6))
+        head.pack(side="top", fill="x")
+        ttk.Label(head, text="View", font=("", 10, "bold")).grid(
+            row=0, column=0, sticky="w")
+        view_box = ttk.Combobox(head, textvariable=self._view, width=10,
                                 state="readonly", values=list(VIEWS))
         view_box.grid(row=0, column=1, sticky="e")
         view_box.bind("<<ComboboxSelected>>", lambda _e: self._switch_view())
@@ -328,14 +326,87 @@ class SATWindow:
                  "capture: the recorded buffer -- time traces and their "
                  "spectra, plus the model comparison.\n\n"
                  "response: the pipelines themselves -- amplitude and phase "
-                 "against frequency, measured by driving each one. That does "
-                 "not use the capture's samples at all, only its sample rate "
-                 "and the corner frequencies it was recorded with.")
-        v.columnconfigure(0, weight=1)
+                 "against frequency, measured by driving each one.\n\n"
+                 "The tabs below change with it: each view gets the controls "
+                 "that act on it and no others. Settings in the hidden tabs "
+                 "keep their values, so switching back finds them unchanged.")
+        head.columnconfigure(0, weight=1)
 
-        # --- file -----------------------------------------------------
-        f = ttk.LabelFrame(c, text="Dump", padding=6)
-        f.pack(fill="x", pady=(0, 8))
+        scroller = guiutil.ScrollFrame(self.controls, max_req_height=360,
+                                       padding=0)
+        scroller.outer.pack(side="top", fill="both", expand=True)
+        # ttk sizes a notebook to its widest PAGE and never consults its tab
+        # strip, so a view with one tab more than the pages are wide gets the
+        # last tab silently cut in half. Nothing exposes the strip's width,
+        # so it is measured from the font here and reserved as a floor.
+        style = ttk.Style()
+        style.configure("SAT.TNotebook.Tab", padding=(6, 3))
+        self._tabs = ttk.Notebook(scroller.body, style="SAT.TNotebook")
+        self._tabs.pack(fill="both", expand=True)
+
+        # Every tab is built once and stays built; _switch_view only adds
+        # and forgets them. Rebuilding per view would drop widget state and
+        # flicker, and the panels are cheap to keep.
+        self._tab_dump = self._build_dump_tab()
+        self._tab_capture_plot = self._build_capture_plot_tab()
+        self._tab_model = self._build_model_tab()
+        self._tab_curves = self._build_curves_tab()
+        self._tab_measure = self._build_measure_tab()
+        self._tab_response_plot = self._build_response_plot_tab()
+        self._switch_view(redraw=False)
+        # Once geometry has settled, so the pages report real widths.
+        self.controls.after_idle(self._reserve_tab_strip)
+
+    def _reserve_tab_strip(self):
+        """Widen the notebook, if needed, so the busiest view's tab strip
+        fits.
+
+        Measured rather than guessed: label font and tab padding both come
+        from the live theme, so this holds wherever it runs rather than only
+        where it was tuned. Every page is sized, not just the current view's
+        -- otherwise the column would change width on each view switch.
+        """
+        style = ttk.Style()
+        font = tkfont.Font(font=style.lookup("TNotebook.Tab", "font")
+                           or "TkDefaultFont")
+        padding = style.lookup("SAT.TNotebook.Tab", "padding")
+        try:
+            per_tab = 2 * int(str(padding).split()[0])
+        except (TypeError, ValueError, IndexError):
+            per_tab = 12
+
+        was = self._view.get()
+        strip = 0
+        for view in VIEWS:
+            self._view.set(view)
+            strip = max(strip, sum(font.measure(label) + per_tab
+                                   for _page, label in self._view_tabs()))
+        self._view.set(was)
+        pages = max(page.winfo_reqwidth() for page in
+                    (self._tab_dump, self._tab_capture_plot, self._tab_model,
+                     self._tab_curves, self._tab_measure,
+                     self._tab_response_plot))
+        # The allowance is deliberately generous: the font measurement runs
+        # a few px under what ttk actually lays out, and being short clips a
+        # tab whereas being long only widens the column slightly. Pages
+        # usually win anyway; the strip matters for the busiest view.
+        self._tabs.configure(width=max(pages, strip + 16))
+
+    def _tab(self):
+        """A fresh page for the notebook. Not added to it here -- which
+        pages are shown is _switch_view's business."""
+        frame = ttk.Frame(self._tabs, padding=8)
+        frame.columnconfigure(0, weight=1)
+        return frame
+
+    # --- tabs ---------------------------------------------------------
+    def _build_dump_tab(self):
+        """Which capture is loaded. Shown in BOTH views, deliberately: the
+        response view reads the dump's sample rate, its filter corners and
+        (for the overlays) its samples, so being unable to change it there
+        would mean leaving the view to do it. As a tab it costs no space
+        until you want it, which was the actual problem with it."""
+        f = self._tab()
         self._file_box = ttk.Combobox(f, textvariable=self._file, width=24,
                                       state="readonly")
         self._file_box.grid(row=0, column=0, columnspan=2, sticky="ew", pady=2)
@@ -343,7 +414,9 @@ class SATWindow:
         _Tooltip(self._file_box,
                  "Dumps written by the client's 'Log buffer' button, newest "
                  "first. Each one carries its own settings sidecar, which is "
-                 "where the metadata below comes from.")
+                 "where the sample rate, the board's shift register and the "
+                 "filter corners come from -- so it feeds the response view "
+                 "too, not just the capture view.")
         ttk.Button(f, text="Rescan", command=self.reload_dumps).grid(
             row=1, column=0, sticky="ew", pady=(4, 0), padx=(0, 2))
         ttk.Button(f, text="Open…", command=self.open_file).grid(
@@ -356,18 +429,17 @@ class SATWindow:
                  "settings sidecar -- everything the client's 'Log buffer' "
                  "button has produced. Asks for confirmation first. Cannot "
                  "be undone.")
-        f.columnconfigure(0, weight=1)
         f.columnconfigure(1, weight=1)
+        return f
 
-        # --- spectrum -------------------------------------------------
-        s = self._spectrum_frame = ttk.LabelFrame(c, text="Spectrum", padding=6)
-        s.pack(fill="x", pady=(0, 8))
-        ttk.Label(s, text="Size").grid(row=0, column=0, sticky="w", pady=2)
-        size_box = ttk.Combobox(s, textvariable=self._fft_size, width=8,
+    def _build_capture_plot_tab(self):
+        """What the capture view's spectra are computed over and shown on."""
+        f = self._tab()
+        ttk.Label(f, text="Size").grid(row=0, column=0, sticky="w", pady=2)
+        size_box = ttk.Combobox(f, textvariable=self._fft_size, width=8,
                                 state="readonly",
                                 values=[_size_label(v) for v in FFT_SIZES])
         size_box.grid(row=0, column=1, sticky="e", pady=2)
-
         _Tooltip(size_box,
                  "How many of the newest samples are transformed. \"capture\" "
                  "uses the whole dump. Resolution is rate/N and is shown in "
@@ -375,30 +447,32 @@ class SATWindow:
                  "interpolate between real bins and pull the apparent noise "
                  "floor down.")
         row = 1
-        row = self._entry(s, row, "F max (Hz)", self._fmax,
-                          "Frequency axis limit for the capture view's "
-                          "spectra. 0 = Nyquist. The response view has its "
-                          "own F min / F max, since there the limits choose "
-                          "what gets measured and not just what is shown.")
-        row = self._entry(s, row, "dB min", self._db_min,
-                          "Bottom of the magnitude axis. dBFS here; in the "
-                          "response view the same number is the bottom of the "
-                          "gain axis, in dB. Shared by both.")
-        row = self._entry(s, row, "Peak from (Hz)", self._peak_fmin,
+        row = self._entry(f, row, "F max (Hz)", self._fmax,
+                          "Frequency axis limit for the spectra. 0 = Nyquist. "
+                          "The response view has its own F min / F max, since "
+                          "there the limits choose what gets measured and not "
+                          "just what is shown.")
+        row = self._entry(f, row, "dB min", self._db_min,
+                          "Bottom of the magnitude axis, dBFS. 0 dB is a sine "
+                          "spanning the full wire range. Shared with the "
+                          "response view's Plot tab, where the same number is "
+                          "the bottom of the gain axis.")
+        row = self._entry(f, row, "Peak from (Hz)", self._peak_fmin,
                           "Ignore bins below this when locating the peak. "
                           "Raise it above the ECG band (say 40) to measure an "
                           "injected tone -- otherwise the ECG's harmonics win, "
                           "because they are genuinely stronger.")
+        return f
 
-        # --- model ----------------------------------------------------
-        m = self._model_frame = ttk.LabelFrame(c, text="Reference model",
-                                               padding=6)
-        m.pack(fill="x", pady=(0, 8))
+    def _build_model_tab(self):
+        """The capture view's 'did the hardware compute what I think'
+        comparison, per channel."""
+        f = self._tab()
         row = 0
         for ch in range(2):
-            ttk.Label(m, text=f"Ch{ch + 1} pipe").grid(
+            ttk.Label(f, text=f"Ch{ch + 1} pipe").grid(
                 row=row, column=0, sticky="w", pady=2)
-            pipe_box = ttk.Combobox(m, textvariable=self._pipe[ch], width=8,
+            pipe_box = ttk.Combobox(f, textvariable=self._pipe[ch], width=8,
                                     state="readonly", values=list(_pipes()))
             pipe_box.grid(row=row, column=1, sticky="e", pady=2)
             # Retargets the impl dropdown only, doesn't recompute.
@@ -413,12 +487,11 @@ class SATWindow:
                      "over the output; where they separate is the answer.")
             row += 1
 
-            ttk.Label(m, text=f"Ch{ch + 1} impl").grid(
+            ttk.Label(f, text=f"Ch{ch + 1} impl").grid(
                 row=row, column=0, sticky="w", pady=(0, 6))
-            impl_box = ttk.Combobox(m, textvariable=self._impl[ch], width=8,
+            impl_box = ttk.Combobox(f, textvariable=self._impl[ch], width=8,
                                     state="readonly")
             impl_box.grid(row=row, column=1, sticky="e", pady=(0, 6))
-
             self._impl_combo.append(impl_box)
             _Tooltip(impl_box,
                      "scipy: the float64 design. manual: the hand-written "
@@ -428,110 +501,123 @@ class SATWindow:
                      "fixed things with no implementation to choose.")
             self._sync_impl(ch)
             row += 1
-        row = self._entry(m, row, "Shift", self._shift,
+        row = self._entry(f, row, "Shift", self._shift,
                           "Blank = whatever the board's register actually "
                           "held, read from the sidecar. Set it to try a "
                           "different one against the same capture.")
-        row = self._entry(m, row, "Settle", self._settle,
+        row = self._entry(f, row, "Settle", self._settle,
                           "Samples skipped before scoring. The model starts "
                           "from zeroed state and the board did not, so the "
                           "first samples disagree for a reason that says "
                           "nothing about the algorithm.")
+        return f
 
-        # --- response -------------------------------------------------
-        r = self._response_frame = ttk.LabelFrame(c, text="Response curves",
-                                                  padding=6)
-        r.pack(fill="x", pady=(0, 8))
-        ttk.Label(r, text="Plot these, overlaid:").grid(
+    def _build_curves_tab(self):
+        """Which pipelines the response view draws, and the corners they
+        run with -- 'which filters, and configured how'."""
+        f = self._tab()
+        ttk.Label(f, text="Draw these, overlaid:").grid(
             row=0, column=0, columnspan=2, sticky="w", pady=(0, 2))
+        # A row per pipeline, so manual and scipy sit side by side -- they
+        # are read as a pair, and the difference between them is the reason
+        # both exist. Stacking all six in one column also made this the one
+        # tab tall enough to need scrolling.
+        groups = {}
+        for name in self._curves:
+            groups.setdefault(name.split(":")[0], []).append(name)
+        single = [g[0] for g in groups.values() if len(g) == 1]
+        rows = ([single[i:i + 2] for i in range(0, len(single), 2)]
+                + [g for g in groups.values() if len(g) > 1])
+
         row = 1
-        for name, var in self._curves.items():
-            box = ttk.Checkbutton(r, text=name, variable=var)
-            box.grid(row=row, column=0, columnspan=2, sticky="w")
-            _Tooltip(box,
-                     f"Measure {name} and draw it on the amplitude and phase "
-                     f"axes. Tick as many as you like -- they share the axes, "
-                     f"one colour per pipeline and a dashed line for the "
-                     f"integer (manual) arithmetic, so the distance between a "
-                     f"solid and a dashed line of the same colour is what "
-                     f"fixed point costs.")
+        for names in rows:
+            for col, name in enumerate(names):
+                box = ttk.Checkbutton(f, text=name, variable=self._curves[name])
+                box.grid(row=row, column=col, sticky="w")
+                _Tooltip(box,
+                         f"Measure {name} and draw it on the amplitude and "
+                         f"phase axes. Tick as many as you like -- they share "
+                         f"the axes, one colour per pipeline and a dashed line "
+                         f"for the integer (manual) arithmetic, so the distance "
+                         f"between a solid and a dashed line of the same "
+                         f"colour is what fixed point costs.")
             row += 1
-        btns = ttk.Frame(r)
+        btns = ttk.Frame(f)
         btns.grid(row=row, column=0, columnspan=2, sticky="ew", pady=(4, 6))
         ttk.Button(btns, text="All", width=6,
-                   command=lambda: self._set_curves(True)).pack(side="left",
-                                                                expand=True,
-                                                                fill="x")
+                   command=lambda: self._set_curves(True)).pack(
+                       side="left", expand=True, fill="x")
         ttk.Button(btns, text="None", width=6,
-                   command=lambda: self._set_curves(False)).pack(side="left",
-                                                                 expand=True,
-                                                                 fill="x")
+                   command=lambda: self._set_curves(False)).pack(
+                       side="left", expand=True, fill="x")
         row += 1
 
-        ttk.Label(r, text="Size").grid(row=row, column=0, sticky="w", pady=2)
-        resp_size = ttk.Combobox(r, textvariable=self._resp_size, width=8,
+        ttk.Separator(f, orient="horizontal").grid(
+            row=row, column=0, columnspan=2, sticky="ew", pady=(4, 6))
+        row += 1
+        tunable_tip = (
+            "The pipeline's own corner, for the response measurement only. "
+            "Filled in from the loaded capture (or the pipeline's own "
+            "default) and refilled whenever a dump is loaded, so it shows "
+            "the filter that actually ran. Type a number to sweep it and "
+            "watch what moves.\n\n"
+            "It deliberately does NOT reach the capture view's Model "
+            "comparison. Scoring a recording against a filter that never ran "
+            "on it would not mean anything; asking what a filter DOES at a "
+            "different corner is a fair question, and that is this view.")
+        for _sidecar, key, label in sat.TUNABLES:
+            row = self._entry(f, row, label, self._tunable[key], tunable_tip)
+        from_capture = ttk.Button(f, text="Corners from capture",
+                                  command=self._reset_tunables)
+        from_capture.grid(row=row, column=0, columnspan=2, sticky="ew",
+                          pady=(4, 0))
+        _Tooltip(from_capture,
+                 "Put the corners back to what the loaded dump's sidecar "
+                 "recorded, and recompute.")
+        return f
+
+    def _build_measure_tab(self):
+        """How hard the response view looks -- excitation length, how many
+        tones, how hard it drives, how many realisations."""
+        f = self._tab()
+        ttk.Label(f, text="Size").grid(row=0, column=0, sticky="w", pady=2)
+        resp_size = ttk.Combobox(f, textvariable=self._resp_size, width=9,
                                  state="readonly",
                                  values=[str(v) for v in sat.RESPONSE_SIZES])
-        resp_size.grid(row=row, column=1, sticky="e", pady=2)
+        resp_size.grid(row=0, column=1, sticky="e", pady=2)
         resp_size.bind("<<ComboboxSelected>>", lambda _e: self._pin_size())
         _Tooltip(resp_size,
                  "Length of one excitation period, in samples. This is what "
                  "sets how low the plot can reach: the lowest frequency that "
                  "exists at all is one bin, rate/Size — 0.125 Hz at 16384 "
                  "and 2048 Hz, 0.001 Hz at the top of this list.\n\n"
-                 "You do not normally have to set it. Lowering F min raises "
-                 "this on its own, to whatever that frequency needs, and "
-                 "shows you the value it used — the cost is real (about "
-                 "1.6 s and 200 MB per curve at the largest) so it is not "
-                 "hidden. Set it directly only to buy resolution you have "
-                 "not asked for by another route.")
-        row += 1
-        row = self._entry(r, row, "Tones", self._resp_points,
+                 "You do not normally have to set it. Lowering F min (Plot "
+                 "tab) raises this on its own, to whatever that frequency "
+                 "needs, and shows you the value it used — the cost is real "
+                 "(about 1.6 s and 200 MB per curve at the largest) so it is "
+                 "not hidden. Set it directly only to buy resolution you "
+                 "have not asked for by another route.")
+        row = 1
+        row = self._entry(f, row, "Tones", self._resp_points,
                           "How many tones the excitation carries, spread "
                           "logarithmically. They are snapped to whole FFT "
                           "bins and duplicates dropped, so the low end thins "
                           "out on its own -- the report says how many "
                           "actually landed. Extra tones are always clustered "
-                          "on the corner frequencies the capture was recorded "
-                          "with, so a narrow notch gets measured rather than "
-                          "stepped over.")
-        row = self._entry(r, row, "Drive (% FS)", self._resp_drive,
+                          "on the corner frequencies from the Curves tab, so "
+                          "a narrow notch gets measured rather than stepped "
+                          "over.")
+        row = self._entry(f, row, "Drive (% FS)", self._resp_drive,
                           "Peak excitation as a percentage of full scale. "
                           "Not cosmetic: an integer pipeline's response "
                           "depends on level, and a drive small enough to sit "
                           "in the truncation dead zone will measure as no "
                           "filter at all. Too high and it clips.")
-        row = self._entry(r, row, "Averages", self._resp_averages,
+        row = self._entry(f, row, "Averages", self._resp_averages,
                           "Realisations averaged, each with fresh random "
                           "phases. More is a cleaner curve and a lower floor, "
                           "at proportional cost.")
-        band_tip = ("The band the response is measured over. These bound the "
-                    "excitation, not just the axis, so outside them nothing "
-                    "is asked and nothing is drawn. Narrowing spends the same "
-                    "number of tones over less frequency, which is how you "
-                    "get resolution where you want it: 40-60 Hz with 200 "
-                    "tones resolves the notch's shape properly.\n\n"
-                    "Both ends stop at a hard limit, and they are different "
-                    "limits with different answers.\n\n"
-                    "Below, it is one bin — rate/Size. Lowering F min simply "
-                    "raises Size for you until it fits, so this field does "
-                    "reach as low as you ask, down to the longest period "
-                    "offered; watch the Size box follow it.\n\n"
-                    "Above, it is Nyquist — half the Rate — and nothing "
-                    "reaches past it, because a sampled signal does not "
-                    "carry anything above it. Raising F max alone will not "
-                    "move it. Raise RATE instead, which asks the different "
-                    "question of what the filter does at a faster sample "
-                    "rate.\n\n"
-                    "Asking for more than either is not an error and is not "
-                    "silently ignored: the axis stops where the measurement "
-                    "does, so there is never blank space that reads as "
-                    "missing data, and the report says which wall you hit. "
-                    "0 means the limit itself. (dB min is still shared with "
-                    "the Spectrum box above.)")
-        row = self._entry(r, row, "F min (Hz)", self._resp_fmin, band_tip)
-        row = self._entry(r, row, "F max (Hz)", self._resp_fmax, band_tip)
-        row = self._entry(r, row, "Rate (Hz)", self._resp_rate,
+        row = self._entry(f, row, "Rate (Hz)", self._resp_rate,
                           "Sample rate to run the pipelines at. Blank = the "
                           "capture's, which is the honest default.\n\n"
                           "This is the ONLY way past the high end of the "
@@ -542,85 +628,55 @@ class SATWindow:
                           "filter do at 8192 Hz. The corners stay where they "
                           "are in Hz, so the digital filter really is a "
                           "different one, which is the interesting part.")
+        return f
 
-        ttk.Separator(r, orient="horizontal").grid(
+    def _build_response_plot_tab(self):
+        """The response view's axes and what else gets drawn on them."""
+        f = self._tab()
+        band_tip = ("The band the response is measured over. These bound the "
+                    "excitation, not just the axis, so outside them nothing "
+                    "is asked and nothing is drawn. Narrowing spends the same "
+                    "number of tones over less frequency, which is how you "
+                    "get resolution where you want it: 40-60 Hz with 200 "
+                    "tones resolves the notch's shape properly.\n\n"
+                    "Both ends stop at a hard limit, and they are different "
+                    "limits with different answers. Below, it is one bin — "
+                    "rate/Size — so lowering F min simply raises Size (Measure "
+                    "tab) for you until it fits; watch it follow. Above, it "
+                    "is Nyquist, half the Rate, and nothing reaches past it: "
+                    "raise RATE on the Measure tab instead, which asks what "
+                    "the filter does at a faster sample rate.\n\n"
+                    "Asking for more than either is not an error and is not "
+                    "silently ignored: the axis stops where the measurement "
+                    "does, so there is never blank space that reads as "
+                    "missing data, and the report names the wall you hit. "
+                    "0 means the limit itself.")
+        row = 0
+        row = self._entry(f, row, "F min (Hz)", self._resp_fmin, band_tip)
+        row = self._entry(f, row, "F max (Hz)", self._resp_fmax, band_tip)
+        row = self._entry(f, row, "dB min", self._db_min,
+                          "Bottom of the amplitude axis, in dB of gain (0 dB "
+                          "is unity). Shared with the capture view's Plot "
+                          "tab, where the same number is dBFS.")
+
+        ttk.Separator(f, orient="horizontal").grid(
             row=row, column=0, columnspan=2, sticky="ew", pady=(8, 4))
         row += 1
-        tunable_tip = (
-            "The pipeline's own corner, for the response measurement only. "
-            "Blank means the loaded capture's own value -- so left empty "
-            "these follow whichever dump is open, and the curves show the "
-            "filter that actually ran. Whatever was used is printed in the "
-            "report as 'asked for'. Type a number to sweep a corner and see "
-            "what it does.\n\n"
-            "It deliberately does NOT reach the 'Reference model' "
-            "comparison in the capture view. Scoring a recording against a "
-            "filter that never ran on it would not mean anything; asking "
-            "what a filter DOES at a different corner is a fair question, "
-            "and that is this view.")
-        for _sidecar, key, label in sat.TUNABLES:
-            row = self._entry(r, row, label, self._tunable[key], tunable_tip)
-        from_capture = ttk.Button(r, text="Corners from capture",
-                                  command=self._reset_tunables)
-        from_capture.grid(row=row, column=0, columnspan=2, sticky="ew",
-                          pady=(4, 0))
-        _Tooltip(from_capture,
-                 "Put the four corners back to what the loaded dump's "
-                 "sidecar recorded, and recompute.")
-        row += 1
-        floor_box = ttk.Checkbutton(r, text="Noise + distortion floor",
+        floor_box = ttk.Checkbutton(f, text="Noise + distortion floor",
                                     variable=self._resp_floor)
-        floor_box.grid(row=row, column=0, columnspan=2, sticky="w", pady=(4, 0))
+        floor_box.grid(row=row, column=0, columnspan=2, sticky="w")
         _Tooltip(floor_box,
                  "Dotted: what came out on the bins where nothing was put in. "
                  "Nothing put energy there, so it is the pipeline's own "
                  "truncation noise and distortion, referred to the drive "
                  "level. Flat and low for scipy; for manual it is the real "
                  "bottom of the plot -- attenuation below this line is not "
-                 "attenuation you get.")
+                 "attenuation you get. Only drawn when some of it is above "
+                 "dB min.")
         row += 1
-        ideal_box = ttk.Checkbutton(r, text="Design curve (from sos)",
+        ideal_box = ttk.Checkbutton(f, text="Design curve (from sos)",
                                     variable=self._resp_ideal)
         ideal_box.grid(row=row, column=0, columnspan=2, sticky="w")
-        row += 1
-
-        ttk.Separator(r, orient="horizontal").grid(
-            row=row, column=0, columnspan=2, sticky="ew", pady=(8, 4))
-        row += 1
-        ttk.Label(r, text="Overlay capture").grid(row=row, column=0, sticky="w",
-                                                  pady=2)
-        overlay_box = ttk.Combobox(r, textvariable=self._overlay, width=9,
-                                   state="readonly", values=list(OVERLAYS))
-        overlay_box.grid(row=row, column=1, sticky="e", pady=2)
-        _Tooltip(overlay_box,
-                 "Put the loaded capture on the response axes. Two different "
-                 "things, because they are two different quantities:\n\n"
-                 "gain — the recording's OWN in/out ratio, band by band. "
-                 "That is a gain in dB, the same quantity the response "
-                 "curves are, so it goes on the same axis and compares "
-                 "directly: it is what the run actually delivered against "
-                 "what the model says it should. Drawn in black/grey with "
-                 "markers, and it stops where the capture stops being able "
-                 "to answer.\n\n"
-                 "spectrum — the input's dBFS level, on a second axis on the "
-                 "right. That is a LEVEL, not a gain, and the two are not "
-                 "comparable as numbers. It is there for a different "
-                 "question: is the signal actually where the filter is? Does "
-                 "the 50 Hz notch sit on a real mains peak in this "
-                 "recording, is the drift above or below the high-pass "
-                 "corner. The right axis is given the same dB span as the "
-                 "left, so slopes on it mean what they look like.")
-        row += 1
-        ttk.Label(r, text="Overlay from").grid(row=row, column=0, sticky="w",
-                                               pady=2)
-        overlay_ch_box = ttk.Combobox(r, textvariable=self._overlay_ch, width=9,
-                                      state="readonly",
-                                      values=list(OVERLAY_CHANNELS))
-        overlay_ch_box.grid(row=row, column=1, sticky="e", pady=2)
-        _Tooltip(overlay_ch_box,
-                 "Which channel the overlay is taken from. The two channels "
-                 "can have run different pipelines, so 'both' is two "
-                 "different measurements, not one measured twice.")
         _Tooltip(ideal_box,
                  "Thin black: the transfer function computed straight from "
                  "the designed coefficients, for the pipelines that keep an "
@@ -628,24 +684,83 @@ class SATWindow:
                  "measurement itself -- if it does not sit on top of the "
                  "measured scipy curve, distrust the measurement, not the "
                  "filter.")
-        r.columnconfigure(0, weight=1)
+        row += 1
 
-        self._switch_view(redraw=False)
+        ttk.Separator(f, orient="horizontal").grid(
+            row=row, column=0, columnspan=2, sticky="ew", pady=(8, 4))
+        row += 1
+        ttk.Label(f, text="Overlay capture").grid(row=row, column=0,
+                                                  sticky="w", pady=2)
+        overlay_box = ttk.Combobox(f, textvariable=self._overlay, width=9,
+                                   state="readonly", values=list(OVERLAYS))
+        overlay_box.grid(row=row, column=1, sticky="e", pady=2)
+        _Tooltip(overlay_box,
+                 "Put the loaded capture (Dump tab) on the response axes. "
+                 "Two different things, because they are two different "
+                 "quantities:\n\n"
+                 "gain — the recording's OWN in/out ratio, band by band. "
+                 "That is a gain in dB, the same quantity the response "
+                 "curves are, so it goes on the same axis and compares "
+                 "directly: what the run actually delivered against what the "
+                 "model says it should. Drawn in black/grey with markers, "
+                 "and it stops where the capture stops being able to "
+                 "answer.\n\n"
+                 "spectrum — the input's dBFS level, on a second axis on the "
+                 "right. That is a LEVEL, not a gain, and the two are not "
+                 "comparable as numbers. It answers a different question: is "
+                 "the signal actually where the filter is? Does the 50 Hz "
+                 "notch sit on a real mains peak in this recording. The "
+                 "right axis is given the same dB span as the left, so "
+                 "slopes on it mean what they look like.")
+        row += 1
+        ttk.Label(f, text="Overlay from").grid(row=row, column=0, sticky="w",
+                                               pady=2)
+        overlay_ch_box = ttk.Combobox(f, textvariable=self._overlay_ch,
+                                      width=9, state="readonly",
+                                      values=list(OVERLAY_CHANNELS))
+        overlay_ch_box.grid(row=row, column=1, sticky="e", pady=2)
+        _Tooltip(overlay_ch_box,
+                 "Which channel the overlay is taken from. The two channels "
+                 "can have run different pipelines, so 'both' is two "
+                 "different measurements, not one measured twice.")
+        return f
 
     def _set_curves(self, value):
         for var in self._curves.values():
             var.set(value)
 
+    def _view_tabs(self):
+        """(page, label) for the current view, in tab order.
+
+        Dump is in both: the response view reads the loaded capture's sample
+        rate, its filter corners and -- for the overlays -- its samples, so
+        dropping it there would mean leaving the view to change dumps. Plot
+        is in both too, meaning the same thing each time: what the axes span
+        and what gets drawn on them.
+        """
+        if self._view.get() == "response":
+            return ((self._tab_dump, "Dump"),
+                    (self._tab_curves, "Curves"),
+                    (self._tab_measure, "Measure"),
+                    (self._tab_response_plot, "Plot"))
+        return ((self._tab_dump, "Dump"),
+                (self._tab_capture_plot, "Plot"),
+                (self._tab_model, "Model"))
+
     def _switch_view(self, redraw=True):
-        """Show only the controls the current view acts on. The others
-        still hold their values -- switching back finds them unchanged."""
-        response = self._view.get() == "response"
-        for frame, wanted in ((self._model_frame, not response),
-                              (self._response_frame, response)):
-            if wanted:
-                frame.pack(fill="x", pady=(0, 8))
-            else:
-                frame.pack_forget()
+        """Rebuild the tab strip for the current view. Pages are forgotten,
+        not destroyed, so every setting in a hidden tab keeps its value and
+        switching back finds it unchanged."""
+        wanted = self._view_tabs()
+        labels = [label for _page, label in wanted]
+        # Only when the strip actually differs: _switch_view also runs on
+        # Defaults and at startup, and forgetting/re-adding every page would
+        # throw away which tab you were on for no reason.
+        if [self._tabs.tab(t, "text") for t in self._tabs.tabs()] != labels:
+            for page in list(self._tabs.tabs()):
+                self._tabs.forget(self._tabs.nametowidget(page))
+            for page, label in wanted:
+                self._tabs.add(page, text=label)
         if redraw:
             self.refresh()
 

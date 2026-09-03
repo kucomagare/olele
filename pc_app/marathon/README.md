@@ -153,24 +153,28 @@ time on the left and spectrum on the right, per channel. `response` is a
 Bode plot of the pipelines themselves — amplitude over phase, log frequency
 — and is described further down.
 
-The controls, all of which are also flags:
+It sits above a notebook whose **tabs change with it**, so each view gets the
+controls that act on it and no others. Pages are forgotten rather than
+destroyed, so a setting in a hidden tab keeps its value and switching back
+finds it unchanged. **Apply / Recompute** and **Defaults** stay pinned below
+and apply to every tab at once.
 
-| Control | What it does |
-|---|---|
-| **Dump** + Rescan / Open… / Delete all logs | which capture; newest first, or any file; delete-all asks for confirmation |
-| **View** | `capture` (the recording) or `response` (the pipelines) |
-| **Size** | samples transformed, `capture` or 128…8192 |
-| **F max** | capture-view spectrum axis limit (0 = Nyquist) |
-| **dB min** | bottom of the magnitude axis; shared by both views |
-| **Peak from (Hz)** | where to start looking for the peak |
-| **Algorithm**, **Shift**, **Settle** | the reference-model comparison |
-| **Response curves** + All / None | which pipelines to measure; ticked ones are drawn over each other |
-| **Size**, **Tones**, **Drive**, **Averages** | how the response is measured; Size follows F min on its own |
-| **F min**, **F max** | the band it is measured over — bounds the excitation, not just the axis |
-| **Rate (Hz)** | sample rate to run the pipelines at; blank = the capture's. The only way past Nyquist |
-| **pipe2 HP / notch / Q / LP** + Corners from capture | the pipeline's own corners, filled in from the capture |
-| **Noise + distortion floor**, **Design curve** | two optional overlays |
-| **Overlay capture**, **Overlay from** | put the loaded recording on the response axes — `gain`, `spectrum` or `both`, from either channel |
+| Tab | View | Controls |
+|---|---|---|
+| **Dump** | both | which capture; Rescan / Open… / Delete all logs |
+| **Plot** | capture | **Size**, **F max**, **dB min**, **Peak from** — how the spectra are computed and shown |
+| **Model** | capture | **Ch1/Ch2 pipe + impl**, **Shift**, **Settle** — the reference-model comparison |
+| **Curves** | response | which pipelines to draw, a row per pipeline with manual and scipy side by side, + All / None; then **pipe2 HP / notch / Q / LP** and *Corners from capture* |
+| **Measure** | response | **Size**, **Tones**, **Drive**, **Averages**, **Rate** — how hard it looks |
+| **Plot** | response | **F min**, **F max**, **dB min**, the floor and design overlays, **Overlay capture** / **Overlay from** |
+
+Two notes on that table. **Dump is in both views deliberately**: the response
+view reads the loaded capture's sample rate, its filter corners and — for the
+overlays — its samples, so dropping it there would mean leaving the view to
+change dumps. As a tab it costs no space until you want it, which was the
+actual problem with it. And **dB min is one setting behind two widgets**, so
+it means the same thing in both views: the bottom of the magnitude axis,
+dBFS in one and dB of gain in the other.
 
 `--peak-fmin` deserves a note, because it is the one that looks like a bug
 the first time. With the ECG enabled its harmonics are genuinely stronger
