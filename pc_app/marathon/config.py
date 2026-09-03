@@ -14,11 +14,13 @@ BOARD_CONNECTED = True  # True: connect over the real board network (192.168.1.1
 HOST = "192.168.1.100" if BOARD_CONNECTED else "127.0.0.1"
 PORT = 5001
 
-PLOT_BUFFER = 2000  # Rolling window length, in samples. Live-editable from
+PLOT_BUFFER = 2048  # Rolling window length, in samples. Live-editable from
                     # the panel -- plot.py reallocates the four rolling
                     # buffers and re-fits the x-axis when this changes,
                     # keeping the most recent samples from the old buffers.
-                    # At ECG_SAMPLING_RATE=500 Hz, 500 samples = 1 s of ECG.
+                    # 2048 = exactly one second at ECG_SAMPLING_RATE, so the
+                    # window is a round unit of signal rather than a round
+                    # number of samples.
 
 # Derived from the wire format rather than hardcoded: marathon uses 32-bit
 # TDM slots (sizif used 16), and a stale 0..65535 window would show nothing
@@ -28,6 +30,19 @@ PLOT_BUFFER = 2000  # Rolling window length, in samples. Live-editable from
 import numpy as _np
 from packet_format import CH1_DTYPE as _CH1_DTYPE
 _WIRE_MAX = int(_np.iinfo(_CH1_DTYPE).max)
+
+# Full scale of the wire, as a public name: the largest value a sample can
+# carry, and so the widest the plot's y-range can usefully be. The panel
+# quotes it when it rejects a y-limit, since "0..4294967295" is the missing
+# piece of information when a hand-typed range makes the trace vanish.
+WIRE_FULL_SCALE = _WIRE_MAX
+
+# Initial size of both GUI windows (the live client and SAT), in pixels.
+# A plain fixed size on purpose -- read once when each window is created.
+# Only the STARTING size: drag either window to whatever you like afterwards,
+# and nothing here constrains it.
+WINDOW_W = 1280
+WINDOW_H = 540
 
 PLOT_MIN = 0            # Y-axis display range, both channels. Live-editable
 PLOT_MAX = _WIRE_MAX    # from the panel -- purely a *view* (what part of the
@@ -155,7 +170,7 @@ RX_WATCHDOG_S = 3.0
 # for a whole frame period. flush_events() costs 0.08 ms, so 100 Hz is under
 # 1% of a core.
 UI_POLL_RATE = 100.0
-FRAME_RATE = 24   # Plot redraws/s. Live-editable from the panel --
+FRAME_RATE = 60   # Plot redraws/s. Live-editable from the panel --
                   # python_client.py reads config.FRAME_RATE each loop
                   # cycle rather than a value frozen at import time.
                   # Costs real CPU: even with blitting, refresh() still
@@ -184,10 +199,15 @@ FRAME_RATE = 24   # Plot redraws/s. Live-editable from the panel --
 # than a value frozen at import time), so these are just the startup
 # defaults, not a ceiling.
 #
-# Defaults below are chosen so SEND_RATE * CHUNK_SIZE == ECG_SAMPLING_RATE
-# (50 * 10 = 500) -- i.e. real-world speed: one wall-clock second of stream
-# is one second of ECG. Detuning away from that (panel or here) just
-# scrubs the playback faster/slower; it's not a wire-format constraint.
+# SEND_RATE * CHUNK_SIZE is the effective sample rate. When it equals
+# ECG_SAMPLING_RATE the stream runs at real-world speed: one wall-clock
+# second of stream is one second of ECG.
+#
+# The defaults below do NOT do that, deliberately: 24 * 1024 = 24576/s
+# against ECG_SAMPLING_RATE 2048, so the waveform plays back 12x faster than
+# life. That is a scrub speed, not a wire-format constraint -- nothing
+# breaks, the beats just arrive twelve times too often. Set SEND_RATE = 2 (2
+# * 1024 = 2048) if you want real time back at this chunk size.
 #
 # Upper bound on CHUNK_SIZE is MAX_CHUNK_SIZE below, not TCP_SND_BUF: at
 # 65535 the old (TCP_SND_BUF-4)/6 = 1364 limit no longer binds. Historical
@@ -195,7 +215,7 @@ FRAME_RATE = 24   # Plot redraws/s. Live-editable from the panel --
 # CHUNK_SIZE=500 (~412k samples/s) against the AXI-Lite ceiling documented
 # in research_info/architecture-roadmap.md -- that's a different exercise
 # from streaming real ECG and is no longer the default.
-SEND_RATE = 50
+SEND_RATE = 64
 #
 # *** MARATHON CONSTRAINT: keep this a multiple of 8. ***
 # A DMA buffer must be both a whole number of frames (or channel assignment
@@ -414,16 +434,62 @@ AUTOSTART = False
 # wrapping, per-channel state), so what is seen here is what the RTL will
 # do; see local_proc.py's header for the rule and how to add one.
 #
-# Live-switchable from the panel: both worker threads always run and each
-# idles unless it owns the current mode.
-PROCESSING_MODE = "board"
+# Live-switchable from the panel, PER CHANNEL. Index 0 is ch1, index 1 is ch2.
+#
+# WHAT "local" ACTUALLY MEANS ON THE WIRE. Both channels always travel in the
+# same frame (ts + ch1 + ch2 -- see shared/marathon/packet_format.json), and
+# the board's TDM filter has one shift register for all of them, so there is
+# no way to send or filter a single channel on its own without changing the
+# packet format, the generated C header and the firmware. A channel marked
+# "local" is therefore still sent, and the board still filters it; the PC
+# just DISCARDS what came back for that channel and substitutes its own
+# pipeline output. The board's work on it is thrown away, which costs
+# nothing here and keeps the hardware untouched until a pipeline is mature
+# enough to be worth implementing in HDL.
+#
+# Thread ownership follows from these, rather than being a separate switch:
+#   any channel "board"  -> net.tcp_thread owns the run and does the local
+#                           channels inline (they have to travel in the same
+#                           plot tuple as the ones that came back).
+#   every channel "local" -> local_proc.local_thread owns it; no socket at all.
+CH_MODE = ["board", "board"]
 
-# Which local_proc.ALGORITHMS entry local mode runs.
-#   "iir"    -- bit-accurate model of axi_tdm_filter.vhd, the filter the
-#               board actually runs. The reference to develop against, and
-#               the answer to "did the hardware compute what I think it did".
-#   "bypass" -- passthrough; the control case.
-LOCAL_ALGORITHM = "iir"
+
+def any_board():
+    """True when the socket is needed -- see net.py's _may_run()."""
+    return any(m == "board" for m in CH_MODE)
+
+
+def any_local():
+    """True when at least one channel is processed here rather than on the
+    board -- which is what decides whether net.py has to keep the sent
+    inputs around for the round trip."""
+    return any(m == "local" for m in CH_MODE)
+
+
+def all_local():
+    """True when nothing needs to leave this process."""
+    return all(m == "local" for m in CH_MODE)
+
+
+# Which local_proc pipeline each channel runs, and in which implementation.
+# Both are keys into local_proc.PIPELINES, and the panel builds its dropdowns
+# from that dict -- so adding a pipeline there needs no edit here beyond
+# choosing a different default.
+#
+#   pipe   "bypass" passthrough (the control case)
+#          "iir"    bit-accurate model of axi_tdm_filter.vhd, the filter the
+#                   board actually runs -- the reference for "did the
+#                   hardware compute what I think it did"
+#          "pipe1"  baseline-wander removal (high-pass)
+#   impl   "scipy"  float64 via scipy.signal -- what the filter SHOULD do
+#          "manual" hand-written integer arithmetic -- what it WILL do once
+#                   it is RTL. This is the version that gets translated.
+#
+# A pipeline that offers only one implementation (iir is hardware-only) falls
+# back to the one it has rather than to passthrough.
+CH_PIPE = ["iir", "iir"]
+CH_IMPL = ["manual", "manual"]
 
 # alpha = 1 / 2**LOCAL_SHIFT for the local filter. Local mode's counterpart
 # of the board's shift register (Board tab), kept separate because there is

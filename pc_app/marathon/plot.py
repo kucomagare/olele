@@ -29,6 +29,7 @@ import matplotlib.pyplot as plt
 from matplotlib.ticker import FuncFormatter
 
 import config
+import guiutil
 import net
 from packet_format import CH1_DTYPE, CH2_DTYPE
 from control_panel import GUI_SECTIONS, SignalControlPanel, PlotControlPanel
@@ -105,6 +106,10 @@ class DualPlot:
         # then restore canvas+toolbar with their original pack config; they
         # land in the remaining top-left area.
         tk_window = self.fig.canvas.manager.window
+        # Before packing anything: matplotlib's default figure size is small
+        # enough that the control column leaves almost no room for the
+        # traces. Fixed size from config.WINDOW_W/H, still resizable after.
+        guiutil.size_window(tk_window)
         existing = [(child, child.pack_info()) for child in tk_window.pack_slaves()]
         for child, _ in existing:
             child.pack_forget()
@@ -188,6 +193,10 @@ class DualPlot:
         self._last_time_rate = config.ECG_SAMPLING_RATE
         self._last_ylim = (config.PLOT_MIN, config.PLOT_MAX)
         self._last_buffer_size = buffer_size
+        # Set by invalidate_view(): also put the x range back, since the
+        # toolbar zooms both axes and only fixing y would leave the window
+        # showing part of the buffer with no way back but the toolbar.
+        self._reset_xlim = False
 
         self._drawstyle = "steps-mid"   # matches the plot() calls above
 
@@ -260,6 +269,24 @@ class DualPlot:
         self.line_ch2_in.set_data(x, self.ch2_in[-new_size:])
         self.line_ch2_out.set_data(x, self.ch2_out[-new_size:])
         self.ax1.set_xlim(0, new_size - 1)
+
+    def invalidate_view(self):
+        """Make the next refresh() re-apply every view setting from config,
+        whether or not the values changed.
+
+        refresh() normally only touches the axes when a config value differs
+        from what it last drew -- cheap, and right for a value that only ever
+        changes through the panel. It is wrong for the Apply button: the
+        axes can also be moved by matplotlib's own toolbar (pan, zoom, home),
+        which config knows nothing about. Without this, pressing Apply after
+        a toolbar zoom did nothing at all -- the fields already matched
+        config, so refresh() concluded there was nothing to do and left the
+        view zoomed. Apply has to mean "put the view where these fields say",
+        not "notice that these fields changed".
+        """
+        self._last_ylim = None
+        self._last_time_rate = None
+        self._reset_xlim = True
 
     def _on_draw(self, _event):
         self._bg1 = self.fig.canvas.copy_from_bbox(self.ax1.bbox)
@@ -595,6 +622,11 @@ class DualPlot:
         if new_buffer_size != self._last_buffer_size and new_buffer_size > 0:
             self._last_buffer_size = new_buffer_size
             self._resize_buffers(new_buffer_size)
+            needs_full_draw = True
+
+        if self._reset_xlim:
+            self._reset_xlim = False
+            self.ax1.set_xlim(0, self.buffer_size - 1)
             needs_full_draw = True
 
         if needs_full_draw:
