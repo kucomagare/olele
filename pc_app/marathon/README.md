@@ -22,8 +22,9 @@ local_proc.py          runs them: local processing mode (generate/process/plot
                       filter state, worker thread
 spectrum.py            rfft -> dBFS magnitudes + peak finder (used by sat.py)
 sat.py                 SAT (Static Analysis Tool) -- OFFLINE analysis of a
-                      logged buffer: spectra, tone attenuation, and the
-                      hardware scored against a model
+                      logged buffer: spectra, tone attenuation, the hardware
+                      scored against a model, and the pipelines' own
+                      amplitude/phase response
 sat_gui.py             its window -- same shape as the client's, but static:
                       no blitting, no frame rate, every control recomputes once
 tcp_server_app.cpp    C++ relay — forwards raw bytes between whichever two
@@ -144,19 +145,32 @@ source build/venv/bin/activate
 It opens a **window shaped like the client's** — matplotlib's own canvas
 with a Tk control column beside it — but nothing in it is live. There is no
 blitting, no animated artist and no frame rate, because there is no stream;
-every control just recomputes from the file and redraws once. A 2×2 grid
-shows time on the left and spectrum on the right, per channel, with the
-report underneath in a panel you can select and copy out of.
+every control just recomputes from the file and redraws once. The report
+sits underneath in a panel you can select and copy out of.
+
+**View** switches between the two things it draws. `capture` is a 2×2 grid:
+time on the left and spectrum on the right, per channel. `response` is a
+Bode plot of the pipelines themselves — amplitude over phase, log frequency
+— and is described further down.
 
 The controls, all of which are also flags:
 
 | Control | What it does |
 |---|---|
 | **Dump** + Rescan / Open… / Delete all logs | which capture; newest first, or any file; delete-all asks for confirmation |
+| **View** | `capture` (the recording) or `response` (the pipelines) |
 | **Size** | samples transformed, `capture` or 128…8192 |
-| **F max**, **dB min** | spectrum axis limits (`F max` 0 = Nyquist) |
+| **F max** | capture-view spectrum axis limit (0 = Nyquist) |
+| **dB min** | bottom of the magnitude axis; shared by both views |
 | **Peak from (Hz)** | where to start looking for the peak |
 | **Algorithm**, **Shift**, **Settle** | the reference-model comparison |
+| **Response curves** + All / None | which pipelines to measure; ticked ones are drawn over each other |
+| **Size**, **Tones**, **Drive**, **Averages** | how the response is measured; Size follows F min on its own |
+| **F min**, **F max** | the band it is measured over — bounds the excitation, not just the axis |
+| **Rate (Hz)** | sample rate to run the pipelines at; blank = the capture's. The only way past Nyquist |
+| **pipe2 HP / notch / Q / LP** + Corners from capture | the pipeline's own corners, filled in from the capture |
+| **Noise + distortion floor**, **Design curve** | two optional overlays |
+| **Overlay capture**, **Overlay from** | put the loaded recording on the response axes — `gain`, `spectrum` or `both`, from either channel |
 
 `--peak-fmin` deserves a note, because it is the one that looks like a bug
 the first time. With the ECG enabled its harmonics are genuinely stronger
@@ -170,6 +184,12 @@ For scripting or a box with no display, the flags still work:
 ```bash
 ./sat.py --list
 ./sat.py --no-plot --model iir --peak-fmin 40
+./sat.py --response pipe2                        # window, response view
+./sat.py --no-plot --response pipe1:scipy,iir    # the numbers only
+./sat.py --response pipe2 --overlay both         # ...with the capture on it
+./sat.py --response pipe2 --response-fmin 40 --response-fmax 60 \
+         --response-points 200                   # zoomed onto the notch
+./sat.py --response pipe2 --set pipe2_notch_hz=60   # move a corner
 ```
 
 It reads both halves of a dump — the CSV of samples and the
@@ -191,6 +211,118 @@ Two things it reports:
   what I think it computed" check, and a file is the right place to ask it:
   both signals are already captured and aligned. `--shift` defaults to
   whatever the board's register actually held, from the sidecar.
+
+## Pipeline response — the `response` view
+
+The other two answers are about a recording. This one is about the filters:
+tick any set of pipelines in **Response curves** and their amplitude and
+phase are drawn over each other on one pair of log-frequency axes. Colour is
+the pipeline, a dashed line is the integer (`manual`) arithmetic — so the
+gap between a solid and a dashed line of the same colour is what fixed point
+cost, read straight off the plot.
+
+It is **measured, not derived.** Only the `scipy` implementations have a
+transfer function to read off; the `manual` ones truncate and `iir` wraps,
+so neither is linear and neither has one. Each pipeline is instead driven
+with a random-phase multisine — equal-amplitude tones sitting on exact FFT
+bins, so there is no leakage and no window is needed (a window would cost
+the phase its meaning) — and the response is the output spectrum over the
+input spectrum. Two periods are run and thrown away before the one that is
+transformed, and several realisations are averaged, which is the standard
+estimator for a system that is not quite linear.
+
+Three details that are load-bearing rather than decoration:
+
+- **Drive is part of the measurement.** An integer pipeline's response
+  depends on level: drive it small enough to sit inside the truncation dead
+  zone and it measures as no filter at all. The plot title carries the level
+  it was measured at for that reason.
+- **Tones cluster on the configured corners.** A Q=30 notch at 50 Hz is
+  ~1.7 Hz wide, and a log grid of a hundred tones across ten octaves puts
+  about one tone in it — the deepest feature of the response would be the
+  one least likely to be sampled. Every frequency the capture was recorded
+  with gets a cluster of tones on and around it.
+- **The bins carrying no tone are measured too.** Nothing put energy there,
+  so whatever comes out is the pipeline's own truncation noise and
+  distortion. That is the **floor** overlay, and attenuation below it is not
+  attenuation you actually get.
+
+What it is for, concretely — `pipe2` at `fs = 2048`, 25% drive:
+
+| | `scipy` | `manual` |
+|---|---|---|
+| high-pass corner (0.5 Hz asked for) | 0.50 Hz | **0.64 Hz** — quantised to a power-of-two shift |
+| 50 Hz notch depth | −203 dB | **−57 dB** — Q20 coefficients cannot place the zero exactly |
+| noise + distortion floor | −190 dB | −157 dB |
+
+None of those three are visible in a time trace, and the notch one is a
+145 dB difference between the filter that was designed and the filter that
+will be built.
+
+**Design curve** overlays the transfer function computed straight from the
+designed coefficients, for the pipelines that keep an `sos`. It is there as
+a check on the *measurement*: if it does not sit on top of the measured
+`scipy` curve, distrust the measurement rather than the filter.
+
+### Narrowing the band, and moving the corners
+
+**F min** / **F max** bound what is *measured*, not only what is drawn: the
+excitation is confined to them, so the same number of tones is spent over
+less frequency. That is how you get resolution where you want it. The 50 Hz
+notch across the full band is a spike two tones wide; at **F min 40, F max
+60, Tones 200** it resolves properly, and the plot then shows the thing that
+matters — `scipy` plunging past −120 dB while `manual` bottoms out at
+**−57 dB**, because Q20 coefficients cannot place the zero exactly on the
+unit circle. Below a decade of span the axis switches to plain numbers.
+
+Both ends stop at a hard limit, and they are **different limits with
+different answers**:
+
+- **Low end: one bin, `rate/Size`.** There is no tone below it to excite.
+  You do not have to work this out — **lowering F min raises Size for you**
+  until it fits, and writes the value it used back into the Size box so the
+  cost stays visible (about 1.6 s and 200 MB per curve at the longest period
+  offered, which reaches 0.001 Hz at 2048 Hz). Picking a Size by hand sets a
+  floor F min can raise but not fall below, so relaxing F min again drops
+  back to your choice instead of leaving the measurement stuck slow.
+- **High end: Nyquist, half the *Rate*.** Nothing reaches past it, because a
+  sampled signal does not carry anything above it. F max cannot move this
+  and neither can Size — **Rate** is the only control that does, and raising
+  it asks a genuinely different question: what would this filter do at
+  8192 Hz? The corners stay where they are in Hz, so the digital filter
+  really is a different one.
+
+Asking for more than either is not an error and is not silently ignored: the
+axis stops where the measurement does, so there is never blank space that
+reads as missing data, and the report names the wall you hit.
+
+Going to the low end is worth doing — only below ~0.1 Hz do the two
+high-pass implementations separate into their real asymptotes, `scipy` at
+40 dB/decade heading to +180° against `manual`'s 20 dB/decade and +90°,
+which is a 2nd-order Butterworth against a single pole.
+
+One subtlety in the phase trace: it **breaks at a true null**. Where the
+magnitude is at or below the measured noise floor — `scipy`'s notch reaches
+−213 dB — there is no output to carry a phase, and the bin holds numerical
+noise. Letting that steer `np.unwrap` drags every later point by up to a
+whole turn, which draws two curves that agree everywhere 360° apart. Those
+bins are excluded, so the gap sits exactly where the magnitude plot shows
+the reason for it.
+
+The **pipe2 HP / notch / Q / LP** fields sweep the pipeline's own corners.
+They open filled in with what the loaded capture recorded — falling back to
+the pipeline's own constants, read off `pipelines` by name so there is one
+definition of a default — and refill whenever a dump is loaded, so they
+always show the filter you are actually looking at. Type a number to ask
+what it would do somewhere else: move the notch to 60 Hz for a 60 Hz mains
+region, or drop the low-pass and watch the phase change. **Corners from
+capture** puts them back.
+
+These deliberately do **not** reach the capture view's reference-model
+comparison, which keeps the sidecar's values. Scoring a recording against a
+filter that never ran on it would not mean anything; asking what a filter
+*does* at a different corner is a fair question, and that is what this view
+is. `--set pipe2_notch_hz=60` is the same knob from the command line.
 
 ## Why the panel responds immediately
 

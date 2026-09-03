@@ -129,6 +129,23 @@ def _to_wire_centred(values, dtype):
                    0, _MASK).astype(dtype)
 
 
+# The wire convention, spelled publicly for tools that synthesise their own
+# input and have to drive a pipeline exactly the way the stream does --
+# sat.py's response measurement builds an excitation and reads the result
+# back. Same functions, not a second implementation to drift.
+WIRE_CENTRE = _CENTRE
+
+
+def to_wire(values, dtype):
+    """Zero-centred samples to wire words (clipping, as signal_gen does)."""
+    return _to_wire_centred(values, dtype)
+
+
+def from_wire(x):
+    """Wire words back to a zero-centred signal."""
+    return _from_wire(x)
+
+
 def pipe1_scipy(x, state, params):
     """2nd-order Butterworth high-pass. Float64, via scipy.signal."""
     from scipy import signal
