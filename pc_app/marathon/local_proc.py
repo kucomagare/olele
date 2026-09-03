@@ -30,6 +30,12 @@ def params_for(ch):
     return {
         "shift": config.LOCAL_SHIFT,
         "fs": float(config.ECG_SAMPLING_RATE),
+        # Prefixed by pipeline: params is one flat dict for all of them, and
+        # pipe1 has its own "hp_hz".
+        "pipe2_hp_hz": config.PIPE2_HP_HZ,
+        "pipe2_notch_hz": config.PIPE2_NOTCH_HZ,
+        "pipe2_notch_q": config.PIPE2_NOTCH_Q,
+        "pipe2_lp_hz": config.PIPE2_LP_HZ,
     }
 
 

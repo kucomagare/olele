@@ -194,6 +194,7 @@ GUI_SECTIONS = (
     )),
     ("Signal / Local tab", (
         "CH_PIPE", "CH_IMPL", "LOCAL_SHIFT",
+        "PIPE2_HP_HZ", "PIPE2_NOTCH_HZ", "PIPE2_NOTCH_Q", "PIPE2_LP_HZ",
     )),
     ("Signal / Basic tab", (
         "SEND_RATE", "CHUNK_SIZE", "ECG_HEART_RATE", "ECG_SAMPLING_RATE",
@@ -726,6 +727,54 @@ class SignalControlPanel:
         ttk.Separator(frame, orient="horizontal").grid(
             row=row, column=0, columnspan=2, sticky="ew", pady=6)
         row += 1
+        ttk.Label(frame, text="pipe2 corners", font=("", 9, "bold")).grid(
+            row=row, column=0, columnspan=2, sticky="w", pady=(0, 2))
+        row += 1
+
+        # One set for both channels, like Shift: these are the filter's
+        # design, not a per-channel property. 0 skips a stage; so does any
+        # corner at or above Nyquist.
+        self._pipe2_hp = self._cvar(tk.StringVar,
+                                    lambda: f"{config.PIPE2_HP_HZ:g}")
+        self._pipe2_notch = self._cvar(tk.StringVar,
+                                       lambda: f"{config.PIPE2_NOTCH_HZ:g}")
+        self._pipe2_q = self._cvar(tk.StringVar,
+                                   lambda: f"{config.PIPE2_NOTCH_Q:g}")
+        self._pipe2_lp = self._cvar(tk.StringVar,
+                                    lambda: f"{config.PIPE2_LP_HZ:g}")
+        row = self._entry(frame, row, "  High-pass (Hz)", self._pipe2_hp,
+                          lambda: self._apply_pipe2_freq("PIPE2_HP_HZ",
+                                                         self._pipe2_hp),
+                          help_text="Baseline-wander corner. The ST segment "
+                                    "is nearly DC, so raising this tilts ST "
+                                    "and can invent depression/elevation "
+                                    "that is not there -- 0.05 Hz is the AHA "
+                                    "diagnostic limit, 0.5 Hz monitoring. "
+                                    "0 skips the stage.")
+        row = self._entry(frame, row, "  Notch (Hz)", self._pipe2_notch,
+                          lambda: self._apply_pipe2_freq("PIPE2_NOTCH_HZ",
+                                                         self._pipe2_notch),
+                          help_text="Mains frequency to reject: 50 in most of "
+                                    "the world, 60 in North America. 0 skips "
+                                    "the stage.")
+        row = self._entry(frame, row, "  Notch Q", self._pipe2_q,
+                          self._apply_pipe2_q,
+                          help_text="How narrow the notch is: width in Hz is "
+                                    "roughly notch/Q, so Q=30 at 50 Hz is "
+                                    "~1.7 Hz wide. Wider takes a bite out of "
+                                    "the QRS; narrower rings for longer after "
+                                    "each beat.")
+        row = self._entry(frame, row, "  Low-pass (Hz)", self._pipe2_lp,
+                          lambda: self._apply_pipe2_freq("PIPE2_LP_HZ",
+                                                         self._pipe2_lp),
+                          help_text="Upper edge of the band: 150 Hz is the "
+                                    "standard adult diagnostic bandwidth. "
+                                    "Lower and QRS amplitude and notching "
+                                    "start to go. 0 skips the stage.")
+
+        ttk.Separator(frame, orient="horizontal").grid(
+            row=row, column=0, columnspan=2, sticky="ew", pady=6)
+        row += 1
         ttk.Label(frame, wraplength=190, justify="left", foreground="#555",
                   text="Applies to channels set to Local above. Those are "
                        "still sent (both share one frame), but the board's "
@@ -733,6 +782,35 @@ class SignalControlPanel:
                        "pipeline's. Changing pipe or impl resets that "
                        "channel's filter state. See pipelines.py."
                   ).grid(row=row, column=0, columnspan=2, sticky="w")
+
+    def _apply_pipe2_freq(self, attr, var):
+        """A pipe2 corner in Hz: 0 (skip the stage) or below Nyquist.
+
+        Clamped against the LIVE ECG sample rate, so the ceiling follows the
+        Basic tab rather than a number fixed at startup.
+        """
+        try:
+            value = float(var.get())
+            if value < 0:
+                raise ValueError
+        except ValueError:
+            value = getattr(config, attr)
+        nyquist = config.ECG_SAMPLING_RATE / 2.0
+        if value > 0:
+            value = min(value, nyquist)
+        var.set(f"{value:g}")
+        setattr(config, attr, value)
+
+    def _apply_pipe2_q(self):
+        try:
+            value = float(self._pipe2_q.get())
+            if value <= 0:
+                raise ValueError
+        except ValueError:
+            value = config.PIPE2_NOTCH_Q
+        value = min(max(value, 0.1), 1000.0)
+        self._pipe2_q.set(f"{value:g}")
+        config.PIPE2_NOTCH_Q = value
 
     def _sync_impl(self, ch):
         """Point the implementation dropdown at what this pipeline offers.

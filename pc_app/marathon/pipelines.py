@@ -21,7 +21,8 @@
 #
 # `state` is a dict that persists across chunks (filter memory); it is cleared
 # for you when the selection changes. `params` carries the panel's knobs plus
-# "fs", the signal's native rate. Called once per channel per chunk, so two
+# "fs", the signal's native rate -- it is ONE dict shared by every pipeline,
+# so prefix your own keys with the pipeline name (see _pipe2_freqs). Called once per channel per chunk, so two
 # local channels means two calls with two separate states.
 #
 # Convert with _from_wire()/_to_wire_centred(), NOT _to_signed() -- see
@@ -235,6 +236,10 @@ def pipe1_manual(x, state, params):
 #
 # Any stage set to 0, or at/above Nyquist, is skipped: at fs = 256 there is
 # nothing at 150 Hz to remove.
+#
+# These are FALLBACKS, for a caller that passes no params. The app and SAT
+# both hand in config.PIPE2_* (Local tab), so changing a corner there is what
+# actually takes effect at runtime.
 PIPE2_HP_HZ = 0.2
 PIPE2_NOTCH_HZ = 50.0
 PIPE2_NOTCH_Q = 30.0
@@ -242,10 +247,14 @@ PIPE2_LP_HZ = 150.0
 
 
 def _pipe2_freqs(params):
-    return (float(params.get("hp_hz", PIPE2_HP_HZ)),
-            float(params.get("notch_hz", PIPE2_NOTCH_HZ)),
-            float(params.get("notch_q", PIPE2_NOTCH_Q)),
-            float(params.get("lp_hz", PIPE2_LP_HZ)),
+    # Keys are prefixed with the pipeline's own name. `params` is one flat
+    # dict shared by every pipeline, and pipe1 already reads "hp_hz" as its
+    # own 0.5 Hz corner -- an unprefixed "hp_hz" here would have retuned
+    # pipe1 from the Local tab without anything saying so.
+    return (float(params.get("pipe2_hp_hz", PIPE2_HP_HZ)),
+            float(params.get("pipe2_notch_hz", PIPE2_NOTCH_HZ)),
+            float(params.get("pipe2_notch_q", PIPE2_NOTCH_Q)),
+            float(params.get("pipe2_lp_hz", PIPE2_LP_HZ)),
             float(params.get("fs", 2048.0)))
 
 

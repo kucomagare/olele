@@ -559,6 +559,19 @@ CH_IMPL = ["manual", "manual"]
 LOCAL_SHIFT = 4
 LOCAL_SHIFT_MAX = 31   # the register field is 5 bits (cfg_reg1[4:0])
 
+# pipe2's three corner frequencies, in Hz, plus the notch's Q. Live-editable
+# from the Local tab and passed to the pipeline by local_proc.params_for(), so
+# both implementations see the same numbers. Set any of the three to 0 to skip
+# that stage; a stage at or above Nyquist is skipped as well.
+#
+# The same values appear as fallbacks in pipelines.py (PIPE2_*), for a caller
+# that runs a pipeline with no params at all -- the app and SAT both pass
+# these. Why 0.2 / 50 / 150 for ECG is documented there, next to the filter.
+PIPE2_HP_HZ = 0.2
+PIPE2_NOTCH_HZ = 50.0
+PIPE2_NOTCH_Q = 30.0
+PIPE2_LP_HZ = 150.0
+
 SEND_ENABLED = True
 RECEIVE_ENABLED = True
 

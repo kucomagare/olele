@@ -468,7 +468,8 @@ class SATWindow:
             if model is None:
                 continue
             models.append(sat.compare_model(self.traces, ch, model, shift,
-                                            settle, self.info["rate"]))
+                                            settle, self.info["rate"],
+                                            self.info.get("meta")))
 
         self._say(sat.format_report(self.info, results, models))
         self._draw(curves, models, fmax, db_min)

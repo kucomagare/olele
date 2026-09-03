@@ -250,7 +250,32 @@ def model_choices():
     return out
 
 
-def compare_model(traces, ch, algorithm, shift, settle, fs):
+_PIPE2_KEYS = ("PIPE2_HP_HZ", "PIPE2_NOTCH_HZ", "PIPE2_NOTCH_Q",
+               "PIPE2_LP_HZ")
+
+
+def _model_params(shift, fs, meta=None):
+    """What a pipeline is handed for an OFFLINE run.
+
+    Corner frequencies come from the capture's own sidecar when it has them,
+    like fs does: scoring a dump against this machine's current Local-tab
+    settings would silently compare the recording to a filter it never saw.
+    A dump made before those knobs existed has no such keys, and the
+    pipeline's own defaults apply.
+    """
+    params = {"shift": shift, "fs": float(fs)}
+    for key in _PIPE2_KEYS:
+        value = (meta or {}).get(key)
+        if value is None:
+            continue
+        try:
+            params[f"pipe2_{key[len('PIPE2_'):].lower()}"] = float(value)
+        except (TypeError, ValueError):
+            pass
+    return params
+
+
+def compare_model(traces, ch, algorithm, shift, settle, fs, meta=None):
     """Run a pipelines.py algorithm on the recorded input and score it against
     the recorded output.
 
@@ -283,7 +308,7 @@ def compare_model(traces, ch, algorithm, shift, settle, fs):
     # fs comes from the capture's own sidecar, not from this machine's
     # current config -- a dump analysed months later has to be filtered at
     # the rate it was recorded at, whatever the panel happens to say now.
-    modelled = fn(x, pipelines.new_state(), {"shift": shift, "fs": float(fs)})
+    modelled = fn(x, pipelines.new_state(), _model_params(shift, fs, meta))
     modelled = modelled.astype(np.float64)
 
     a = modelled[settle:]
@@ -473,7 +498,8 @@ def main(argv=None):
         for ch in ("ch1", "ch2"):
             if selection[ch]:
                 models.append(compare_model(traces, ch, selection[ch], shift,
-                                            args.settle, info["rate"]))
+                                            args.settle, info["rate"],
+                                            info.get("meta")))
 
     print_report(info, results, models)
     return 0
