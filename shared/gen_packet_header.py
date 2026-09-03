@@ -1,13 +1,7 @@
 #!/usr/bin/env python3
-# Generates a C header from packet_format.json -- the single source of
-# truth for wire packet/sample structure shared by the firmware
-# (vitis/<variant>/app/lwip_comm_client_raw.c) and the C++ relay
-# (pc_app/<variant>/tcp_server_app.cpp). Both are compiled, bare-metal C has
-# no filesystem to read JSON from at runtime, so their view of the format
-# has to be baked in at build time instead -- run this before compiling.
-#
-# python_client.py doesn't need this: it's interpreted, so it just loads
-# packet_format.json directly at runtime.
+# Generates a C header from packet_format.json for the firmware/C++ relay
+# (compiled, no runtime JSON) -- keeps C structs and Python's dtypes (which
+# load the JSON directly) from drifting apart. Run before compiling.
 #
 # Usage: gen_packet_header.py <packet_format.json> <output.h>
 import json

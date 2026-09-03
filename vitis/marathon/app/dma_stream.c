@@ -7,13 +7,10 @@
 #include "xil_cache.h"
 #include "xil_io.h"
 
-/* ============================================================
-   HARDWARE ADDRESSES
-   ============================================================
-   Must match the assign_bd_address calls in
-   vivado/marathon/bd_CoraZ7_Eth.tcl. The real-time group is kept
-   contiguous in 0x40000000-0x4001FFFF on purpose -- see
-   research_info/DMA_talk_260825.txt section 9. */
+/* Hardware addresses -- must match assign_bd_address in
+   vivado/marathon/bd_CoraZ7_Eth.tcl. Real-time group kept contiguous in
+   0x40000000-0x4001FFFF on purpose, see research_info/dma-architecture.md
+   "AMP-ready block design". */
 #define TDM_FILTER_BASE   0x40000000u
 #define TDM_REG_NCHAN     0x0u   /* channels per frame (frame = 1 + N slots) */
 #define TDM_REG_SHIFT     0x4u   /* alpha = 1/2**SHIFT; 0 == bypass          */
@@ -29,40 +26,27 @@
 #define TDM_DEFAULT_NCHAN 2u
 #define TDM_DEFAULT_SHIFT 4u
 
-/* ============================================================
-   BUFFERS
-   ============================================================ */
-
 #define DMA_BUF_BYTES  (DMA_FRAMES_PER_BUF * (uint32_t)sizeof(packet_data_t))
 
-/* Header padding. The obvious trick -- DMA into rx_buf+4 so the 4-byte wire
-   header sits in front of the payload and tcp_write() is a single call on a
-   single contiguous buffer -- breaks cache alignment, because the DMA
-   destination would no longer be 32-byte aligned and Xil_DCacheInvalidateRange
-   would spill onto the neighbouring bytes. Reserving 32 bytes instead keeps
-   the DMA target aligned AND leaves room to write the header immediately
-   before the payload, at offset DMA_HDR_PAD-4. */
+/* DMA'ing straight into rx_buf+4 (header then payload, one contiguous
+   tcp_write) breaks 32-byte cache alignment. Reserving 32 bytes keeps the
+   DMA target aligned and still leaves room to write the header at
+   DMA_HDR_PAD-4, right before the payload. */
 #define DMA_HDR_PAD    32u
 
-/* Two buffer pairs is true ping-pong: while the DMA chews on one, the CPU
-   fills the other. In simple mode the DMA allows only one outstanding
-   transfer per channel, so this overlaps CPU work with DMA work rather than
-   queueing transfers -- there is a small gap between them, invisible at
-   these rates.
+/* True ping-pong: DMA chews one buffer while the CPU fills the other (simple
+   mode allows only one outstanding transfer per channel, so this overlaps
+   CPU work with DMA work, not DMA with DMA -- small gap between transfers,
+   invisible at these rates).
  *
- * NOTE: two is only safe because tcp_write() is called with
- * TCP_WRITE_FLAG_COPY. Without that flag lwIP keeps a REFERENCE to the
- * buffer until the PC ACKs, and a retransmit or window stall would let the
- * DMA overwrite data still being sent -- corrupt samples on the wire with
+ * 2 is only safe because tcp_write() uses TCP_WRITE_FLAG_COPY. Without it
+ * lwIP keeps a REFERENCE until the PC ACKs, and a retransmit/window stall
+ * would let the DMA overwrite data still being sent -- corrupt samples,
  * nothing in the logs. Going zero-copy means raising this to 4. */
 #define DMA_NBUF 2
 
 static uint8_t tx_buf[DMA_NBUF][DMA_BUF_BYTES] __attribute__((aligned(32)));
 static uint8_t rx_buf[DMA_NBUF][DMA_HDR_PAD + DMA_BUF_BYTES] __attribute__((aligned(32)));
-
-/* ============================================================
-   STATE
-   ============================================================ */
 
 typedef enum { DMA_ST_IDLE = 0, DMA_ST_RUNNING, DMA_ST_DONE } dma_state_t;
 
@@ -74,18 +58,13 @@ static uint32_t   cur_bytes = 0;
 static uint16_t   cur_type  = 0;
 static uint16_t   cur_len   = 0;
 
-/* Round a length up to a whole number of 32-byte cache lines. Safe to
-   over-flush/over-invalidate here because the extra bytes are always inside
-   our own buffer -- the buffers are 32-byte aligned and sized in whole
-   frames, which for 32-bit slots is already a multiple of 32. */
+/* Round up to a whole number of 32-byte cache lines. Safe to over-flush/
+   over-invalidate: buffers are 32-byte aligned and sized in whole frames,
+   already a multiple of 32 for 32-bit slots. */
 static inline uint32_t cache_len(uint32_t n)
 {
     return (n + 31u) & ~31u;
 }
-
-/* ============================================================
-   FILTER CONTROL
-   ============================================================ */
 
 void dma_stream_set_filter(uint32_t n_channels, uint32_t shift, uint32_t ctrl)
 {
@@ -103,10 +82,6 @@ void dma_stream_get_filter(uint32_t *n_channels, uint32_t *shift,
     if (status)     *status     = Xil_In32(TDM_FILTER_BASE + TDM_REG_STATUS);
 }
 
-/* ============================================================
-   INIT
-   ============================================================ */
-
 int dma_stream_init(void)
 {
     XAxiDma_Config *cfg;
@@ -122,24 +97,21 @@ int dma_stream_init(void)
         return -1;
     }
 
-    /* Scatter-gather is disabled in the block design (a build-time
-       parameter, not a runtime mode). If this ever trips, the bitstream and
-       this firmware have drifted apart. */
+    /* SG is disabled in the block design (build-time param) -- tripping
+       here means the bitstream and this firmware have drifted apart. */
     if (XAxiDma_HasSg(&axi_dma)) {
         comm_log("[E] dma has sg\r\n");
         return -1;
     }
 
-    /* Polled operation: completion is checked once per main-loop pass.
-       Interrupts are wired to their own IRQ_F2P bits in the block design
-       and can be turned on later without a hardware change. */
+    /* Polled: completion checked once per main-loop pass. IRQ_F2P bits are
+       wired regardless, so interrupts can be turned on later in software. */
     XAxiDma_IntrDisable(&axi_dma, XAXIDMA_IRQ_ALL_MASK, XAXIDMA_DEVICE_TO_DMA);
     XAxiDma_IntrDisable(&axi_dma, XAXIDMA_IRQ_ALL_MASK, XAXIDMA_DMA_TO_DEVICE);
 
-    /* Byte-swap ON: samples arrive from the PC big-endian, and doing the
-       swap in fabric is pure rewiring, so the CPU never touches a sample.
-       This is what makes the buffer that lands in DDR identical to what
-       goes back out on the wire -- no repacking loop at all. */
+    /* Byte-swap ON: PC sends big-endian, swap in fabric is free rewiring,
+       so the DDR buffer ends up byte-identical to the outgoing wire frame
+       -- no CPU repacking loop. */
     dma_stream_set_filter(TDM_DEFAULT_NCHAN, TDM_DEFAULT_SHIFT, TDM_CTRL_SWAP);
 
     dma_ready = 1;
@@ -150,10 +122,6 @@ int dma_stream_init(void)
              (unsigned)TDM_DEFAULT_NCHAN, (unsigned)TDM_DEFAULT_SHIFT);
     return 0;
 }
-
-/* ============================================================
-   SUBMIT / COMPLETE
-   ============================================================ */
 
 int dma_stream_busy(void)
 {
@@ -172,20 +140,18 @@ int dma_stream_start(uint32_t nbytes, uint16_t type, uint16_t length)
     if (nbytes == 0 || nbytes > DMA_BUF_BYTES)
         return -1;
 
-    /* The A9's caches are NOT coherent with the HP ports: without this the
-       payload may still be sitting in L1/L2 where the DMA cannot see it. */
+    /* A9 caches aren't coherent with the HP ports -- without this the
+       payload may still be sitting in L1/L2, invisible to the DMA. */
     Xil_DCacheFlushRange((UINTPTR)tx_buf[cur], cache_len(nbytes));
 
-    /* Invalidate the destination BEFORE the transfer as well as after. A
-       speculative fill between arming and completion would otherwise leave a
-       stale line that the post-transfer invalidate cannot distinguish from
-       fresh data. */
+    /* Invalidate before AND after the transfer: a speculative fill between
+       arming and completion would leave a stale line the post-transfer
+       invalidate can't tell apart from fresh data. */
     Xil_DCacheInvalidateRange((UINTPTR)(rx_buf[cur] + DMA_HDR_PAD), cache_len(nbytes));
 
-    /* Arm the SINK before opening the tap. Starting MM2S against an unarmed
-       S2MM backpressures the stream -- tready stays low and data piles up in
-       the filter pipeline. It usually recovers, but it is an unpredictable
-       stall inside the datapath for no reason. */
+    /* Arm the sink before opening the tap -- MM2S against an unarmed S2MM
+       backpressures the stream (tready low, pipeline fills) and stalls
+       unpredictably even though it usually recovers. */
     if (XAxiDma_SimpleTransfer(&axi_dma,
                                (UINTPTR)(rx_buf[cur] + DMA_HDR_PAD), nbytes,
                                XAXIDMA_DEVICE_TO_DMA) != XST_SUCCESS) {
@@ -213,9 +179,9 @@ int dma_stream_poll(uint8_t **out, uint32_t *out_bytes,
     if (state != DMA_ST_RUNNING)
         return 0;
 
-    /* Both directions must finish. S2MM is the one that matters -- if tlast
-       never arrives it simply never completes, with no error and no timeout,
-       which is why the filter carries tlast through explicitly. */
+    /* S2MM is the one that matters -- if tlast never arrives it never
+       completes, no error, no timeout, hence the filter pipes tlast
+       through explicitly rather than wiring it straight across. */
     if (XAxiDma_Busy(&axi_dma, XAXIDMA_DEVICE_TO_DMA) ||
         XAxiDma_Busy(&axi_dma, XAXIDMA_DMA_TO_DEVICE))
         return 0;

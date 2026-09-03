@@ -1,23 +1,8 @@
 `timescale 1ns / 1ps
-//////////////////////////////////////////////////////////////////////////////////
-// Company: 
-// Engineer: 
-// 
-// Create Date: 04/08/2026 10:24:52 PM
-// Design Name: 
-// Module Name: axi_fir
-// Project Name: 
-// Target Devices: 
-// Tool Versions: 
-// Description: 
-// 
-// Dependencies: 
-// 
-// Revision:
-// Revision 0.01 - File Created
-// Additional Comments:
-// 
-//////////////////////////////////////////////////////////////////////////////////
+// 29-tap FIR, AXI4-Lite addressable. DEAD FABRIC: instantiated at 0x40000000
+// but nothing in firmware drives it. Two real bugs (flagged inline below)
+// are harmless only because it's unused -- fix both before wiring this up.
+// See research_info/improvement-proposals-signal-processing.md item 6.
 
 module axi_fir #(
 		// Users to add parameters here
@@ -163,51 +148,8 @@ module axi_fir #(
         else 
             wren_one_clk_del <= 1'b0;
     
-    // creating the input tap line for the FIR
-
-/*
-always @(posedge s00_axi_aclk)
-    if(s00_axi_aresetn) begin
-        fir_in_line[0] <= 0;       
-    end else
-        if(wren_one_clk_del)
-            fir_in_line[0] <= axi_slv_reg0;
-        else 
-            fir_in_line[0] <= fir_in_line[0];    
-
-generate genvar k;
-for(k = 1; k < FIR_DEPTH ; k = k+1) begin: gen_tap
-always @(posedge s00_axi_aclk) begin
-    if(!s00_axi_aresetn) begin 
-        fir_in_line[k] <= 0;
-    end else
-        if(wren_one_clk_del) 
-            fir_in_line[k] <= fir_in_line[k-1];
-        else
-            fir_in_line[k] <= fir_in_line[k];
-end
-end 
-endgenerate
-*/
- /*           
-    // Create the multiplier line of the FIR
-  
-generate genvar j;  
-for(j = 0; j < FIR_DEPTH ; j = j+1) begin: for1
-always @(posedge s00_axi_aclk) begin
-    if(s00_axi_aresetn) begin
-        if(wren_one_clk_del) begin
-            fir_accum[j] <= fir_in_line[j] * fir_coeff[j];
-        end
-    end else begin
-        fir_accum[j] <= 0;
-    end
-end
-end
-endgenerate
-*/
-
-// creating the input tap line for the FIR
+// input tap line for the FIR, unrolled by hand (a generate-loop version was
+// tried and abandoned -- this hand-unrolled form is the one that's live)
 always @(posedge s00_axi_aclk) begin
     if(!s00_axi_aresetn) begin 
         fir_in_line[0] <= 0;
@@ -241,6 +183,9 @@ always @(posedge s00_axi_aclk) begin
         fir_in_line[28] <= 0;
      end else begin
          if(wren_one_clk_del) begin
+             // BUG: firmware writes the uint16 sample into bits [15:0], not
+             // [23:8] -- this slice sees the sample right-shifted by 8,
+             // losing the low 8 bits and attenuating by 256x.
              fir_in_line[0] <= axi_slv_reg0[23:8];
              fir_in_line[1] <= fir_in_line[0];
              fir_in_line[2] <= fir_in_line[1];
@@ -401,20 +346,21 @@ always @(posedge s00_axi_aclk) begin
         end
     end 
 end
-    // Create the adder logic
+    // Adder tree. BUG: fir_accum[8] is added twice below (30 terms for a
+    // 29-tap filter) -- tap 8's coefficient is effectively doubled.
     always @(posedge s00_axi_aclk)
         if(!s00_axi_aresetn)
             fir_sum <= 0;
         else
             if(wren_one_clk_del) begin
-                fir_sum <=  fir_accum[28] + fir_accum[27] + fir_accum[26] + 
-                            fir_accum[25] + fir_accum[24] + fir_accum[23] + 
-                            fir_accum[22] + fir_accum[21] + fir_accum[20] + 
-                            fir_accum[19] + fir_accum[18] + fir_accum[17] + 
-                            fir_accum[16] + fir_accum[15] + fir_accum[14] + 
-                            fir_accum[13] + fir_accum[12] + fir_accum[11] + 
-                            fir_accum[10] + fir_accum[9]  + fir_accum[8]  + 
-                            fir_accum[8]  + fir_accum[7]  + fir_accum[6]  + 
+                fir_sum <=  fir_accum[28] + fir_accum[27] + fir_accum[26] +
+                            fir_accum[25] + fir_accum[24] + fir_accum[23] +
+                            fir_accum[22] + fir_accum[21] + fir_accum[20] +
+                            fir_accum[19] + fir_accum[18] + fir_accum[17] +
+                            fir_accum[16] + fir_accum[15] + fir_accum[14] +
+                            fir_accum[13] + fir_accum[12] + fir_accum[11] +
+                            fir_accum[10] + fir_accum[9]  + fir_accum[8]  +
+                            fir_accum[8]  + fir_accum[7]  + fir_accum[6]  +
                             fir_accum[5]  + fir_accum[4]  + fir_accum[3]  + 
                             fir_accum[2]  + fir_accum[1]  + fir_accum[0];
             end else

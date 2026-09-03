@@ -59,11 +59,10 @@ static void fmt_si(char *out, size_t n, uint32_t v)
                                      (unsigned long)((v % 1000000U) / 100000U));
 }
 
-/* This build is IPv4 + static IP only: the BSP sets LWIP_IPV6 0 and
-   LWIP_DHCP 0 (see lwipopts.h), and the board's address is fixed at
-   192.168.1.10 by convention -- the PC-side relay identifies the board by
-   source IP, so it can't float. The stock template's IPv6/DHCP branches
-   were dropped rather than kept as dead #if blocks. */
+/* IPv4 + static IP only (LWIP_IPV6/LWIP_DHCP off, lwipopts.h). Fixed at
+   192.168.1.10 -- the PC relay identifies the board by source IP, so it
+   can't float. Stock template's IPv6/DHCP branches were dropped, not kept
+   as dead #if blocks. */
 #define DEFAULT_IP_ADDRESS	"192.168.1.10"
 #define DEFAULT_IP_MASK	  	"255.255.255.0"
 #define DEFAULT_GW_ADDRESS	"192.168.1.1"
@@ -145,56 +144,34 @@ int main(void)
 	print_ip_settings(&(netif->ip_addr), &(netif->netmask), &(netif->gw));
 	xil_printf("\r\n");
 
-    /* Clock self-check. Two different "obvious" time sources in this BSP
-       turned out to be wrong (one ~3x fast, one a 16-bit counter that made
-       every window read as 0 ms), and each time the symptom was a plausible
-       looking but silently rescaled [STATS] line. So: time a known 100 ms
-       sleep and print the result at boot. If this doesn't say ~100, every
-       rate below it is suspect and you know immediately. */
+    /* Clock self-check: two BSP time sources here turned out wrong (see
+       mono_clock.h), each producing a plausible-looking but silently
+       rescaled [STATS] line. Time a known 100 ms sleep at boot -- if this
+       doesn't print ~100, every rate below is suspect. */
     mono_clock_init();
     xil_printf("[CLK] 100ms = %lu ms\r\n", mono_clock_selftest_ms(100));
 
     /* start our custom TCP client thread */
     lwip_comm_client_thread(NULL);
 
-    /* Stats window is timed with mono_now_ms() (SCU global timer). Two
-       earlier attempts used BSP-provided time functions and both were
-       wrong -- one ~3x fast, one a 16-bit counter -- see mono_clock.h for
-       which and why. Ground truth for both corrections was the PC-side
-       relay's packet counters, which are independent of anything running
-       on the board; the [CLK] self-check above now catches it directly. */
     uint64_t last_stats_ms = mono_now_ms();
 
-    /* Instrumentation: how many times per second does this loop actually
-       run, and how long is a pass? Distinguishes "the loop is slow" from
-       "the work in it is slow".
-
-       Reference points measured at CHUNK_SIZE=500, with the sleep still in
-       (see below): idle 875/s at 1142 us/pass, saturated 662/s at 1510
-       us/pass. The 368 us difference over ~0.42 packets/pass works out to
-       ~437 ns per AXI-Lite transaction (~22 cycles @ 50 MHz), which is the
-       real per-sample cost and the eventual hard ceiling. */
+    /* Loop-pass instrumentation distinguishes "the loop is slow" from "the
+       work in it is slow". Reference at CHUNK_SIZE=500: idle 875/s @1142us,
+       saturated 662/s @1510us -- the 368us delta over ~0.42 pkt/pass is
+       ~437 ns/AXI-Lite transaction, the real per-sample cost and ceiling. */
     uint32_t loop_passes = 0;
-    /* Peak ring occupancy over the window, sampled once per main-loop pass.
-       rx_ring_used() at the instant the stats fire would almost always read
-       near zero -- the interesting moment is the burst in between. */
+    /* Peak ring occupancy over the window -- rx_ring_used() sampled only at
+       stats time would read near zero; the burst in between is the signal. */
     uint32_t ring_peak = 0;
 
     while (1) {
 
-      /* No sleep here on purpose. There used to be a usleep(1000), but it
-         was never a functional requirement -- it existed so that two
-         software counters (tick_ms, stats_ms) could each be incremented
-         once per pass and pretend to be milliseconds. Both are gone:
-         tick_ms was dead (incremented, never read) and stats_ms has been
-         replaced by the hardware clock above, so the sleep was spending
-         ~1000 us of every 1510 us pass to maintain nothing.
-
-         Busy-polling is correct for this app: bare metal, single purpose,
-         nothing to yield to, and the lwIP timers are driven by
-         timer_callback() in platform.c (an ISR) rather than by this loop,
-         so their timing is unaffected. This is also how Xilinx's own
-         raw-mode lwIP examples are written. */
+      /* No sleep here on purpose (removed a usleep(1000) that only existed
+         to fake-increment two now-dead millisecond counters, wasting ~1000
+         us of every 1510 us pass). Busy-polling is correct for this app --
+         bare metal, single purpose, lwIP timers run off timer_callback()'s
+         ISR in platform.c, unaffected by this loop's pace. */
       loop_passes++;
       {
         uint32_t used = rx_ring_used();
@@ -219,16 +196,11 @@ int main(void)
       uint32_t elapsed = (uint32_t)(stats_now - last_stats_ms);
 
       if (elapsed >= 1000) {
-        /* Normalize every counter by the window that actually elapsed
-           rather than assuming it was exactly 1000 ms -- the loop only
-           checks once per pass, so the window overshoots slightly and by a
-           varying amount. All rates below are therefore true per-second
-           figures regardless of window jitter.
-
-           Integer fixed-point throughout (no float printf in this
-           toolchain's libc build); the intermediate *1000 is done in 64
-           bits because bytes-per-window * 1000 overflows 32 bits above
-           ~4 MB/s, which is now reachable after the TCP_SND_BUF bump. */
+        /* Normalize by the window that actually elapsed (it overshoots
+           1000ms by a varying amount) rather than assuming exactly 1000ms,
+           so rates stay accurate regardless of jitter. Integer fixed-point
+           throughout (no float printf here); *1000 done in 64 bits since
+           bytes-per-window*1000 overflows 32 bits above ~4 MB/s. */
         uint32_t rx_pps = (uint32_t)(((uint64_t)packets_rx * 1000ULL) / elapsed);
         uint32_t tx_pps = (uint32_t)(((uint64_t)packets_tx * 1000ULL) / elapsed);
         uint32_t rx_sps = (uint32_t)(((uint64_t)samples_rx * 1000ULL) / elapsed);
@@ -239,15 +211,10 @@ int main(void)
 
         uint32_t loops_ps = (uint32_t)(((uint64_t)loop_passes * 1000ULL) / elapsed);
 
-        /* Only the anomalies get printed. TX is identical to RX on an echo
-           path, and the window is 1000 ms unless something stalled the
-           loop -- printing them every second was ~half the line and told
-           you nothing. Now their *presence* is the signal.
-
-           Every byte here costs: at 115200 baud this line blocks the loop
-           for ~1 us/byte, and it is charged against comm_log's 512 B/s
-           budget (see comm_log.c). The old 130-byte version spent a
-           quarter of that budget once a second. */
+        /* Only anomalies get printed -- TX==RX and window==1000ms are the
+           normal case, so their absence told you nothing; presence is now
+           the signal. Every byte here is charged against comm_log's 512 B/s
+           budget (comm_log.c), ~1 us/byte at 115200 baud. */
         char extra[40];
         int  epos = 0;
         extra[0] = '\0';
@@ -267,10 +234,8 @@ int main(void)
                  (unsigned long)rx_mb_int, (unsigned long)rx_mb_frac,
                  lps, extra);
 
-        /* Same numbers as the [S] line above, pushed to the GUI. Built here
-           rather than recomputed anywhere else so the serial console and the
-           PC can never disagree about what the board is doing. Sent before
-           the counters are cleared, obviously. */
+        /* Same numbers as [S] above, pushed to the GUI -- built once here so
+           console and PC can't disagree. Sent before counters clear. */
         packet_metrics_t m;
         m.uptime_s  = (uint32_t)(stats_now / 1000ULL);
         m.window_ms = elapsed;

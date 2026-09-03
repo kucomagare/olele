@@ -15,10 +15,7 @@ def main():
 
     stop_event = threading.Event()
 
-    # net.tcp_thread owns the socket entirely, including the initial
-    # connect and any reconnects -- the plot window comes up immediately
-    # and just waits (retrying in the background) if the board/relay
-    # isn't reachable yet, rather than this script exiting.
+    # tcp_thread owns the socket/reconnects; plot comes up immediately regardless.
     t_tcp = threading.Thread(target=tcp_thread,
                              args=(plot_in_q, plot_out_q, stop_event),
                              daemon=True)
@@ -46,10 +43,7 @@ def main():
 
             if now >= next_frame:
                 plotter.refresh()
-                # Read live each cycle (not cached once before the loop) so
-                # a FRAME_RATE change from the control panel takes effect
-                # on the very next frame -- same pattern as net.py's
-                # SEND_RATE.
+                # Read live so a panel FRAME_RATE change applies next frame.
                 next_frame += 1.0 / config.FRAME_RATE
 
             time.sleep(0.001)

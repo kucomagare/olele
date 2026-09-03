@@ -12,8 +12,7 @@ extern struct tcp_pcb *client_pcb;
 void lwip_comm_client_thread(void *arg);
 
 /* Packet reassembly + processing; called once per pass of main()'s loop,
-   not from an lwIP callback. Was previously missing from this header, so
-   main.c called it via an implicit declaration. */
+   not from an lwIP callback. */
 void comm_process(void);
 
 /* Throughput statistics (used by main.c) */

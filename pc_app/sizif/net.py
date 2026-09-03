@@ -1,9 +1,5 @@
-# Owns the TCP connection end-to-end: connecting, sending the synthetic
-# signal on a schedule, receiving/parsing the echo, and reconnecting on
-# any drop -- mirrors the firmware's own tcp_client_error ->
-# tcp_client_start() auto-reconnect (lwip_comm_client_raw.c), so a
-# dropped link (board reset, cable pulled, relay restarted) doesn't
-# require manually restarting this whole app.
+# Owns the TCP connection: connect, send on schedule, receive/parse echo,
+# auto-reconnect on drop (mirrors firmware's tcp_client_error -> tcp_client_start()).
 
 import socket
 import select
@@ -28,11 +24,8 @@ def send_all(sock, data):
 
 def _connect():
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    # Disable Nagle: each packet is 4 + 6*CHUNK_SIZE bytes and so ends in a
-    # partial segment, which Nagle holds back until the previous data is
-    # ACKed. With it on at all three hops (here, the C++ relay, and the
-    # board's lwIP) the pipeline degenerated into one packet per round
-    # trip -- a hard ~33 pkt/s ceiling regardless of SEND_RATE.
+    # Disable Nagle -- left on (all 3 hops) it capped throughput at ~33 pkt/s
+    # regardless of SEND_RATE.
     sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
     sock.connect((HOST, PORT))
     sock.setblocking(False)
@@ -61,9 +54,7 @@ def tcp_thread(plot_in_q, plot_out_q, stop_event):
 
 
 def _run_session(sock, plot_in_q, plot_out_q, stop_event):
-    """One connection's worth of send/receive. Returns (instead of
-    setting stop_event) on any connection loss, so the outer tcp_thread
-    loop reconnects instead of the whole app exiting."""
+    """One connection's send/receive; returns on loss so tcp_thread reconnects."""
     receiver = PacketReceiver()
 
     counter = 0
@@ -91,9 +82,7 @@ def _run_session(sock, plot_in_q, plot_out_q, stop_event):
                 return
 
             counter += config.CHUNK_SIZE
-            # Read live each cycle (not cached once before the loop) so a
-            # SEND_RATE change from the control panel takes effect on the
-            # very next send.
+            # Read live so a panel SEND_RATE change takes effect next send.
             next_send += 1.0 / config.SEND_RATE
 
         t = time.time()

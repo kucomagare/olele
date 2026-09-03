@@ -1,15 +1,9 @@
 # The analysis window: a Tk panel of controls around a static 2x2 figure.
-#
-# Deliberately shaped like the streaming client's window (plot.py +
-# control_panel.py) so the two feel like the same tool: matplotlib's own
-# TkAgg window, our widgets packed as siblings of its canvas, no second Tk
-# root. What is different is that NOTHING here is live -- every control
-# recomputes from a file and redraws once. There is no blitting, no animated
-# artist and no frame rate, because there is no stream: that is the whole
-# reason the spectrum lives here instead of in the client.
-#
-# The analysis itself is in sat.py. This file is presentation only; if a
-# number looks wrong, it is wrong there.
+# Shaped like the streaming client's window (plot.py + control_panel.py) on
+# purpose -- same TkAgg-window/sibling-widgets pattern -- but nothing here
+# is live: every control recomputes from a file and redraws once, no
+# blitting/animation/frame rate. That's why the spectrum lives here and not
+# in the client. Presentation only -- the analysis itself is in sat.py.
 
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
@@ -23,9 +17,8 @@ import guiutil
 import sat
 
 FFT_SIZES = (0, 128, 256, 512, 1024, 2048, 4096, 8192)
-# Pipeline names only -- the implementation is its own dropdown, as in the
-# client's Local tab. Built from the registry rather than written out, so a
-# pipeline added in pipelines.py appears here with no edit.
+# Pipeline names only, built from the registry -- a pipeline added in
+# pipelines.py appears here with no edit.
 def _pipes():
     import pipelines
     return ("none",) + tuple(sorted(pipelines.PIPELINES))
@@ -50,8 +43,8 @@ def _split_model(model):
 
 
 def _size_label(value):
-    """0 is a real setting -- "the whole capture" -- but showing it as "0" in
-    a dropdown of sample counts reads like a mistake."""
+    """0 is a real setting ("the whole capture"); shown as "0" it reads
+    like a mistake."""
     return "capture" if not value else str(value)
 
 
@@ -99,14 +92,9 @@ class SATWindow:
         self.fig, self.axes = plt.subplots(2, 2, figsize=(13, 7), squeeze=False)
         self.fig.canvas.manager.set_window_title("olele — buffer analysis")
 
-        # Same Tk pack dance as the client's DualPlot: a side="bottom" slab
-        # reserves the full width and a side="right" slab the full height, so
-        # packing after the canvas has already claimed the window puts our
-        # widgets in whatever sliver is left. Pop the canvas and toolbar out,
-        # pack ours first, then restore theirs -- they land in the remaining
-        # top-left area.
+        # Same Tk pack dance as the client's DualPlot (see plot.py) -- pop
+        # canvas/toolbar out, pack ours first, restore theirs.
         window = self.fig.canvas.manager.window
-        # Same size as the client's window, from the same config knobs.
         guiutil.size_window(window)
         existing = [(c, c.pack_info()) for c in window.pack_slaves()]
         for child, _ in existing:
@@ -125,11 +113,8 @@ class SATWindow:
         self._fmax = tk.StringVar(value=f"{fmax:g}")
         self._db_min = tk.StringVar(value=f"{db_min:g}")
         self._peak_fmin = tk.StringVar(value=f"{peak_fmin:g}")
-        # Per channel, laid out the same way as the client's Local tab: a
-        # pipeline dropdown and an implementation dropdown that greys out
-        # when the pipeline is a fixed one. A capture has two channels that
-        # may well have been produced by two different pipelines, so scoring
-        # both against a single model could only ever be right for one.
+        # Per channel: a capture's two channels may have run different
+        # pipelines, so a single model could only ever be right for one.
         pipe0, impl0 = _split_model(model)
         pipe1, impl1 = _split_model(model_ch2 if model_ch2 is not None else model)
         self._pipe = [tk.StringVar(value=pipe0), tk.StringVar(value=pipe1)]
@@ -139,9 +124,8 @@ class SATWindow:
         self._settle = tk.StringVar(value=str(settle))
         self._file = tk.StringVar()
 
-        # What Defaults restores: the values this window opened with, which
-        # with no CLI arguments are sat.py's own defaults. The dump file is
-        # not in here -- that is what you are looking at, not a setting.
+        # What Defaults restores -- the dump file isn't in here, it's what
+        # you're looking at, not a setting.
         self._initial = {id(v): v.get() for v in
                          (self._fft_size, self._fmax, self._db_min,
                           self._peak_fmin, self._shift, self._settle,
@@ -156,12 +140,8 @@ class SATWindow:
     # Widgets
     # ------------------------------------------------------------------
     def _sync_impl(self, ch):
-        """Offer the implementation choice only where one exists.
-
-        Same rule as the client's Local tab, deliberately: bypass and iir are
-        single fixed things, so naming an implementation for them would claim
-        a choice that was never made.
-        """
+        """Offer the implementation choice only where one exists -- bypass
+        and iir are fixed, no implementation choice to claim."""
         combo = self._impl_combo[ch]
         choices = _impls(self._pipe[ch].get())
         if choices:
@@ -187,10 +167,8 @@ class SATWindow:
         lbl.grid(row=row, column=0, sticky="w", pady=2)
         ent = ttk.Entry(parent, textvariable=var, width=width)
         ent.grid(row=row, column=1, sticky="e", pady=2)
-        # Enter recomputes, as a shortcut for the Recompute button. No
-        # <FocusOut>: recomputing merely because the cursor left a field is
-        # the apply-on-every-change behaviour the button replaces, and here
-        # it also redraws the whole figure.
+        # Enter = Recompute shortcut. No <FocusOut> -- that would be the
+        # apply-on-every-change behaviour the button exists to replace.
         ent.bind("<Return>", lambda _e: self.refresh())
         if tip:
             _Tooltip(lbl, tip)
@@ -198,11 +176,9 @@ class SATWindow:
         return row + 1
 
     def _build_controls(self):
-        # Apply first and from the bottom, then a scrolling body for the
-        # sections: packed the other way round, a controls column taller
-        # than the window lost its last widget entirely -- Tk drops what no
-        # longer fits rather than clipping it -- and the button that applies
-        # everything simply was not drawn. See guiutil.ScrollFrame.
+        # Apply/Defaults packed first from the bottom, then a scrolling
+        # body -- reversed, Tk drops the bottom button entirely rather than
+        # clipping it once the column exceeds the window. See guiutil.ScrollFrame.
         recompute = ttk.Button(self.controls, text="Apply / Recompute",
                                command=self.refresh)
         recompute.pack(side="bottom", fill="x", pady=(6, 0))
@@ -289,8 +265,7 @@ class SATWindow:
             pipe_box = ttk.Combobox(m, textvariable=self._pipe[ch], width=8,
                                     state="readonly", values=list(_pipes()))
             pipe_box.grid(row=row, column=1, sticky="e", pady=2)
-            # Retargets the implementation dropdown only -- showing what
-            # is available is not the same as recomputing against it.
+            # Retargets the impl dropdown only, doesn't recompute.
             pipe_box.bind("<<ComboboxSelected>>",
                           lambda _e, c=ch: self._sync_impl(c))
             _Tooltip(pipe_box,
@@ -337,8 +312,7 @@ class SATWindow:
         self.refresh()
 
     def _build_report(self):
-        # A Text rather than a Label so the numbers can be selected and
-        # pasted into a note -- which is most of what they are for.
+        # Text, not Label, so the numbers can be selected/copied.
         self.report = tk.Text(self.report_frame, height=11, wrap="none",
                               font=("monospace", 9), background="#f7f7f7",
                               relief="flat")
@@ -409,8 +383,7 @@ class SATWindow:
         try:
             self.traces, self.info = sat.load_dump(path)
         except Exception as exc:                          # noqa: BLE001
-            # A malformed or truncated dump must not take the window down --
-            # the whole point is to be able to open one and look at it.
+            # A malformed/truncated dump must not take the window down.
             self.traces = self.info = None
             self._say(f"Could not read {path.name}:\n\n{exc}")
             return
@@ -447,8 +420,7 @@ class SATWindow:
             shift = None
         if shift is None:
             shift = int(self.info["shift"]) if self.info.get("shift") is not None else 4
-        # Show what was actually used, so a blank field stops being a mystery
-        # once a sidecar has answered it.
+        # Show what was actually used -- resolves a blank field's value.
         self._shift.set(str(shift))
 
         full_scale = sat.wire_full_scale(self.traces, self.info)
@@ -461,7 +433,7 @@ class SATWindow:
             results.append(r)
             curves[ch] = c
 
-        # Per channel: each is scored against its own selection, or skipped.
+        # Each channel scored against its own selection, or skipped.
         models = []
         for i, ch in enumerate(("ch1", "ch2")):
             model = self._model_for(i)
@@ -500,9 +472,7 @@ class SATWindow:
                     ax_t.plot(t, self.traces[key], color=color, lw=0.9, label=direction)
             m = model_by_ch.get(ch)
             if m is not None:
-                # Dashed over the recorded output: where they separate is the
-                # point, and dashes let the solid line show through wherever
-                # they agree.
+                # Dashed over the recorded output -- separation is the point.
                 ax_t.plot(t, m["modelled"], color="tab:green", lw=0.9, ls="--",
                           label=f"model ({m['algorithm']})")
             ax_t.set_title(f"{ch} — time")

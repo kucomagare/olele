@@ -1,18 +1,15 @@
 # Packet/sample structure -- loaded from shared/<variant>/packet_format.json,
 # the single source of truth also used to generate packet_format.h for the
-# firmware and the C++ relay (see shared/gen_packet_header.py). Change
-# field widths/signedness there, not here. No socket/matplotlib
-# dependency here on purpose -- this is pure wire-format logic, usable
-# and testable independent of networking or plotting.
+# firmware and C++ relay (see shared/gen_packet_header.py). Change field
+# widths/signedness there, not here.
 
 import json
 import struct
 import numpy as np
 from pathlib import Path
 
-# This file lives at <repo_root>/pc_app/<variant>/packet_format.py, so the
-# variant name is just the parent directory's name -- no config needed, and a
-# copied tree picks up its own wire format automatically.
+# Variant = this file's parent directory name -- a copied tree picks up its
+# own wire format automatically, no config needed.
 _HERE = Path(__file__).resolve().parent
 VARIANT = _HERE.name
 PACKET_FORMAT_PATH = _HERE.parent.parent / "shared" / VARIANT / "packet_format.json"
@@ -28,9 +25,8 @@ except FileNotFoundError:
         f"directory missing?"
     )
 
-# (bits, signed) -> numpy dtype string. Big-endian ('>') to match the wire
-# format directly -- numpy handles byte order transparently for arithmetic,
-# plotting, etc., so there's no need for a separate "native" table.
+# (bits, signed) -> numpy dtype string. Big-endian to match the wire format;
+# numpy handles byte order transparently.
 NUMPY_DTYPE = {
     (8, False):  ">u1", (8, True):  ">i1",
     (16, False): ">u2", (16, True): ">i2",
@@ -78,8 +74,7 @@ LOG_NONE   = 0x00
 def build_config_packet(op, n_channels=0, shift=0, ctrl=0, log_mask=LOG_ALL):
     """Frame one config packet ready for the wire.
 
-    status is sent as 0: it is read-only on the board and ignored inbound,
-    so there is nothing meaningful to put there.
+    status is sent as 0 -- it's read-only on the board, ignored inbound.
     """
     rec = np.zeros(1, dtype=CONFIG_DTYPE)
     rec[0]["op"] = op
@@ -107,8 +102,8 @@ class PacketReceiver:
 
         if record_size is None:
             # Unknown type -- can't know how many body bytes belong to it.
-            # Drop just the header and hope the stream resyncs (mirrors the
-            # firmware's own best-effort recovery for the same situation).
+            # Drop just the header and hope the stream resyncs (mirrors
+            # the firmware's own best-effort recovery).
             del self.buffer[:4]
             return None
 
@@ -119,11 +114,7 @@ class PacketReceiver:
         body = bytes(self.buffer[4:total_needed])
         del self.buffer[:total_needed]
 
-        # No dtype lookup guard here: PACKET_RECORD_SIZE and PACKET_DTYPES are
-        # built from the same PACKET_TYPES dict, so the record_size check above
-        # has already rejected every type this could fail on.
-        #
-        # (type, records) rather than a bare array: there are three packet
-        # types on this link now and the caller has to dispatch on it. Callers
-        # that only care about data compare against DATA_TYPE.
+        # No dtype lookup guard needed -- PACKET_RECORD_SIZE and
+        # PACKET_DTYPES are built from the same dict, so the check above
+        # already rejected anything this could fail on.
         return type_r, np.frombuffer(body, dtype=PACKET_DTYPES[type_r])

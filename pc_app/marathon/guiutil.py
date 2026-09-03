@@ -1,10 +1,7 @@
-# Shared window setup for the two Tk windows -- the live client (plot.py) and
-# SAT (sat_gui.py).
-#
-# Its own module because those two are otherwise independent: sat_gui must not
-# import plot/control_panel (that would drag net and the live worker, and
-# with them numba, into a tool that needs none of it). One tiny module both
-# can import keeps the two windows opening at the same size.
+# Shared window setup for the two Tk windows -- the live client (plot.py)
+# and SAT (sat_gui.py). Its own module so sat_gui doesn't have to import
+# plot/control_panel (which would drag net, numba and the live worker
+# into a tool that needs none of it).
 
 import tkinter as tk
 from tkinter import ttk
@@ -13,18 +10,17 @@ import config
 
 
 class ScrollFrame:
-    """A frame that scrolls vertically when it is given less room than it
-    wants, instead of losing whatever did not fit.
+    """A frame that scrolls vertically when given less room than it
+    wants, instead of losing whatever didn't fit.
 
-    This exists because of how Tk's packer runs out of room: it hands out
-    space in packing order and simply never maps what is left over. A
-    sidebar taller than the window therefore does not clip its last widget
-    -- it drops it entirely, silently. That is what made the Apply buttons
-    look broken: they were below the fold and never drawn.
+    Tk's packer hands out space in packing order and never maps what's
+    left over -- a sidebar taller than the window doesn't clip its last
+    widget, it drops it entirely, silently. That's what made the Apply
+    buttons look broken: they were below the fold and never drawn.
 
-    Build into `.body`; place `.outer`. The requested height is capped at
-    `max_req_height` so a tall body cannot push its neighbours out of the
-    window; the actual height is whatever the geometry manager gives it.
+    Build into `.body`; place `.outer`. Requested height is capped at
+    `max_req_height` so a tall body can't push its neighbours out of the
+    window; actual height is whatever the geometry manager gives it.
     """
 
     _WHEEL = ("<MouseWheel>", "<Button-4>", "<Button-5>")
@@ -45,8 +41,8 @@ class ScrollFrame:
                                                   anchor="nw")
         self.body.bind("<Configure>", self._on_body)
         self._canvas.bind("<Configure>", self._on_canvas)
-        # The wheel is grabbed only while the pointer is over this frame, so
-        # the figure canvas keeps its own scroll behaviour everywhere else.
+        # Wheel grabbed only while the pointer is over this frame, so the
+        # figure canvas keeps its own scroll behaviour everywhere else.
         self._canvas.bind("<Enter>", self._grab_wheel)
         self._canvas.bind("<Leave>", self._release_wheel)
 
@@ -57,8 +53,8 @@ class ScrollFrame:
             height=min(self.body.winfo_reqheight(), self.max_req_height))
 
     def _on_canvas(self, event):
-        # Keep the body spanning the visible width, so right-aligned entries
-        # sit where they would with no canvas in between.
+        # Keep the body spanning the visible width, so right-aligned
+        # entries sit where they would with no canvas in between.
         self._canvas.itemconfigure(
             self._window, width=max(event.width, self.body.winfo_reqwidth()))
 
@@ -81,16 +77,9 @@ class ScrollFrame:
 
 
 def size_window(window, width=None, height=None):
-    """Set `window`'s starting size from config.WINDOW_W / WINDOW_H.
-
-    A fixed size, read straight from config -- no screen measuring, no
-    fractions, no minimums. Change the two numbers in config.py and both
-    windows change together.
-
-    This is the STARTING size only. Tk leaves the window resizable, so
-    dragging it afterwards is unaffected, and the position is left to the
-    window manager rather than forced here.
-    """
+    """Set `window`'s starting size from config.WINDOW_W / WINDOW_H --
+    fixed, read straight from config, no screen measuring. Starting size
+    only; Tk leaves the window resizable afterward."""
     w = config.WINDOW_W if width is None else width
     h = config.WINDOW_H if height is None else height
     window.geometry(f"{int(w)}x{int(h)}")

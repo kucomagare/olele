@@ -1,18 +1,12 @@
-# Packet/sample structure -- loaded from shared/<variant>/packet_format.json,
-# the single source of truth also used to generate packet_format.h for the
-# firmware and the C++ relay (see shared/gen_packet_header.py). Change
-# field widths/signedness there, not here. No socket/matplotlib
-# dependency here on purpose -- this is pure wire-format logic, usable
-# and testable independent of networking or plotting.
+# Packet/sample structure, loaded from shared/<variant>/packet_format.json --
+# single source of truth, also generates packet_format.h. Edit field widths there.
 
 import json
 import struct
 import numpy as np
 from pathlib import Path
 
-# This file lives at <repo_root>/pc_app/<variant>/packet_format.py, so the
-# variant name is just the parent directory's name -- no config needed, and a
-# copied tree picks up its own wire format automatically.
+# Variant name = this file's parent directory -- a copied tree picks up its own format.
 _HERE = Path(__file__).resolve().parent
 VARIANT = _HERE.name
 PACKET_FORMAT_PATH = _HERE.parent.parent / "shared" / VARIANT / "packet_format.json"
@@ -28,9 +22,7 @@ except FileNotFoundError:
         f"directory missing?"
     )
 
-# (bits, signed) -> numpy dtype string. Big-endian ('>') to match the wire
-# format directly -- numpy handles byte order transparently for arithmetic,
-# plotting, etc., so there's no need for a separate "native" table.
+# (bits, signed) -> numpy dtype string, big-endian to match the wire format.
 NUMPY_DTYPE = {
     (8, False):  ">u1", (8, True):  ">i1",
     (16, False): ">u2", (16, True): ">i2",
@@ -71,9 +63,8 @@ class PacketReceiver:
         record_size = PACKET_RECORD_SIZE.get(type_r)
 
         if record_size is None:
-            # Unknown type -- can't know how many body bytes belong to it.
-            # Drop just the header and hope the stream resyncs (mirrors the
-            # firmware's own best-effort recovery for the same situation).
+            # Unknown type -- can't know body length. Drop header, hope stream
+            # resyncs (mirrors firmware's own best-effort recovery).
             del self.buffer[:4]
             return None
 
@@ -85,8 +76,7 @@ class PacketReceiver:
         del self.buffer[:total_needed]
 
         if type_r != DATA_TYPE:
-            # Other packet types (e.g. "config") aren't acted on yet --
-            # placeholder, nothing to plot.
+            # Other packet types (e.g. "config") aren't acted on yet.
             return None
 
         return np.frombuffer(body, dtype=DATA_DTYPE)

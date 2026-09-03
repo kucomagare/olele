@@ -1,14 +1,10 @@
 # ECG signal generation (neurokit2) and packet building. No socket I/O
-# here on purpose -- net.py owns the connection and calls into this
-# module just to get bytes to send.
+# here -- net.py owns the connection and calls in just for bytes to send.
 #
-# ch1/ch2 are each pulled from an independently-simulated ECG buffer (built
-# once, cached, regenerated only when any generation-affecting config value
-# changes -- see _config_signature()/_raw_buffers()) so both plotted
-# channels show real ECG morphology rather than one being a scaled copy of
-# the other. Swap this for a second lead or a different signal later if you
-# need channels to actually differ clinically -- this is a placeholder
-# pairing, not a modeled two-lead ECG.
+# ch1/ch2 are each pulled from an independently-simulated ECG buffer, so
+# both plotted channels show real morphology rather than one being a
+# scaled copy of the other. Placeholder pairing, not a modeled two-lead
+# ECG -- swap for a real second lead if channels need to differ clinically.
 
 import struct
 import threading
@@ -20,40 +16,29 @@ import config
 from packet_format import DATA_TYPE, DATA_DTYPE, TS_MODULUS, CH1_DTYPE, CH2_DTYPE
 
 # Generation (nk.ecg_simulate, expensive) and amplitude scaling (cheap) are
-# deliberately decoupled: the raw float buffer is cached and only rebuilt
-# when its "signature" (every config knob that affects generation -- see
-# _config_signature()) changes; ECG_AMPLITUDE is applied fresh on every
-# chunk in _scale_to_wire(), so dragging the amplitude control doesn't
-# re-run the simulator and takes effect immediately.
+# deliberately decoupled: the raw buffer is cached and only rebuilt when
+# its _config_signature() changes; ECG_AMPLITUDE applies fresh per chunk
+# in _scale_to_wire(), so dragging the amplitude control is instant.
 #
-# Note nk.ecg_simulate's own amplitude-shaping kwarg (`ai`, the McSharry
-# ECGSYN model's per-wave heights) turned out not to be a usable amplitude
-# knob -- neurokit renormalizes its output regardless of a UNIFORM `ai`
-# scale, so peak-to-peak stays ~constant across a wide range of scales
-# (verified: 0.5x-3x `ai` all landed within ~3% of the same ptp). Amplitude
-# control is implemented here instead, as a post-generation fit into a band
-# centered on each channel's dtype range. `ai`'s RATIOS between components
-# do still reshape the waveform (verified), which is why it's still exposed
-# as a panel field -- just not as an amplitude control.
+# Note: nk.ecg_simulate's own `ai` kwarg (per-wave heights) is NOT a usable
+# amplitude knob -- neurokit renormalizes regardless of a uniform `ai`
+# scale (verified: 0.5x-3x all landed within ~3% of the same ptp).
+# Amplitude is implemented here instead, as a post-generation fit into a
+# band centered on each channel's dtype range. `ai`'s RATIOS between
+# components do still reshape the waveform (verified), so it stays
+# exposed as a panel field -- just not as an amplitude control.
 #
 # (signature tuple the raw buffers were built with, then per-channel
 #  (raw array, raw min, raw max))
 _cache = (None, None, None)
 
-# Regeneration runs on its OWN thread and the old buffers keep being served
-# until the new ones are ready.
-#
-# Why: nk.ecg_simulate() of ECG_DURATION_S=60 at 2048 Hz is ~0.74 s, twice
-# (once per channel), and it used to run inline on whichever thread happened
-# to ask for the next chunk -- holding the GIL, so the whole window froze.
-# Every heart-rate, noise or waveform edit cost that, which is what made the
-# panel feel like it was applying changes "super slowly": the change itself
-# was instant, the freeze was the simulator.
-#
-# The change now shows up a fraction of a second later instead of blocking
-# anything, which for a knob you are dragging is the difference between
-# laggy and unusable. Note the buffers are rebuilt from scratch either way,
-# so the waveform jumps at the swap -- that was already true.
+# Regeneration runs on its OWN thread; old buffers keep serving until the
+# new ones are ready. nk.ecg_simulate(60s @ 2048Hz) is ~0.74s x2, and it
+# used to run inline on whichever thread asked for the next chunk --
+# holding the GIL and freezing the window on every heart-rate/noise/
+# waveform edit. The change now lands a fraction of a second later instead
+# of blocking; buffers still rebuild from scratch, so the waveform still
+# jumps at the swap -- that was already true.
 _regen_lock = threading.Lock()
 _regen_busy = False
 
@@ -61,9 +46,8 @@ _regen_busy = False
 def _regen(signature):
     """Build both channels' raw buffers for `signature` and publish them.
 
-    Runs on a worker thread. Publishing is a single tuple assignment, which
-    is atomic in CPython, so readers either see the whole old cache or the
-    whole new one -- never a half-swapped pair.
+    Runs on a worker thread. Publishing is a single tuple assignment
+    (atomic in CPython), so readers never see a half-swapped pair.
     """
     global _cache, _regen_busy
     try:
@@ -71,12 +55,8 @@ def _regen(signature):
             ch1_raw, ch1_ecg_ptp = _simulate_raw(config.ECG_RANDOM_SEED, 1)
             ch2_raw, _ = _simulate_raw(config.ECG_RANDOM_SEED + 1, 2)
 
-            # Reference ptp for sine amplitude is ch1's CLEAN ECG swing for
-            # BOTH channels -- so a level set the same on both means the same
-            # amplitude, and the two differ only where they were configured
-            # to. Taken from _simulate_raw() rather than measured off
-            # ch1_raw, so it means the same thing whether or not noise is
-            # mixed in and whether or not the ECG itself is switched off.
+            # Reference ptp is ch1's CLEAN ECG swing for BOTH channels, so
+            # equal levels mean equal amplitude regardless of noise/ECG-off state.
             ch1_raw = ch1_raw + _sine_contribution(len(ch1_raw), ch1_ecg_ptp, 1)
             ch2_raw = ch2_raw + _sine_contribution(len(ch2_raw), ch1_ecg_ptp, 2)
 
@@ -84,41 +64,32 @@ def _regen(signature):
                 ch1_entry = (ch1_raw, ch1_raw.min(), ch1_raw.max())
                 ch2_entry = (ch2_raw, ch2_raw.min(), ch2_raw.max())
             else:
-                # FIXED reference span, not the buffer's own extremes.
-                # Auto-fitting stretches whatever is present to fill the
-                # band, which is why the sine levels had no visible effect
-                # once the ECG was gone -- a 10% sine and a 90% sine both
-                # ended up filling the plot. Pinning the span to [-0.5, +0.5]
-                # makes raw units full-scale fractions, so a level lands on
-                # screen as exactly that share of the range.
+                # FIXED span [-0.5, 0.5], not the buffer's own extremes --
+                # auto-fitting would stretch any level to fill the plot,
+                # making sine level invisible with the ECG gone.
                 ch1_entry = (ch1_raw, -0.5, 0.5)
                 ch2_entry = (ch2_raw, -0.5, 0.5)
 
             _cache = (signature, ch1_entry, ch2_entry)
 
-            # Settings may have moved again while that ran -- someone
-            # dragging a control generates a stream of them. Loop rather than
-            # return so the last edit always wins, instead of leaving the
-            # cache one edit behind until the next chunk happens to ask.
+            # Loop rather than return: settings may have moved again while
+            # that ran (a dragged control streams edits) -- last edit
+            # always wins instead of leaving the cache one edit behind.
             latest = _config_signature()
             if latest == signature:
                 return
             signature = latest
     except Exception as exc:                          # noqa: BLE001
-        # A bad parameter combination must not kill regeneration for the
-        # rest of the session: report it and keep serving the previous
-        # buffers, which are still valid, just stale.
+        # Bad params must not kill regen for the rest of the session --
+        # report, keep serving the previous (stale but valid) buffers.
         print(f"[signal] regeneration failed, keeping the previous buffers: {exc}")
     finally:
         with _regen_lock:
             _regen_busy = False
 
-# Colored-noise layers: (nk.signal_noise beta, config attr for "enabled",
-# config attr for "level"). Any combination can be active simultaneously
-# (see config.py's ECG_NOISE_*_ENABLED/_LEVEL) -- _simulate_raw() generates
-# each enabled one separately and sums them before adding to the ECG.
-# (colour, beta). Config names are built from these per channel, the same way
-# the sine generators' are, so the set of colours is written once.
+# Colored-noise layers: any combination active simultaneously (config.py's
+# ECG_NOISE_*_ENABLED/_LEVEL), summed before adding to the ECG. Config
+# names built from these per channel, same pattern as the sine generators.
 NOISE_COLOURS = (
     ("VIOLET", -2),
     ("BLUE", -1),
@@ -133,9 +104,8 @@ def noise_attrs(colour, ch):
     prefix = f"ECG_NOISE_{colour}_CH{ch}_"
     return prefix + "ENABLED", prefix + "LEVEL"
 
-# Sine-wave interference generators, four of them, each configured per
-# channel: ECG_SINE<n>_CH<c>_{ENABLED,FREQ,PHASE,LEVEL}. Built rather than
-# written out, so the count is one number here and in the panel.
+# Sine interference generators, four of them, each configured per channel:
+# ECG_SINE<n>_CH<c>_{ENABLED,FREQ,PHASE,LEVEL}. Count lives here once.
 SINE_COUNT = 4
 
 
@@ -150,10 +120,10 @@ _SINE_GENERATORS = tuple((n, ch) for n in range(1, SINE_COUNT + 1)
 
 
 def _config_signature():
-    """Every config value that affects _simulate_raw()'s output. Compared
-    against the last-built signature in _raw_buffers() to decide whether
-    the (expensive) simulator needs to re-run. Extend this, not the cache
-    tuple shape, when adding a new generation parameter."""
+    """Every config value that affects _simulate_raw()'s output, compared
+    against the last-built signature to decide whether the (expensive)
+    simulator needs to re-run. Extend this, not the cache tuple shape,
+    when adding a new generation parameter."""
     noise_layers = tuple(
         tuple(getattr(config, attr) for attr in noise_attrs(colour, ch))
         for colour, _beta in NOISE_COLOURS for ch in (1, 2)
@@ -187,24 +157,20 @@ def _simulate_raw(random_state, channel):
     )
     raw = np.asarray(raw, dtype=np.float64)
 
-    # raw_ptp is measured on the CLEAN signal, once, before any noise is
-    # added -- so each layer's _LEVEL keeps meaning "N% of the clean ECG's
-    # own swing" regardless of how many other layers are also active,
-    # instead of compounding against an already-noisy signal.
+    # Measured on the CLEAN signal, once, before any noise is added -- so
+    # each layer's LEVEL keeps meaning "N% of the clean ECG's own swing"
+    # regardless of how many other layers are also active.
     raw_ptp = raw.max() - raw.min()
 
-    # ECG off: drop the waveform but keep raw_ptp, so the noise and sine
-    # layers below stay scaled to the swing the ECG *would* have had. Zeroing
-    # before measuring would make raw_ptp 0, which skips the whole noise block
-    # and would leave you with silence rather than the generators. Toggling
-    # this therefore removes the heartbeat and changes nothing else.
+    # ECG off: drop the waveform but keep raw_ptp, so the noise/sine
+    # layers below stay scaled to the swing the ECG *would* have had.
+    # Zeroing before measuring would make raw_ptp 0 and skip the whole
+    # noise block, leaving silence instead of the generators.
     if not config.ECG_ENABLED:
         raw = np.zeros_like(raw)
-        # With no ECG there is nothing to be a fraction OF, so the reference
-        # becomes full scale: every generator's _LEVEL is then its own
-        # peak-to-peak as a share of the plot's whole range. 0.5 means a sine
-        # that fills half the plot, and it means that no matter which other
-        # generators are running.
+        # Nothing to be a fraction OF, so the reference becomes full
+        # scale -- every generator's LEVEL is then its own ptp as a share
+        # of the plot's whole range, independent of which others are running.
         raw_ptp = 1.0
     if raw_ptp > 0:
         total_noise = np.zeros_like(raw)
@@ -216,8 +182,8 @@ def _simulate_raw(random_state, channel):
             if level <= 0:
                 continue
             # Distinct random_state per layer (and offset from the ECG's
-            # own seed/channel-2 seed) so multiple simultaneous layers --
-            # or the same color on both channels -- don't correlate.
+            # own seed) so simultaneous layers -- or the same colour on
+            # both channels -- don't correlate.
             noise = np.asarray(
                 nk.signal_noise(
                     duration=config.ECG_DURATION_S,
@@ -227,29 +193,27 @@ def _simulate_raw(random_state, channel):
                 ),
                 dtype=np.float64,
             )
-            # signal_noise()'s length matches duration*sampling_rate exactly
-            # in practice, but pad/truncate defensively rather than assume
-            # it always will.
+            # Length matches duration*sampling_rate exactly in practice,
+            # but pad/truncate defensively rather than assume it always will.
             n = min(len(raw), len(noise))
             noise_ptp = noise[:n].max() - noise[:n].min()
             if noise_ptp > 0:
                 total_noise[:n] += noise[:n] * (level * raw_ptp / noise_ptp)
         raw = raw + total_noise
 
-    # raw_ptp goes back with the buffer: it is the CLEAN ECG's swing, and the
-    # sine layer added in _raw_buffers() needs the same reference the noise
-    # layers used here. Recomputing it from the returned buffer would give a
-    # different number once noise is mixed in, and zero when ECG_ENABLED is
-    # off -- which silently sized the sine to nothing.
+    # raw_ptp returned alongside the buffer: it's the CLEAN swing the sine
+    # layer added in _raw_buffers() needs. Recomputing it from the
+    # returned buffer would give a different number once noise is mixed
+    # in, and zero when ECG_ENABLED is off -- silently sizing the sine to nothing.
     return raw, raw_ptp
 
 
 def _sine_contribution(n_samples, raw_ptp, channel):
     """Sum of the four generators for ONE channel, over n_samples.
 
-    raw_ptp is a parameter, not measured here: it is ch1's clean ECG swing
-    for both channels, so equal levels on ch1 and ch2 mean equal amplitudes.
-    Measuring each channel's own ptp (they come from different seeds) made
+    raw_ptp is a parameter, not measured here: it's ch1's clean ECG swing
+    for both channels, so equal levels on ch1 and ch2 mean equal
+    amplitudes. Measuring each channel's own ptp (different seeds) made
     equal settings differ by a fraction of a percent.
     """
     total = np.zeros(n_samples)
@@ -267,9 +231,9 @@ def _sine_contribution(n_samples, raw_ptp, channel):
             continue
         freq = getattr(config, freq_attr)
         phase_rad = np.deg2rad(getattr(config, phase_attr))
-        # level = fraction of the reference ptp that becomes the sine's OWN
-        # peak-to-peak (same convention as the noise layers), so amplitude
-        # (sin()'s single-sided swing) is half of that.
+        # level = fraction of the reference ptp that becomes the sine's
+        # OWN peak-to-peak (same convention as the noise layers), so
+        # amplitude (sin()'s single-sided swing) is half of that.
         total += (level * raw_ptp / 2.0) * np.sin(2 * np.pi * freq * t
                                                   + phase_rad)
     return total
@@ -278,12 +242,12 @@ def _sine_contribution(n_samples, raw_ptp, channel):
 def _raw_buffers():
     """Return (ch1_raw, ch1_lo, ch1_hi, ch2_raw, ch2_lo, ch2_hi).
 
-    Never blocks on the simulator except the very first time, when there is
-    nothing cached to serve. After that a settings change starts a
-    regeneration on its own thread (see _regen) and this keeps handing back
-    the previous buffers until the new ones are published -- so a knob on the
-    panel applies in a fraction of a second instead of freezing the whole
-    window for the ~1.5 s two channels of nk.ecg_simulate() take.
+    Blocks on the simulator only on cold start, when nothing is cached
+    yet. After that a settings change starts a regeneration on its own
+    thread (see _regen) and this keeps handing back the previous buffers
+    until the new ones are published -- so a panel knob applies in a
+    fraction of a second instead of freezing the window for the ~1.5s two
+    channels of nk.ecg_simulate() take.
     """
     global _regen_busy
     sig, ch1_entry, ch2_entry = _cache
@@ -294,8 +258,8 @@ def _raw_buffers():
 
     if ch1_entry is None:
         # Cold start: nothing to serve, so this one has to be synchronous.
-        # python_client.py pays it in the background at launch precisely so
-        # it does not land on a user action. _regen() publishes into _cache.
+        # python_client.py pays it in the background at launch precisely
+        # so it doesn't land on a user action. _regen() publishes into _cache.
         _regen(current_sig)
         _, ch1_entry, ch2_entry = _cache
         return ch1_entry + ch2_entry
@@ -305,32 +269,28 @@ def _raw_buffers():
             _regen_busy = True
             threading.Thread(target=_regen, args=(current_sig,),
                              name="signal-regen", daemon=True).start()
-        # If one is already running it will notice the newer signature when
-        # it finishes and go round again -- see _regen's loop. Starting a
+        # Already running? It'll notice the newer signature when it
+        # finishes and go round again (see _regen's loop) -- starting a
         # second thread here would just have both simulating at once.
 
     return ch1_entry + ch2_entry
 
 
 def _scale_to_wire(raw_chunk, raw_lo, raw_hi, dtype):
-    """Fit raw_chunk (using the *whole buffer's* min/max, not the chunk's --
-    otherwise each chunk would rescale to its own local extremes and the
-    waveform would lose its true relative shape) into a band centered on
-    dtype's range, sized to config.ECG_AMPLITUDE fraction of that range.
-    ECG_AMPLITUDE=1.0 -> spans the full dtype range (e.g. 0..65535 for
-    uint16); 0.0 -> collapses to the midpoint. This is what ties the
-    amplitude control to "the maximum size of the data amplitude in out
-    packets" -- the ceiling is the wire dtype's own max, not an arbitrary
-    plot constant."""
+    """Fit raw_chunk (using the *whole buffer's* min/max, not the
+    chunk's -- otherwise each chunk would rescale to its own local
+    extremes and the waveform would lose its true relative shape) into a
+    band centered on dtype's range, sized to config.ECG_AMPLITUDE
+    fraction of that range. ECG_AMPLITUDE=1.0 spans the full dtype range
+    (e.g. 0..65535 for uint16); 0.0 collapses to the midpoint."""
     dtype_max = np.iinfo(dtype).max
-    # ECG_AMPLITUDE sizes the ECG. With the ECG switched off it would just be a
-    # second, hidden gain in front of every generator's own level, so the
-    # levels would stop being the full-scale fractions they now claim to be.
+    # ECG off: force amplitude=1.0, or it would be a second hidden gain
+    # in front of every generator's own level, and the levels would stop
+    # being the full-scale fractions they now claim to be.
     amplitude = (max(0.0, min(1.0, config.ECG_AMPLITUDE))
                  if config.ECG_ENABLED else 1.0)
-    # Offset shifts the band's centre; amplitude still sizes it around the
-    # midpoint, so the two controls stay independent (changing one does not
-    # rescale the other).
+    # Offset shifts the band's centre; amplitude still sizes it around
+    # the midpoint, so the two controls stay independent.
     offset = max(config.ECG_OFFSET_MIN,
                  min(config.ECG_OFFSET_MAX, config.ECG_OFFSET))
     center = dtype_max / 2.0 + offset * dtype_max
@@ -342,17 +302,17 @@ def _scale_to_wire(raw_chunk, raw_lo, raw_hi, dtype):
         scaled = out_lo + (raw_chunk - raw_lo) * (out_hi - out_lo) / span
     else:
         scaled = np.full_like(raw_chunk, center)
-    # Safety net only -- out_lo/out_hi are already within [0, dtype_max] by
-    # construction, this just guards float rounding at the exact edges.
+    # Safety net only -- out_lo/out_hi are already within [0, dtype_max]
+    # by construction, this just guards float rounding at the exact edges.
     return np.clip(scaled, 0, dtype_max).astype(dtype)
 
 
 def generate_ecg_chunk(counter):
     """Slice CHUNK_SIZE consecutive samples out of the ECG buffer starting
     at `counter`, wrapping around, then scale to wire units. `counter` is
-    the running sample index (same one used for the ts field), so playback
-    position tracks it exactly regardless of how CHUNK_SIZE changes at
-    runtime."""
+    the running sample index (same one used for the ts field), so
+    playback position tracks it exactly regardless of CHUNK_SIZE changes
+    at runtime."""
     ch1_raw, ch1_lo, ch1_hi, ch2_raw, ch2_lo, ch2_hi = _raw_buffers()
     n = config.CHUNK_SIZE
     pos = counter % len(ch1_raw)

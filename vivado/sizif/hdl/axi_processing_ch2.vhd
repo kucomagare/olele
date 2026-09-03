@@ -1,29 +1,10 @@
 ----------------------------------------------------------------------------------
--- Module Name: axi_processing_ch2
---
--- ch2's processing chain -- deliberately its own file/entity, separate
--- from axi_processing_ch1.vhd (not one module instantiated twice), so
--- each channel's architecture can diverge and be compared independently.
--- Currently identical logic to ch1 -- change this file alone to give ch2
--- a different architecture.
---
--- Simple single-pole IIR low-pass filter (exponential moving average),
--- AXI4-Lite addressable, mirroring axi_fir.v's register convention exactly
--- so it plugs into the existing AXI interconnect/address-map pattern:
---   reg0 (offset 0x0, write) : new input sample x[n]
---   reg3 (offset 0xC, read)  : filtered output y[n] (routed through
---                              my_axi's "fir_result" read-back port --
---                              generic despite the name, same hook
---                              axi_fir.v uses for processed_data)
---
--- Difference equation: y[n] = y[n-1] + (x[n] - y[n-1]) >> SHIFT
--- i.e. alpha = 1 / 2**SHIFT. Larger SHIFT = heavier smoothing (lower
--- cutoff), no multiplier needed since alpha is a power of two.
---
--- Reuses the existing my_axi.v (Verilog) module for the AXI4-Lite bus
--- protocol handshaking instead of re-implementing it here -- Vivado
--- supports mixed VHDL/Verilog instantiation, same pattern axi_fir.v
--- itself uses.
+-- axi_processing_ch2: ch2's filter chain, deliberately its own file/entity
+-- (not ch1's instantiated twice) -- currently identical to ch1; change this
+-- file alone to give ch2 a different architecture. Single-pole IIR low-pass:
+-- y[n] = y[n-1] + (x[n]-y[n-1]) >> SHIFT, alpha = 1/2**SHIFT, no multiplier.
+-- AXI4-Lite via my_axi.v (mixed-language inst): reg0 (0x0,W) = x[n],
+-- reg3 (0xC,R) = y[n] via my_axi's "fir_result" hook.
 ----------------------------------------------------------------------------------
 
 library IEEE;
@@ -37,7 +18,7 @@ entity axi_processing_ch2 is
         C_S00_AXI_ADDR_WIDTH  : integer := 4
     );
     port (
-        -- AXI4-Lite slave interface (same shape as axi_fir.v's s00_axi_*)
+        -- AXI4-Lite slave interface
         s00_axi_aclk    : in  std_logic;
         s00_axi_aresetn : in  std_logic;
         s00_axi_awaddr  : in  std_logic_vector(C_S00_AXI_ADDR_WIDTH-1 downto 0);
@@ -64,10 +45,7 @@ end axi_processing_ch2;
 
 architecture rtl of axi_processing_ch2 is
 
-    -- my_axi.v (Verilog): generic AXI4-Lite bus interface with 4 word
-    -- registers; reg3 reads back the external "fir_result" input instead
-    -- of its own stored value -- that's the hook this filter's output
-    -- rides back to the CPU on.
+    -- reg3 reads "fir_result" (filter output), not its own value -- see my_axi.v.
     component my_axi is
         generic (
             C_S_AXI_DATA_WIDTH : integer := 32;
@@ -152,11 +130,8 @@ begin
             S_AXI_RREADY     => s00_axi_rready
         );
 
-    -- Delay wren by one clock, same as axi_fir.v's wren_one_clk_del:
-    -- axi_slv_reg0 (a continuous read-out of my_axi's internal slv_reg0)
-    -- only reflects a just-written value starting the cycle *after*
-    -- axi_slv_reg_wren pulses, since the register update itself is
-    -- clocked on that same edge.
+    -- Delay wren by one clock: axi_slv_reg0 only reflects a just-written
+    -- value the cycle *after* axi_slv_reg_wren pulses (same-edge update).
     process(s00_axi_aclk)
     begin
         if rising_edge(s00_axi_aclk) then

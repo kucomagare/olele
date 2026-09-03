@@ -7,27 +7,13 @@
 
 #define LOG_BUF_SIZE 2048
 
-/* Output budget -- the important part of this file.
- *
- * comm_log_flush() calls xil_printf(), which BLOCKS until every byte has
- * been shifted out the UART. At 115200 baud that is ~87 us per byte, so a
- * 68-byte reconnect message costs ~5.9 ms of dead CPU.
- *
- * Without a cap that is a livelock, observed on hardware 2026-08-17:
- * offering more than the board could take filled the RX ring, each
- * overflow logged a resync, each log blocked the main loop for ~5.9 ms,
- * and the stall caused more overflow. The loop fell from ~737,000
- * passes/s to 162/s and throughput to 0 pkt/s, and it could not recover
- * until the sender backed off -- the diagnostics had displaced all the
- * work they were describing.
- *
- * So: at most LOG_BUDGET_BYTES per LOG_WINDOW_MS actually reach the UART.
- * At 512 B/s that bounds logging at ~44 ms/s, i.e. ~4.4% of wall time, no
- * matter how badly things are going. Excess messages are dropped and
- * counted, and one short summary line per window reports the count -- the
- * first message of a burst (the informative one) always gets through, and
- * you can still tell that something was hidden.
- */
+/* DO NOT remove this budget. xil_printf() blocks until every byte clears
+ * the UART (~87 us/byte @ 115200), and uncapped logging was a measured
+ * livelock (2026-08-17): overflow -> resync log -> ~5.9 ms block -> more
+ * overflow, loop fell from ~737k/s to 162/s, throughput to 0 pkt/s, no
+ * recovery until the sender backed off. LOG_BUDGET_BYTES/LOG_WINDOW_MS
+ * caps UART time to ~4.4% of wall clock regardless of how bad things get;
+ * excess messages are dropped and counted, with one summary line/window. */
 #define LOG_BUDGET_BYTES 512U
 #define LOG_WINDOW_MS    1000U
 
@@ -48,8 +34,7 @@ static uint32_t log_category(const char *fmt)
     case 'S': return COMM_LOG_STATS;
     case 'E': return COMM_LOG_ERROR;
     case 'N': return COMM_LOG_NOTICE;
-    /* '[C]' is config; '[CLK]' also starts with C, hence the closing-bracket
-       check rather than matching on the letter alone. */
+    /* '[CLK]' also starts with C -- check for the closing bracket too. */
     case 'C': return (fmt[2] == ']') ? COMM_LOG_CONFIG : COMM_LOG_OTHER;
     default:  return COMM_LOG_OTHER;
     }
@@ -69,9 +54,8 @@ static uint32_t budget_spent = 0;
 static uint32_t suppressed   = 0;
 static uint64_t window_start = 0;
 
-/* Append without consulting the budget. Only for the suppression summary,
-   which is short, bounded to one per window, and is precisely the message
-   you must not drop. */
+/* Bypasses the budget -- only for the one-per-window suppression summary,
+   which must never itself be dropped. */
 static void log_append_raw(const char *s, int n)
 {
     if (n > 0 && log_len + n < LOG_BUF_SIZE) {
@@ -86,8 +70,7 @@ void comm_log(const char *fmt, ...)
     char tmp[256];
     int n;
 
-    /* Checked before formatting: a muted category should cost a mask test,
-       not a vsnprintf. */
+    /* Checked before formatting -- a muted category costs a mask test, not a vsnprintf. */
     if (!(log_mask & log_category(fmt)))
         return;
 

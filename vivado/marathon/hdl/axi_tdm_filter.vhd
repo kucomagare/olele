@@ -1,73 +1,44 @@
 ----------------------------------------------------------------------------------
--- Module Name: axi_tdm_filter
+-- axi_tdm_filter: TDM streaming IIR low-pass, marathon's replacement for
+-- sizif's per-channel AXI-Lite peripherals (axi_processing_ch1/ch2), which
+-- put the CPU in the path of every sample.
 --
--- Time-division-multiplexed streaming IIR low-pass filter: the marathon
--- variant's replacement for sizif's per-channel AXI-Lite peripherals
--- (axi_processing_ch1/ch2), which put the CPU in the path of every sample.
+-- ONE arithmetic datapath shared by all channels; per-channel state lives
+-- in a RAM indexed by slot. Logic cost doesn't grow with channel count --
+-- only the state RAM does (MAX_CHANNELS x 32 bits).
 --
--- Instead of one filter instance per channel, this is ONE arithmetic
--- datapath shared by all channels, with per-channel state held in a small
--- RAM indexed by a slot counter. Logic cost does not grow with channel
--- count -- only the state RAM does (MAX_CHANNELS x 32 bits).
+-- STREAM FRAME: [ts][ch1]..[chN] [ts][ch1]..[chN] ... one 32-bit slot per
+-- beat. Slot 0 = TIMESTAMP, passes through UNFILTERED. Slots 1..N = samples,
+-- filtered against state(slot-1). N is a control register, not a bitstream
+-- param. tlast marks the DMA BUFFER end, not the frame end -- it
+-- resynchronises the slot counter to 0, so the DMA buffer must be a whole
+-- number of frames or channel assignment rotates on the next buffer. See
+-- research_info/dma-architecture.md ("Ping-pong buffering").
 --
--- WIRE / STREAM FRAME LAYOUT
---   [ts] [ch1] [ch2] ... [chN]   [ts] [ch1] ... [chN]  ...
---   <---------- one frame -----> <------ next frame --->
+-- y[n] = y[n-1] + (x[n]-y[n-1]) >> SHIFT, alpha = 1/2**SHIFT (same as
+-- axi_processing_ch1.vhd). SHIFT=0 is an exact bypass (y=x), no special
+-- case needed -- a live A/B toggle for filter on/off. The truncating shift
+-- has a known, measured fixed-point bias (~-15 counts steady-state at
+-- SHIFT=4, dead zone below 2**SHIFT) -- kept deliberately so marathon stays
+-- comparable with sizif's output.
 --
---   * one 32-bit slot per beat, one beat per clock when tvalid & tready
---   * slot 0 is the TIMESTAMP and passes through UNFILTERED
---   * slots 1..N are channel samples, filtered against state(slot-1)
---   * N comes from a control register, so changing channel count is a
---     register write -- NOT a bitstream rebuild
+-- AXI4-LITE REGS (via my_axi.v; reg3 rides the "fir_result" hook):
+--   reg0 (0x0,W) N_CHANNELS  -- clamped to MAX_CHANNELS
+--   reg1 (0x4,W) SHIFT       -- bits [4:0]; 0 = bypass
+--   reg2 (0x8,W) CONTROL     -- bit0 byte-swap, bit1 clear-state
+--   reg3 (0xC,R) STATUS      -- [7:0] slot, [15:8] N_CHANNELS,
+--                                [20:16] SHIFT, [24] s_tvalid, [25] m_tready
+--   Byte-swap does big/little-endian conversion in fabric so the CPU never
+--   touches a sample; default OFF so software-swap firmware keeps working.
+--   Clear forces state writes to zero and output passthrough; hold one
+--   frame to zero every channel.
 --
---   tlast marks the end of the DMA BUFFER, not the end of a frame. It is
---   carried through with the data and also resynchronises the slot counter
---   (next beat after tlast is slot 0). The DMA buffer must therefore be a
---   whole number of frames, or channel assignment rotates on the next
---   buffer. See research_info/DMA_talk_260825.txt section 8.
---
--- DIFFERENCE EQUATION (unchanged from axi_processing_ch1.vhd)
---   y[n] = y[n-1] + (x[n] - y[n-1]) >> SHIFT       alpha = 1 / 2**SHIFT
---
---   Note SHIFT = 0 is exactly a BYPASS: y = y + (x - y) = x. No special
---   case needed -- write 0 to the shift register to A/B "filter on vs off"
---   live while watching the plot.
---
---   The truncating arithmetic shift has a known, measured fixed-point
---   bias (~-15 counts steady-state at SHIFT=4, plus a dead zone once
---   |x-y| < 2**SHIFT). That behaviour is DELIBERATELY preserved here so
---   marathon's output stays comparable with sizif's.
---
--- AXI4-LITE CONTROL REGISTERS (via my_axi.v, same hook axi_processing_ch1
--- uses -- reg3 reads back the external "fir_result" port)
---   reg0 (0x0, W) : N_CHANNELS  -- channels per frame, clamped to MAX_CHANNELS
---   reg1 (0x4, W) : SHIFT       -- bits [4:0]; 0 = bypass
---   reg2 (0x8, W) : CONTROL     -- bit0 = byte-swap enable
---                                  bit1 = clear state (see below)
---   reg3 (0xC, R) : STATUS      -- [7:0] current slot, [15:8] N_CHANNELS,
---                                  [20:16] SHIFT, [24] s_tvalid, [25] m_tready
---
---   Byte-swap: samples arrive from the PC big-endian. Enabling bit0 does
---   the swap in fabric on the way in and again on the way out, so the CPU
---   never has to touch a sample. Defaults OFF so firmware that still swaps
---   in software keeps working unchanged.
---
---   Clear: while bit1 is set, state writes are forced to zero and the
---   output passes through. Hold it for one frame to zero every channel.
---
--- FLOW CONTROL
---   Deliberately a purely combinational pass-through of the AXI-Stream
---   handshake (tready/tvalid/tlast) with the arithmetic in the same cycle.
---   At 50 MHz the subtract/shift/add has ~20 ns of budget, which is ample,
---   and it keeps first bring-up simple: there is no pipeline, so there is
---   no chance of tlast arriving at the wrong beat -- the single nastiest
---   failure mode in this design (S2MM hangs forever with no error).
---
---   If a deeper filter is wanted later, TDM makes pipelining nearly free:
---   with N channels, N clocks pass before the same channel comes back
---   around, so the feedback path has N cycles to settle and needs no
---   hazard logic. Register the datapath and delay tvalid/tlast by the
---   SAME number of stages.
+-- FLOW CONTROL: purely combinational tready/tvalid/tlast pass-through with
+-- the arithmetic in the same cycle -- ~20ns budget at 50MHz is ample, and
+-- no pipeline means tlast can never land on the wrong beat (S2MM hangs
+-- forever with no error otherwise -- the nastiest failure mode here). If a
+-- deeper filter is needed later, TDM gives N cycles of settling time for
+-- free -- register the datapath and delay tvalid/tlast by the same stages.
 ----------------------------------------------------------------------------------
 
 library IEEE;
@@ -123,10 +94,8 @@ end axi_tdm_filter;
 
 architecture rtl of axi_tdm_filter is
 
-    -- Generic AXI4-Lite bus interface with 4 word registers; reg3 reads
-    -- back the external "fir_result" input rather than its own stored
-    -- value. Generic despite the name -- axi_processing_ch1/ch2 use the
-    -- same hook for their filter output, this one rides a status word.
+    -- reg3 rides its STATUS word on the "fir_result" hook (axi_processing_ch1/2
+    -- ride their filter output on the same hook).
     component my_axi is
         generic (
             C_S_AXI_DATA_WIDTH : integer := 32;

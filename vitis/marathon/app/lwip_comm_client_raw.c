@@ -15,10 +15,6 @@
 #define CONFIG_OP_WRITE 1u
 #include "mono_clock.h"
 
-/* ============================================================
-   GLOBALS
-   ============================================================ */
-
 struct tcp_pcb *client_pcb = NULL;
 static int connected = 0;
 
@@ -33,10 +29,6 @@ static void tcp_client_send(struct tcp_pcb *tpcb, uint16_t type, uint16_t length
 static void tcp_client_send_raw(struct tcp_pcb *tpcb, uint8_t *wire, uint32_t nbytes,
                                 uint16_t length);
 
-/* ============================================================
-   THROUGHPUT STATISTICS
-   ============================================================ */
-
 uint32_t packets_rx = 0;
 uint32_t packets_tx = 0;
 uint32_t samples_rx = 0;
@@ -46,41 +38,31 @@ uint32_t bytes_tx   = 0;
 
 #define MAX_PAYLOAD_SAMPLES 2000
 
-/* Which processing path is live.
- *
- * 1 = buffer-at-a-time DMA through the TDM stream filter (dma_stream.c).
- * 0 = the legacy per-sample AXI-Lite chains (axi_processing.c).
- *
- * Both peripherals are present in the bitstream deliberately, so the two
- * can be A/B'd against identical data without a rebuild. Cleared
- * automatically if dma_stream_init() fails, so a DMA problem degrades to a
- * working system rather than a dead one. */
+/* 1 = buffer-at-a-time DMA through the TDM filter (dma_stream.c); 0 = legacy
+   per-sample AXI-Lite chains (axi_processing.c). Both peripherals sit in the
+   bitstream so they can be A/B'd on identical data; cleared automatically
+   if dma_stream_init() fails, so a DMA problem degrades rather than kills
+   the system. */
 int comm_use_dma = 1;
 
-/* Cumulative, never reset: the metrics packet reports it as a running total
-   so the PC can see both the rate (by differencing) and the lifetime count.
-   A resync is the overload signal worth watching -- it means framing was
-   lost badly enough to need dropping the connection. */
+/* Cumulative, never reset -- PC differences it for rate, or reads it as a
+   lifetime count. A resync means framing was lost badly enough to need
+   dropping the connection; watch this as the overload signal. */
 uint32_t comm_resyncs = 0;
 
-/* Per-packet service latency: from a complete packet being available in the
-   ring to its echo being handed to lwIP. Deliberately NOT end-to-end round
-   trip -- that would be dominated by the PC's scheduler, the relay and TCP,
-   which is precisely the noise this architecture does not control. This
-   isolates the board, which is what the DMA conversion was actually meant to
-   make deterministic.
- *
- * Accumulated here, drained once per second by comm_latency_take(). uint32 us
- * is good for ~71 minutes per sample, so overflow is not a concern; the sum is
- * 64-bit because a second's worth at 1400 pkt/s would otherwise wrap. */
+/* Per-packet service latency: complete-in-ring to echo-handed-to-lwIP.
+   Deliberately NOT end-to-end -- that's dominated by the PC scheduler/relay/
+   TCP, noise this architecture doesn't control. Drained once/s by
+   comm_latency_take(); sum is 64-bit since a second at 1400 pkt/s would
+   otherwise wrap a uint32. */
 static uint32_t lat_min_us = 0xFFFFFFFFu;
 static uint32_t lat_max_us = 0;
 static uint64_t lat_sum_us = 0;
 static uint32_t lat_count  = 0;
 
-/* Start time of the packet currently being serviced. One slot is enough: the
-   AXI-Lite path finishes within a single call, and the DMA path is gated on
-   dma_stream_busy() so only one transfer is ever in flight. */
+/* Start time of the packet in flight. One slot suffices: AXI-Lite finishes
+   in a single call, and DMA is gated on dma_stream_busy() so only one
+   transfer is ever outstanding. */
 static uint64_t lat_t0 = 0;
 
 static void latency_record(uint64_t t0)
@@ -106,22 +88,12 @@ void comm_latency_take(uint32_t *min_us, uint32_t *mean_us, uint32_t *max_us)
 }
 static int dma_init_done = 0;
 
-/* ============================================================
-   START / RESTART TCP CLIENT
-   ============================================================ */
-
-/* Minimum spacing between connection attempts.
- *
- * Without this, tcp_client_error() re-enters tcp_client_start()
- * immediately, so a failing link retries as fast as the main loop spins.
- * Measured 2026-08-17 at ~45,000 connect attempts per second, which
- * exhausts lwIP's PCB pool (MEMP_NUM_TCP_PCB = 32) and leaves the link
- * permanently down at 0 pkt/s.
- *
- * This was hidden until today: the blocking UART writes in comm_log_flush()
- * used to throttle reconnects to ~160/s purely as a side effect of being
- * slow. Bounding the log output (correctly) removed that accidental brake
- * and exposed the missing deliberate one. */
+/* DO NOT remove this backoff. Without it tcp_client_error() re-enters
+   tcp_client_start() as fast as the main loop spins -- measured 2026-08-17
+   at ~45,000 connects/s, which exhausts lwIP's PCB pool (MEMP_NUM_TCP_PCB =
+   32) and leaves the link permanently down. (Blocking UART writes used to
+   accidentally throttle this to ~160/s; bounding comm_log_flush() removed
+   that brake and exposed the need for a deliberate one.) */
 #define RECONNECT_BACKOFF_MS 250
 
 static uint64_t next_connect_ms = 0;
@@ -142,9 +114,8 @@ static void tcp_client_start(void)
     {
         uint64_t now = mono_now_ms();
         if (now < next_connect_ms) {
-            /* Too soon -- comm_process() will retry once the backoff
-               expires. Leaving client_pcb NULL keeps the send path idle
-               in the meantime. */
+            /* Too soon -- comm_process() retries once backoff expires;
+               client_pcb stays NULL so the send path idles meanwhile. */
             connect_pending = 1;
             return;
         }
@@ -165,10 +136,9 @@ static void tcp_client_start(void)
     tcp_err(client_pcb, tcp_client_error);
     tcp_sent(client_pcb, tcp_client_sent);
 
-    /* This is a latency-sensitive echo, not a bulk transfer: each packet
-       is 4 + 6*N bytes, so it ends in a partial segment that Nagle would
-       otherwise hold back until the previous data is ACKed -- serializing
-       the stream into one packet per round trip. */
+    /* Latency-sensitive echo, not bulk transfer: each packet ends in a
+       partial segment Nagle would hold back until the previous data is
+       ACKed, serializing the stream into one packet per round trip. */
     tcp_nagle_disable(client_pcb);
 
     connected = 0;
@@ -181,19 +151,11 @@ static void tcp_client_start(void)
     }
 }
 
-/* ============================================================
-   THREAD ENTRY (called once from main)
-   ============================================================ */
-
 void lwip_comm_client_thread(void *arg)
 {
     comm_log("[N] client start\r\n");
     tcp_client_start();
 }
-
-/* ============================================================
-   CONNECTED CALLBACK
-   ============================================================ */
 
 static err_t tcp_client_connected(void *arg, struct tcp_pcb *tpcb, err_t err)
 {
@@ -207,10 +169,7 @@ static err_t tcp_client_connected(void *arg, struct tcp_pcb *tpcb, err_t err)
     return ERR_ABRT;
 }
 
-/* ============================================================
-   ERROR CALLBACK (AUTO‑RECONNECT)
-   ============================================================ */
-
+/* Auto-reconnect on any TCP error. */
 static void tcp_client_error(void *arg, err_t err)
 {
     comm_log("[E] tcp %d, reconn\r\n", err);
@@ -219,36 +178,19 @@ static void tcp_client_error(void *arg, err_t err)
     tcp_client_start();
 }
 
-/* ============================================================
-   SENT CALLBACK (optional)
-   ============================================================ */
-
 static err_t tcp_client_sent(void *arg, struct tcp_pcb *tpcb, u16_t len)
 {
     return ERR_OK;
 }
 
-/* ============================================================
-   RESYNC (framing lost / unrecoverable backlog)
-   ============================================================ */
-
-/* Tear down the connection and start a fresh one, discarding whatever is
-   in the ring.
-
-   This is the only correct response to a lost or hopeless framing state.
-   The stream is length-prefixed with no sync marker, so once the read
-   position is off by even one byte there is no way to recover in-band --
-   every subsequent 4-byte header read is garbage, and a plausible-looking
-   type/length pair can swallow kilobytes of valid data before failing
-   again. The previous code tried to limp on (drop the oldest bytes on
-   overflow, skip 4 bytes on an unknown type) and reliably ended up in an
-   unrecoverable loop under load.
-
-   A reconnect is cheap and *guaranteed* to resync, because the PC-side
-   relay is packet-aware: it reassembles each packet (header + full body)
-   before forwarding, so a new connection always begins on a packet
-   boundary. tcp_client_start() closes the old pcb and calls
-   rx_ring_reset() for us. */
+/* Tear down and reconnect, discarding the ring -- the only correct response
+   to lost framing. The stream is length-prefixed with no sync marker, so
+   once the read position is off by a byte there's no in-band recovery
+   (every header read is garbage, and a plausible type/length can swallow
+   kilobytes before failing again -- a prior "limp on" approach reliably
+   deadlocked under load). A reconnect is guaranteed to resync because the
+   PC relay is packet-aware and always forwards on a packet boundary.
+   tcp_client_start() closes the old pcb and resets the ring. */
 static void tcp_client_resync(const char *why)
 {
     comm_resyncs++;
@@ -257,10 +199,7 @@ static void tcp_client_resync(const char *why)
     tcp_client_start();
 }
 
-/* ============================================================
-   RECEIVE CALLBACK (FAST: only push into ring)
-   ============================================================ */
-
+/* Fast path: only pushes into the ring, no parsing. */
 static err_t tcp_client_recv(void *arg, struct tcp_pcb *tpcb,
                              struct pbuf *p, err_t err)
 {
@@ -273,12 +212,10 @@ static err_t tcp_client_recv(void *arg, struct tcp_pcb *tpcb,
         return ERR_OK;
     }
 
-    /* Test the whole chain up front: pushing part of it and then bailing
-       would itself leave a fragment in the ring. A full ring means
-       comm_process() has been unable to drain for a long time (its
-       backpressure check is holding because our own TX is backed up),
-       i.e. the sender is durably outrunning us -- dropping the link is
-       both the honest signal and the only non-corrupting way out. */
+    /* Check capacity up front -- pushing part of the chain then bailing
+       would itself leave a fragment. A full ring means comm_process()
+       couldn't drain for a long time (sender durably outrunning us), so
+       dropping the link is the only non-corrupting way out. */
     if (rx_ring_free() < p->tot_len) {
         pbuf_free(p);
         tcp_client_resync("ring full");
@@ -298,11 +235,9 @@ static err_t tcp_client_recv(void *arg, struct tcp_pcb *tpcb,
     return ERR_OK;
 }
 
-/* Reverse the byte order of every field in one record, in place, per the
-   field-width table in packet_format.h -- generalizes the old fixed
-   2-byte-per-sample swap so widths can change (16/32 bit) without this
-   code changing, only packet_format.json + a rebuild. Self-inverse, so
-   the same call converts wire (big-endian) -> host and host -> wire. */
+/* Byte-swaps every field of one record per packet_format.h's width table,
+   so field widths can change via packet_format.json + rebuild with no code
+   change here. Self-inverse: same call does wire->host and host->wire. */
 static void swap_be_fields(uint8_t *record, uint16_t type)
 {
     uint32_t n_fields;
@@ -320,26 +255,18 @@ static void swap_be_fields(uint8_t *record, uint16_t type)
     }
 }
 
-/* Largest record size we accept, sized off the biggest packet type known
-   to packet_format.h -- currently "data" (ts+ch1+ch2). Bounds the static
-   buffers below regardless of which type actually arrives. */
+/* Bounds the static buffers below regardless of which type arrives --
+   sized off the biggest packet type in packet_format.h ("data"). */
 #define MAX_PAYLOAD_BYTES (MAX_PAYLOAD_SAMPLES * sizeof(packet_data_t))
 
-/* ============================================================
-   PROCESSING FUNCTION (called from main loop)
-   ============================================================ */
 void comm_process(void)
 {
-    /* This is the module's once-per-loop entry point, so the deferred
-       reconnect retry lives here: tcp_client_start() returns without
-       connecting if it was called inside the backoff window, and this is
-       what picks it up again afterwards. */
+    /* Module's once-per-loop entry point -- picks up the deferred reconnect
+       retry once backoff expires. */
     if (connect_pending && mono_now_ms() >= next_connect_ms)
         tcp_client_start();
 
-    /* One-time DMA bring-up, done here rather than in main() so the path
-       stays self-contained: nothing outside this module needs to know which
-       processing path is in use. */
+    /* One-time DMA bring-up, done here so the path stays self-contained. */
     if (comm_use_dma && !dma_init_done) {
         dma_init_done = 1;
         if (dma_stream_init() != 0) {
@@ -348,11 +275,10 @@ void comm_process(void)
         }
     }
 
-    /* Collect a finished transfer BEFORE trying to start another -- the
-       buffer has to be released before it can be reused. The DMA wrote the
-       payload in wire order (the filter byte-swaps in fabric) directly
-       behind a gap reserved for the header, so this goes out as one
-       contiguous write with no repacking. */
+    /* Collect a finished transfer before starting another -- the buffer must
+       be released before reuse. DMA already wrote the payload in wire order
+       right behind the header gap, so this is one contiguous write, no
+       repacking. */
     if (comm_use_dma) {
         uint8_t *out;
         uint32_t out_bytes;
@@ -360,8 +286,7 @@ void comm_process(void)
         if (dma_stream_poll(&out, &out_bytes, &out_type, &out_len)) {
             if (client_pcb && connected)
                 tcp_client_send_raw(client_pcb, out, out_bytes, out_len);
-            /* Measured to here, not to poll() returning: the echo leaving is
-               what the latency is of. */
+            /* Measured to the echo leaving, not to poll() returning. */
             latency_record(lat_t0);
             lat_t0 = 0;
             dma_stream_release();
@@ -383,11 +308,9 @@ void comm_process(void)
 
         uint32_t record_size = packet_record_size(type);
         if (record_size == 0) {
-            /* An unknown type means we are not actually looking at a
-               header -- framing is already lost. We can't skip the body
-               (its size is unknown), and sliding forward a byte or four at
-               a time through a multi-KB packet stream does not resync in
-               practice. Reconnect instead. */
+            /* Unknown type = not actually a header, framing already lost.
+               Body size is unknown so we can't skip it, and sliding forward
+               byte-by-byte doesn't resync in practice -- reconnect. */
             comm_log("[E] bad type %u\r\n", type);
             tcp_client_resync("framing lost");
             return;
@@ -400,20 +323,18 @@ void comm_process(void)
         if (rx_ring_used() < total_needed)
             return;
 
-        /* Backpressure: don't consume this packet until we can actually
-           forward it. Popping it and dropping it on a failed tcp_write()
-           would silently lose data instead of just waiting for the peer's
-           window to free up. */
+        /* Backpressure: don't consume until we can actually forward it --
+           popping and dropping on a failed tcp_write() would silently lose
+           data instead of waiting for the peer's window. */
         if (client_pcb && connected) {
             uint16_t need = 4 + (uint16_t)body_bytes;
             if (tcp_sndbuf(client_pcb) < need)
                 return;
         }
 
-        /* Same argument for the DMA: if a transfer is still in flight there
-           is nowhere to put this packet, so leave it in the ring untouched
-           rather than consuming it and having to drop it. Must be checked
-           BEFORE the rx_ring_advance() below. */
+        /* Same for DMA: a transfer in flight means nowhere to put this
+           packet, so leave it in the ring. Must run BEFORE rx_ring_advance()
+           below. */
         if (comm_use_dma && type == PACKET_TYPE_DATA && dma_stream_busy())
             return;
 
@@ -423,21 +344,18 @@ void comm_process(void)
         static uint8_t payload_buf[MAX_PAYLOAD_BYTES];
 
         if (length > MAX_PAYLOAD_SAMPLES) {
-            /* Also a framing-loss symptom rather than a real oversized
-               packet: the sender is capped well below this by
-               TCP_SND_BUF (see the backpressure check above), so a length
-               this large means we parsed a garbage header. */
+            /* A framing-loss symptom, not a real oversized packet -- the
+               sender is capped well below this by TCP_SND_BUF, so this
+               means we parsed a garbage header. */
             comm_log("[E] len %u too big\r\n", length);
             tcp_client_resync("framing lost");
             return;
         }
 
-        /* DMA path: copy the body straight out of the ring into the DMA
-           buffer and hand it to the fabric. Deliberately NO byte swap here
-           -- the TDM filter does it in hardware, which is what takes the CPU
-           out of the per-sample path entirely. Without that, killing the
-           AXI-Lite round trips would still leave a per-sample swap loop
-           behind and cap the win at ~3.8x. */
+        /* DMA path: copy straight into the DMA buffer, NO byte swap -- the
+           TDM filter does it in hardware, which is what takes the CPU fully
+           out of the per-sample path (otherwise a swap loop would cap the
+           win at ~3.8x). */
         if (comm_use_dma && type == PACKET_TYPE_DATA) {
             if (length > DMA_FRAMES_PER_BUF) {
                 comm_log("[E] len %u > dma buf\r\n", length);
@@ -445,9 +363,8 @@ void comm_process(void)
                 return;
             }
 
-            /* Clock starts here: the packet is complete and about to be
-               serviced. Anything before this is waiting for the wire, which is
-               not the board's latency. */
+            /* Clock starts here -- packet complete, about to be serviced.
+               Anything earlier is wire wait, not board latency. */
             lat_t0 = mono_now_us();
 
             rx_ring_peek(0, dma_stream_tx_buf(), body_bytes);
@@ -462,14 +379,12 @@ void comm_process(void)
                 tcp_client_resync("dma start failed");
                 return;
             }
-            /* The result is collected on a later pass of the main loop --
-               nothing blocks here. */
+            /* Result collected on a later main-loop pass -- nothing blocks. */
             continue;
         }
 
-        /* Bulk-copy the body out of the ring (at most one wrap), then
-           byte-swap each record in place (network byte order: MSB first,
-           matching tcp_client_send) instead of popping byte-by-byte. */
+        /* Bulk-copy out of the ring (at most one wrap), byte-swap each
+           record in place to network order, instead of popping byte-by-byte. */
         uint64_t t0 = mono_now_us();
 
         rx_ring_peek(0, payload_buf, body_bytes);
@@ -482,17 +397,11 @@ void comm_process(void)
         samples_rx += length;
         bytes_rx   += total_needed;
 
-        /* Config packets: apply (op=WRITE) or not (op=READ), then always
-           reply with a read-back of the actual fabric registers. Replying
-           with the read-back rather than an echo is the point -- a value the
-           hardware clamped or never received shows up on the PC as a
-           mismatch instead of being confirmed as if it had taken effect.
-
-           Handled here on the AXI-Lite path, not in the DMA branch above:
-           these are register pokes, not stream data, and they must not be
-           gated on dma_stream_busy() -- config has to stay reachable while
-           the stream is saturated, which is exactly when you want to change
-           it. */
+        /* Config: apply (WRITE) or not (READ), always reply with a
+           read-back of the actual registers -- not an echo, so a clamped or
+           dropped value shows up as a mismatch instead of a false confirm.
+           Handled on the AXI-Lite path, not gated on dma_stream_busy(): config
+           must stay reachable exactly when the stream is saturated. */
         if (type == PACKET_TYPE_CONFIG) {
             if (length >= 1) {
                 packet_config_t *req = (packet_config_t *)payload_buf;
@@ -507,10 +416,8 @@ void comm_process(void)
                                       &rsp.ctrl, &rsp.status);
                 rsp.log_mask = comm_log_get_mask();
 
-                /* Tagged [C], so muting the config category mutes this too --
-                   which is correct: if you asked for silence, the packet that
-                   asked for it should not answer back on the UART. The reply
-                   still goes to the PC either way. */
+                /* Tagged [C] -- muting config mutes this too, correctly; the
+                   PC reply still goes out either way. */
                 comm_log("[C] op=%lu n=%lu sh=%lu ctrl=%lu log=%02lx st=%08lx\r\n",
                          (unsigned long)rsp.op, (unsigned long)rsp.n_channels,
                          (unsigned long)rsp.shift, (unsigned long)rsp.ctrl,
@@ -523,8 +430,7 @@ void comm_process(void)
             continue;
         }
 
-        /* "data" packets get each channel run through its own AXI-Lite
-           processing chain in the PL (see axi_processing.c). */
+        /* "data" packets: each channel through its own AXI-Lite chain. */
         if (type == PACKET_TYPE_DATA) {
             packet_data_t *entries = (packet_data_t *)payload_buf;
             for (uint32_t i = 0; i < length; i++)
@@ -533,40 +439,29 @@ void comm_process(void)
             if (client_pcb && connected)
                 tcp_client_send(client_pcb, type, length, payload_buf);
 
-            /* AXI-Lite path completes inside this one call, so the whole
-               service time is measured here -- directly comparable with the
-               DMA path's figure above, which spans main-loop passes. */
+            /* Completes inside this one call, so the whole service time is
+               measured here -- comparable with the DMA path's figure above. */
             latency_record(t0);
         }
     }
 }
 
-
-/* ============================================================
-   SEND RESPONSE
-   ============================================================ */
-
-/* Exported so main.c can push metrics from the same place it computes the
-   [S] console line -- one computation, two outputs, so the serial console and
-   the GUI can never disagree about what the board is doing. Silently does
-   nothing while disconnected; metrics are a status feed, not something worth
-   queueing or retrying. */
+/* Exported so main.c pushes metrics from where it computes the [S] line --
+   one computation, two outputs, console and GUI can't disagree. No-op
+   while disconnected; metrics are a status feed, not worth retrying. */
 void comm_send_metrics(const packet_metrics_t *m)
 {
     if (client_pcb && connected)
         tcp_client_send(client_pcb, PACKET_TYPE_METRICS, 1, (uint8_t *)m);
 }
 
-/* Send an already-complete wire-order block (4-byte header followed by the
-   payload) exactly as-is. This is the DMA path's counterpart to
-   tcp_client_send(): there is nothing to build and nothing to swap, because
-   the buffer the DMA produced IS the wire format.
+/* DMA path's counterpart to tcp_client_send() -- sends an already-complete
+   wire-order block as-is, nothing to build or swap.
  *
- * TCP_WRITE_FLAG_COPY is still used. Dropping it would be genuinely
- * zero-copy, but lwIP then holds a reference to the buffer until the PC
- * ACKs, and with only two DMA buffers a retransmit or window stall would let
- * the next transfer overwrite data still in flight. Going zero-copy means
- * raising DMA_NBUF to 4 first. */
+ * TCP_WRITE_FLAG_COPY stays on: dropping it would be genuinely zero-copy,
+ * but lwIP then holds a reference until the PC ACKs, and with only 2 DMA
+ * buffers a retransmit/stall would let the next transfer overwrite data
+ * still in flight. Zero-copy needs DMA_NBUF raised to 4 first. */
 static void tcp_client_send_raw(struct tcp_pcb *tpcb, uint8_t *wire, uint32_t nbytes,
                                 uint16_t length)
 {
@@ -596,22 +491,19 @@ static void tcp_client_send(struct tcp_pcb *tpcb, uint16_t type, uint16_t length
     buf[2] = (length >> 8) & 0xFF;
     buf[3] = (length     ) & 0xFF;
 
-    /* payload_bytes is host-order (already byte-swapped on the way in by
-       comm_process); swap each record back to wire order (big-endian) on
-       the way out -- swap_be_fields is its own inverse. */
+    /* payload_bytes is host-order; swap back to wire order on the way out
+       (swap_be_fields is its own inverse). */
     memcpy(buf + 4, payload_bytes, body_bytes);
     for (uint32_t i = 0; i < length; i++)
         swap_be_fields(buf + 4 + i * record_size, type);
 
     err_t err = tcp_write(tpcb, buf, total_bytes, TCP_WRITE_FLAG_COPY);
     if (err == ERR_OK) {
-        /* Push it out now. tcp_write() only *queues* -- without this the
-           segment leaves when lwIP next feels like it (fast timer, or an
-           incoming ACK happening to trigger a flush), which turned the
-           whole pipeline into one packet per round trip and pinned
-           throughput at ~33 pkt/s no matter what else was tuned. The
-           previous comment here ("let LWIP batch tcp_output() via timers")
-           described that as intentional; it was the bug. */
+        /* DO NOT remove: tcp_write() only queues. Without an explicit
+           tcp_output() here the segment waits for lwIP's own timer/ACK
+           trigger, which measured out at ~33 pkt/s -- one packet per round
+           trip. (A prior comment called that batching intentional; it was
+           the bug.) */
         err = tcp_output(tpcb);
         if (err != ERR_OK)
             comm_log("[E] output %d\r\n", err);

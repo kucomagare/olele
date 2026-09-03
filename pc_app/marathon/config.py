@@ -1,388 +1,205 @@
-# All tunable knobs for the PC-side client in one place -- edit here when
-# iterating on send rate / chunk size / plot window / signal shape, etc.
-# (kept separate from networking/plotting/signal-generation code so the
-# values you actually hand-tune during testing aren't buried in the
-# middle of a longer script).
+# PC-side client tunables, kept out of net/plot/signal_gen code.
 
-BOARD_CONNECTED = True  # True: connect over the real board network (192.168.1.100) --
-                        # requires the actual board, tcp_server_app forwards to/from it.
-                        # False: connect to tcp_server_app on 127.0.0.1, which echoes
-                        # every packet straight back to the sender (see the ip ==
-                        # "127.0.0.1" branch in tcp_server_app.cpp) -- no board needed,
-                        # exercises the real wire path end to end.
+# True: real board (192.168.1.100). False: loop through tcp_server_app on
+# 127.0.0.1 (echoes packets back) -- exercises the wire path, no board needed.
+BOARD_CONNECTED = True
 
 HOST = "192.168.1.100" if BOARD_CONNECTED else "127.0.0.1"
 PORT = 5001
 
-PLOT_BUFFER = 2048  # Rolling window length, in samples. Live-editable from
-                    # the panel -- plot.py reallocates the four rolling
-                    # buffers and re-fits the x-axis when this changes,
-                    # keeping the most recent samples from the old buffers.
-                    # 2048 = exactly one second at ECG_SAMPLING_RATE, so the
-                    # window is a round unit of signal rather than a round
-                    # number of samples.
+# Rolling window length, samples. Live-editable -- plot.py reallocates the
+# 4 rolling buffers and re-fits the x-axis on change. 2048 = 1s at
+# ECG_SAMPLING_RATE, a round unit of signal rather than of samples.
+PLOT_BUFFER = 2048
 
-# Derived from the wire format rather than hardcoded: marathon uses 32-bit
-# TDM slots (sizif used 16), and a stale 0..65535 window would show nothing
-# at all against samples centred on 2**31. Reading it from the same JSON
-# that generates the firmware's C header means changing the slot width
-# again can never leave this behind.
+# Read from the wire format, not hardcoded: marathon's 32-bit TDM slots
+# (sizif used 16) would show nothing against a stale 0..65535 window.
 import numpy as _np
 from packet_format import CH1_DTYPE as _CH1_DTYPE
 _WIRE_MAX = int(_np.iinfo(_CH1_DTYPE).max)
 
-# Full scale of the wire, as a public name: the largest value a sample can
-# carry, and so the widest the plot's y-range can usefully be. The panel
-# quotes it when it rejects a y-limit, since "0..4294967295" is the missing
-# piece of information when a hand-typed range makes the trace vanish.
+# Largest value a sample can carry -- the panel quotes this when it
+# rejects a y-limit that would make the trace vanish.
 WIRE_FULL_SCALE = _WIRE_MAX
 
-# Initial size of both GUI windows (the live client and SAT), in pixels.
-# A plain fixed size on purpose -- read once when each window is created.
-# Only the STARTING size: drag either window to whatever you like afterwards,
-# and nothing here constrains it.
+# Starting size only (pixels) for both GUI windows -- freely resizable after.
 WINDOW_W = 1280
 WINDOW_H = 540
 
-PLOT_MIN = 0            # Y-axis display range, both channels. Live-editable
-PLOT_MAX = _WIRE_MAX    # from the panel -- purely a *view* (what part of the
-                    # signal is visible), independent of ECG_AMPLITUDE
-                    # (config.py below), which controls how much of the
-                    # wire dtype's range the *generated* signal actually
-                    # occupies. Defaults to the full wire range so nothing
-                    # is clipped from view;
-                    # narrow it to zoom into a portion of the signal.
+# Y-axis display range (a view), independent of ECG_AMPLITUDE (how much of
+# the wire range the generated signal actually occupies). Defaults to full
+# wire range; narrow to zoom.
+PLOT_MIN = 0
+PLOT_MAX = _WIRE_MAX
 
-# "scope"    -- show the most recent PLOT_BUFFER raw samples, refreshed at
-#               FRAME_RATE. Short window, full waveform detail. This is
-#               what you want to see the signal's shape.
-# "envelope" -- roll min/max pairs from every packet into the buffer.
-#               Long window (PLOT_BUFFER/(2*SEND_RATE) seconds), shows
-#               amplitude over time but not shape.
-#
-# At real ECG rates (SEND_RATE*CHUNK_SIZE ~ 500 samples/s) "scope" is the
-# right choice -- it's what shows ECG morphology (P-QRS-T shape). The
-# aliasing problem "envelope" mode was built for only bites at the old
-# ~400k samples/s stress-test rate: PLOT_BUFFER samples of raw signal
-# there was 2.5 ms of real time, so "scope" showed only that sliver while
-# "envelope" covered ~0.6 s at the cost of collapsing each packet to its
-# extremes.
+# "scope": most recent PLOT_BUFFER raw samples, full waveform detail --
+# right choice at real ECG rates, shows P-QRS-T shape.
+# "envelope": min/max pairs per packet, long window but shape-free -- built
+# for the old ~400k samples/s stress-test rate where "scope" showed only a
+# 2.5ms aliased sliver; doesn't apply at real ECG rates.
 PLOT_MODE = "scope"
 
 # --- Oscilloscope trigger -------------------------------------------------
-# Why this exists: the window shows PLOT_BUFFER samples, but at high
-# streaming rates far more than that arrives between two frames. At
-# SEND_RATE=1500 x CHUNK_SIZE=960 the stream is 1.44M samples/s, so a
-# 2000-sample window is 1.39 ms of signal and turns over ~30 times per frame
-# at FRAME_RATE=24. Which phase of the waveform is on screen at frame time is
-# then arbitrary, and the trace appears to jump rather than scroll -- not
-# dropped or corrupt data, just no phase reference. (At the old
-# 50 x 10 = 500 samples/s only ~21 samples arrived per frame, 1% of the
-# window, which is why it used to look stable.)
+# At high streaming rates the window turns over many times per frame (e.g.
+# 1500x960 = 1.44M samples/s, a 2000-sample window is 1.39ms and turns over
+# ~30x per frame at FRAME_RATE=24) -- the on-screen phase becomes arbitrary
+# and the trace jumps rather than scrolls, not dropped/corrupt data.
 #
-# A real scope fixes this by triggering: instead of always showing the newest
-# PLOT_BUFFER samples, show the window that STARTS at the most recent
-# upward crossing of a level. Same phase every frame, so a repeating
-# waveform stands still no matter how fast the stream runs.
-#
-# Off by default: at real-time playback rates the window scrolls smoothly on
-# its own and a trigger only costs you the newest samples (it slides the view
-# back to the last crossing). Turn it on -- from the panel, live -- when the
-# stream outruns the window and the trace starts jumping.
-#
-# Cost: the capture buffers become PLOT_CAPTURE_FACTOR x PLOT_BUFFER so
-# there is somewhere to slide the window within. The displayed length, the
-# x-axis and PLOT_BUFFER's meaning are all unchanged.
+# Trigger shows the window starting at the most recent upward crossing of a
+# level instead of always the newest samples, so a repeating waveform holds
+# still regardless of stream rate. Off by default -- real-time playback
+# scrolls smoothly on its own; turn on when the stream outruns the window.
+# Costs: capture buffers become PLOT_CAPTURE_FACTOR x PLOT_BUFFER for room
+# to slide within; displayed length/x-axis/PLOT_BUFFER meaning unchanged.
 PLOT_TRIGGER = False
 
-# Trigger level as a fraction of the PLOT_MIN..PLOT_MAX view range. For ECG
-# the R-wave upstroke is the obvious feature to lock to; 0.6 sits above the
-# baseline but below the R peak, so it fires once per beat. Lower it if the
-# trace free-runs (never triggering), raise it if it locks onto a T wave or
-# onto noise.
+# Trigger level, fraction of PLOT_MIN..PLOT_MAX. 0.6 sits above baseline but
+# below the R peak so it fires once per beat; lower if free-running, raise
+# if it locks onto a T wave or noise.
 PLOT_TRIGGER_LEVEL = 0.6
 
-# How much history to keep behind the displayed window, as a multiple of
-# PLOT_BUFFER. 2 means the trigger can slide the window back by up to one
-# full window to find a crossing. Larger costs memory and a slightly longer
-# search for no real benefit.
+# History kept behind the displayed window, x PLOT_BUFFER. 2 lets the
+# trigger slide back up to one full window to find a crossing.
 PLOT_CAPTURE_FACTOR = 2
 
-# Grid on both channel plots, and how much vertical space separates them
-# (a fraction of the average axes height -- matplotlib's subplots_adjust
-# hspace). The two axes share an x-axis and are meant to be read against each
-# other, so they sit close together with a grid to carry the eye across.
-#
-# PLOT_GRID switches it on and off; PLOT_GRID_MODE picks how dense it is when
-# on. "normal" is the tick gridlines only; "fine" subdivides each of them into
-# 5, the way ECG paper puts five small squares inside every large one -- for
-# reading an interval off the screen rather than just lining the two channels
-# up. Both live-editable from the plot bar.
+# Grid on both plots (PLOT_GRID) and its density (PLOT_GRID_MODE): "normal"
+# is tick gridlines only, "fine" subdivides each into 5 (like ECG paper's
+# small squares) for reading intervals off the screen. PLOT_HSPACE is the
+# vertical gap between the two axes (they share an x-axis, read together,
+# so kept small). All live-editable from the plot bar.
 PLOT_GRID = True
 PLOT_GRID_MODE = "normal"
 PLOT_GRID_MODES = ("normal", "fine")
 PLOT_GRID_FINE_DIVISIONS = 5
 PLOT_HSPACE = 0.07
 
+# The live app deliberately has NO spectrum view -- a rolling-buffer FFT
+# costs every frame forever for a measurement that doesn't need to be live.
+# Moved to sat.py, which reads a Log dump and can take as long as it likes.
 
-# NOTE: the live app deliberately has NO spectrum view. It was built, it
-# worked, and it was the wrong place for it: an FFT on a rolling buffer costs
-# something on every frame forever, and what the measurement is actually for
-# -- inject a tone, read the attenuation, compare against a model -- does not
-# need to happen live at all. It moved to sat.py (Static Analysis Tool),
-# which reads a Log buffer dump and can take as long as it likes.
-
-# Each received chunk is reduced to this many min/max pairs before being
-# pushed into the plot buffer (so 2*PLOT_ENVELOPE_BLOCKS points per
-# packet). Set to 0 to plot raw samples.
-#
-# Why it defaults to 1: at SEND_RATE=800 / CHUNK_SIZE=500 the raw stream is
-# 400k samples/s, which turned a 1000-point buffer over 400 times a second
-# -- the window showed 2.5 ms of signal and was pure aliasing, at ~90% of a
-# CPU core. At 1 block the window covers PLOT_BUFFER/(2*SEND_RATE) seconds
-# (~0.6 s at 800 pkt/s) and shows the signal's envelope.
-#
-# Raise it for more detail within each packet (costs proportionally more
-# plot work); note CHUNK_SIZE samples span only CHUNK_SIZE/sample-rate of
-# real time, so past a point you are magnifying noise.
+# Each received chunk reduced to this many min/max pairs before the plot
+# buffer (2*PLOT_ENVELOPE_BLOCKS points/packet). 0 = plot raw. Default 1:
+# at the old 400k samples/s stress rate a 1000-pt buffer turned over 400x/s
+# (pure aliasing); at 1 block the window covers a real span and shows the
+# envelope. Raise for more per-packet detail (costs more plot work).
 PLOT_ENVELOPE_BLOCKS = 1
 
-# Minimum axes pixels per sample for the traces to be drawn "steps-mid"
-# (each sample a flat segment centred on its x position) rather than as
-# plain joined points.
-#
-# steps-mid exists to stop the plot implying an interpolated value between
-# two samples that was never measured -- worth having, but it can only be
-# SEEN when a sample occupies more than a pixel or so. Above that density the
-# steps are sub-pixel and the two styles render identically, while steps-mid
-# still costs its price: it doubles the vertex count, measured at 3.03 ms per
-# 2000-point line against 1.83 ms without, i.e. ~4.8 ms of every frame for
-# the four traces (2026-08-31, PLOT_BUFFER=2000, ~800 px wide).
-#
-# So it is chosen per frame from the axes' actual pixel width: sparse
-# windows get the honest stepped rendering, dense ones get the cheap one
-# that looks the same. Set to 0 to force steps-mid always.
+# Minimum axes px/sample for "steps-mid" rendering (flat segment per
+# sample, vs. plain joined points) -- steps-mid stops the plot implying an
+# interpolated value, but is only visible above ~1px/sample and doubles
+# vertex count (measured ~4.8ms/frame extra across 4 traces at 2000pts).
+# Chosen per frame from actual pixel width. 0 = always steps-mid.
 PLOT_STEPS_MIN_PX = 2.0
 
-# Seconds of silence from the far end before the client says so, while it is
-# streaming and expecting an echo.
-#
-# Why this exists: a healthy send path proves nothing about the far end. The
-# relay accepts every byte and discards it when it has no partner peer, so on
-# 2026-09-01 the client reported "1700 pkts/s", zero drops and zero
-# send-stalls for minutes while the board was wedged and not answering ping.
-# Every send-side counter was honest; the conclusion drawn from them was
-# still wrong. Only the receive path knew, by being silent.
-#
-# 3 s is comfortably longer than any stall the catch-up limiter tolerates
-# (50 ms) or a TCP retransmission burst on this link, so it fires on "the far
-# end is gone", not on "the far end hiccuped".
+# Seconds of silence from the far end before the client flags it, while
+# streaming. A clean send path proves nothing about the far end -- the
+# relay discards bytes with no partner peer, so a wedged board can still
+# show zero send-side drops (see research_info/dma-measurements.md, the
+# 2026-09-01 wedge). 3s is well past any normal stall/retransmit burst.
 RX_WATCHDOG_S = 3.0
 
-# How often the Tk event loop is pumped, Hz -- button clicks, typing, hover.
-# Deliberately independent of FRAME_RATE: events used to be pumped only when
-# the plot redrew, so lowering FRAME_RATE (which is the recommended way to
-# save CPU) also made the panel feel broken, and a click could sit unhandled
-# for a whole frame period. flush_events() costs 0.08 ms, so 100 Hz is under
-# 1% of a core.
+# Tk event-loop pump rate, Hz -- independent of FRAME_RATE so lowering the
+# latter (to save CPU) doesn't also make clicks/typing feel unresponsive.
+# flush_events() costs 0.08ms, so 100Hz is under 1% of a core.
 UI_POLL_RATE = 100.0
-FRAME_RATE = 60   # Plot redraws/s. Live-editable from the panel --
-                  # python_client.py reads config.FRAME_RATE each loop
-                  # cycle rather than a value frozen at import time.
-                  # Costs real CPU: even with blitting, refresh() still
-                  # does real canvas work every frame. Measured
-                  # 2026-08-17 (pre-blitting): dropping this to 2 took
-                  # python_client from 103% to 36% CPU, with zero change
-                  # to throughput (that was a firmware-side limit) -- this
-                  # is a UI-smoothness knob, not a performance one, lower
-                  # it only if you need the CPU.
-# Wire cost is 4 + 12*CHUNK_SIZE bytes per packet (ts+ch1+ch2, 4 bytes each
-# now that marathon uses 32-bit TDM slots).
-#
-# HARDWARE CEILING, for reference (measured 2026-08-17, CHUNK_SIZE=500,
-# full detail in research_info/architecture-roadmap.md): the board plateaus
-# flat at ~825 pkt/s = 412,500 samples/s = 2.48 MB/s, set by per-sample
-# AXI-Lite round trips in axi_process_sample(). Overshooting it degrades
-# gracefully (resyncs, throughput loss) rather than corrupting data -- see
-# the firmware's ring-overflow/resync handling -- but there's no reason to
-# get near it at real ECG rates; it only matters if SEND_RATE/CHUNK_SIZE
-# get cranked up well past real-time.
-#
-# SEND_RATE x CHUNK_SIZE is the effective ECG playback rate (samples/s)
-# pulled out of the simulated buffer -- see ECG_SAMPLING_RATE below. Both
-# fields are live-editable from the control panel at runtime (net.py and
-# signal_gen.py read config.SEND_RATE / config.CHUNK_SIZE directly rather
-# than a value frozen at import time), so these are just the startup
-# defaults, not a ceiling.
-#
-# SEND_RATE * CHUNK_SIZE is the effective sample rate. When it equals
-# ECG_SAMPLING_RATE the stream runs at real-world speed: one wall-clock
-# second of stream is one second of ECG.
-#
-# The defaults below do NOT do that, deliberately: 24 * 1024 = 24576/s
-# against ECG_SAMPLING_RATE 2048, so the waveform plays back 12x faster than
-# life. That is a scrub speed, not a wire-format constraint -- nothing
-# breaks, the beats just arrive twelve times too often. Set SEND_RATE = 2 (2
-# * 1024 = 2048) if you want real time back at this chunk size.
-#
-# Upper bound on CHUNK_SIZE is MAX_CHUNK_SIZE below, not TCP_SND_BUF: at
-# 65535 the old (TCP_SND_BUF-4)/6 = 1364 limit no longer binds. Historical
-# note: this pipeline was previously stress-tested at SEND_RATE=800 /
-# CHUNK_SIZE=500 (~412k samples/s) against the AXI-Lite ceiling documented
-# in research_info/architecture-roadmap.md -- that's a different exercise
-# from streaming real ECG and is no longer the default.
+
+# Plot redraws/s, live-editable (python_client.py reads it each loop, not
+# frozen at import). Real CPU cost even with blitting -- measured
+# 2026-08-17 pre-blitting: dropping to 2 took CPU 103%->36% with zero
+# throughput change (that was firmware-bound) -- a UI-smoothness knob only.
+FRAME_RATE = 60
+
+# SEND_RATE x CHUNK_SIZE is the effective ECG playback rate pulled from the
+# simulated buffer (see ECG_SAMPLING_RATE) -- both live-editable, these are
+# just startup defaults. Equal to ECG_SAMPLING_RATE = real-world speed; the
+# defaults below (64*8=512 vs ECG_SAMPLING_RATE 2048) deliberately don't --
+# a 4x scrub speed, not a wire-format constraint. Board hardware ceiling
+# (~825 pkt/s AXI-Lite path) is far above any real-ECG-rate concern; see
+# research_info/dma-architecture.md.
 SEND_RATE = 64
-#
-# *** MARATHON CONSTRAINT: keep this a multiple of 8. ***
-# A DMA buffer must be both a whole number of frames (or channel assignment
-# rotates on the next buffer) and a multiple of 32 bytes (or cache
-# flush/invalidate spills onto neighbouring data). With 32-bit slots a frame
-# is 4*(N+1) bytes, so 8 frames is always 32*(N+1) -- satisfying both, for
-# any channel count. The firmware sends one packet per DMA buffer, so the
-# frames-per-packet count is what has to obey it.
+
+# *** MARATHON CONSTRAINT: CHUNK_SIZE must stay a multiple of 8. *** A DMA
+# buffer needs both a whole number of frames and a multiple of 32 bytes;
+# with 32-bit slots, 8 frames satisfies both for any channel count. One
+# packet per DMA buffer, so this is the frames-per-packet count.
 CHUNK_SIZE = 8
 
-MAX_CHUNK_SIZE = 2000  # mirrors MAX_SAMPLES in tcp_server_app.cpp and
-                        # MAX_PAYLOAD_SAMPLES in lwip_comm_client_raw.c --
-                        # the wire/firmware hard ceiling. The control panel
-                        # clamps to this. Also a multiple of 8, so the whole
-                        # range below is reachable.
+# Mirrors MAX_SAMPLES in tcp_server_app.cpp / MAX_PAYLOAD_SAMPLES in
+# lwip_comm_client_raw.c -- the wire/firmware hard ceiling. Panel clamps to
+# this; also a multiple of 8.
+MAX_CHUNK_SIZE = 2000
 
-# Machine-readable form of the MARATHON CONSTRAINT documented above, so the
-# control panel can enforce it instead of leaving it to a comment nobody
-# reads mid-experiment. The panel snaps any typed Chunk size down to a
-# multiple of this. sizif has no such constraint (its equivalent is 1) --
-# reading it with getattr() keeps a copied panel working either way.
+# Machine-readable form of the MARATHON CONSTRAINT above so the panel can
+# enforce it (snaps typed values down to a multiple). sizif has none (its
+# equivalent is 1); read via getattr() so a copied panel works either way.
 CHUNK_SIZE_GRANULARITY = 8
 
 # ECG signal generation (neurokit2). ch1/ch2 are each an independent
 # nk.ecg_simulate() call, cached and re-sliced per packet -- see
 # signal_gen.py for how SEND_RATE/CHUNK_SIZE map onto this buffer.
-ECG_SAMPLING_RATE = 2048  # Hz, native rate of the simulated buffer. A
-                          # standard clinical rate (compare 250-360 Hz for
-                          # older Holter/MIT-BIH gear, up to 1000 Hz for
-                          # research-grade capture).
-ECG_HEART_RATE = 120      # bpm. Live-editable from the panel; signal_gen.py
-                          # regenerates the buffer when this changes.
-# Panel limits for ECG_SAMPLING_RATE. Here rather than hardcoded in
-# control_panel.py because the default above used to exceed the panel's own
-# ceiling: 2048 was fine at startup but silently snapped to 2000 the moment
-# the field was touched, with no way back. Keeping the bound next to the value
-# it bounds makes that drift visible.
+ECG_SAMPLING_RATE = 2048  # Hz, native rate of the simulated buffer (clinical
+                          # standard; cf. 250-360 Hz Holter, 1000 Hz research).
+ECG_HEART_RATE = 120      # bpm, live-editable -- regenerates the buffer.
+
+# Panel bound for ECG_SAMPLING_RATE, kept next to the value it bounds so
+# drift is visible (the default once silently exceeded the panel's own
+# ceiling and snapped to 2000 on first touch).
 #
-# Measured 2026-08-26 with ECG_DURATION_S=60, method=ecgsyn:
-#
-#     rate     samples   generate   buffer (2ch)   2000-sample window
-#     2048     122,880      0.45 s        2.0 MB            977 ms
-#     8192     491,520      0.61 s        7.9 MB            244 ms
-#    16384     983,040      0.76 s       15.7 MB            122 ms
-#    32768   1,966,080      1.17 s       31.5 MB             61 ms
-#    65536   3,932,160      2.08 s       62.9 MB             30 ms
-#
-# 65536 works, but two things scale badly with it and neither is obvious:
-#
-#  - Regeneration runs on the GUI thread and goes 0.45 s -> 2.08 s. Every
-#    heart-rate or waveform change freezes the window for two seconds, and at
-#    high SEND_RATE that is long enough to show up as "(dropped N late)" in
-#    the client log. Not a fault, but do not go hunting for it.
-#  - PLOT_BUFFER has to scale with the rate or the window stops meaning
-#    anything: at 65536 Hz, 2000 samples is 30 ms of ECG, about 6% of one beat
-#    at 120 bpm. One beat needs ~32,768 samples, three needs ~98,000 -- and
-#    matplotlib's per-refresh cost is roughly linear in points drawn (~8.8 ms
-#    at 2000 points, measured), so that is the real limit, not the generator.
-#
-# Note this is the rate the waveform is GENERATED at, not the rate it is
-# streamed at -- streaming is SEND_RATE x CHUNK_SIZE. Raising this alone makes
-# the waveform finer-grained and the plot's time axis shorter; it does not put
-# more samples per second on the wire.
-# Switches the ECG waveform itself off while leaving every other generator
-# (the five noise colours and both sine sources) running -- what you get is
-# the "nice generators" on their own, with no heartbeat under them.
-#
-# It does NOT skip the simulation. The ECG's own peak-to-peak is what every
-# noise/sine _LEVEL is a fraction of, so it is still computed and used as the
-# reference; only its contribution to the output is zeroed. That way toggling
-# this removes the ECG and changes nothing else -- levels keep their meaning
-# and amplitudes do not jump when you switch it back on.
+# Measured 2026-08-26, ECG_DURATION_S=60, method=ecgsyn -- generate time and
+# memory both scale with rate; 65536 works but two costs aren't obvious:
+# regeneration runs on the GUI thread (0.45s -> 2.08s, freezes the window,
+# can show as "(dropped N late)" at high SEND_RATE) and PLOT_BUFFER must
+# scale with it or the window stops meaning anything (at 65536Hz, 2000
+# samples is 30ms, ~6% of one beat). This is generation rate, not stream
+# rate -- streaming is SEND_RATE x CHUNK_SIZE.
+ECG_SAMPLING_RATE_MIN = 50     # below this QRS shape stops being recognizable
+ECG_SAMPLING_RATE_MAX = 65536  # 2**16
+
+ECG_DURATION_S = 60       # seconds of buffer before the stream loops.
+ECG_NOISE = 0.01          # nk.ecg_simulate's own Laplace noise level --
+                          # distinct from the colored-noise layers below.
+ECG_METHOD = "ecgsyn"     # "ecgsyn" -- full McSharry model, everything below
+                          # applies. "simple" -- cheaper wavelet approx,
+                          # silently ignores heart_rate_std/lfhfratio/ti/ai/bi
+                          # (verified: no error, just no effect).
+                          # "multileads" not offered (12-lead shape mismatch).
+ECG_HEART_RATE_STD = 1    # bpm, beat-to-beat HRV (verified: real jitter).
+ECG_LFHFRATIO = 0.5       # HRV low/high-freq ratio; visible only if
+                          # ECG_HEART_RATE_STD > 0.
+ECG_TI = (-70, -15, 0, 15, 100)     # P,Q,R,S,T angular positions (degrees).
+ECG_AI = (1.2, -5, 30, -7.5, 0.75)  # P,Q,R,S,T relative heights. Scaling all
+                                     # five uniformly has no effect (nk
+                                     # renormalizes overall amplitude --
+                                     # that's what ECG_AMPLITUDE is for);
+                                     # changing ratios reshapes the waveform.
+ECG_BI = (0.25, 0.1, 0.1, 0.1, 0.4) # P,Q,R,S,T widths (Gaussian sigma).
+ECG_RANDOM_SEED = 1         # Base seed; ch2 uses +1 so channels stay
+                            # independent but reproducible.
+
+# Off switch for the ECG waveform only -- noise/sine generators keep
+# running. Does NOT skip the simulation: the clean ECG's peak-to-peak is
+# still computed as the reference every _LEVEL is a fraction of, only its
+# contribution to the output is zeroed, so levels/amplitudes don't jump
+# when toggled back on.
 ECG_ENABLED = True
 
-# DC offset, as a fraction of the wire dtype's full scale, applied after
-# ECG_AMPLITUDE scaling. 0.0 centres the signal in the range (the old fixed
-# behaviour); +0.25 shifts it to three-quarter scale; -0.25 to quarter scale.
-#
-# A fraction rather than raw counts so it means the same thing on marathon's
-# 32-bit wire as on sizif's 16-bit one. Offsetting far enough that the band
-# leaves [0, max] will clip -- the clip in _scale_to_wire() was always there
-# as a rounding guard and it will now do real work if you ask it to.
+# DC offset, fraction of wire full scale, applied after ECG_AMPLITUDE. 0.0
+# centres the signal; a fraction (not raw counts) so it means the same
+# thing on marathon's 32-bit wire as sizif's 16-bit one. Pushing the band
+# outside [0, max] clips via _scale_to_wire()'s existing rounding guard.
 ECG_OFFSET = 0.0
 ECG_OFFSET_MIN = -0.5
 ECG_OFFSET_MAX = 0.5
 
-ECG_SAMPLING_RATE_MIN = 50     # below this the QRS shape stops being
-                                # recognizable
-ECG_SAMPLING_RATE_MAX = 65536  # 2**16
-
-ECG_DURATION_S = 60       # seconds of buffer before the stream loops.
-ECG_NOISE = 0.01          # nk.ecg_simulate's own built-in amplitude-relative
-                          # (Laplace) noise level. Live-editable from the
-                          # panel's Noise tab. Separate from the
-                          # ECG_NOISE_{VIOLET,BLUE,WHITE,PINK,BROWN}_*
-                          # layers below, which are distinct colored-noise
-                          # signals added on top afterward.
-ECG_METHOD = "ecgsyn"     # "ecgsyn" (default) -- full McSharry dynamical
-                          # model, everything below actually does something.
-                          # "simple" -- cheaper Daubechies-wavelet
-                          # approximation; verified it silently IGNORES
-                          # heart_rate_std/lfhfratio/ti/ai/bi (no error, just
-                          # no effect). "multileads" is NOT offered here --
-                          # it returns a 12-lead DataFrame, a different
-                          # shape than this pipeline's one-signal-per-
-                          # channel model, and the panel's method selector
-                          # is a readonly combobox so it can't be typed in.
-ECG_HEART_RATE_STD = 1    # bpm, beat-to-beat heart-rate variability
-                          # (verified: visibly different signal, not just
-                          # noise -- real HRV jitter between beats).
-ECG_LFHFRATIO = 0.5       # Low/high-frequency ratio of that HRV's power
-                          # spectrum. Only visible when ECG_HEART_RATE_STD
-                          # > 0 (verified).
-ECG_TI = (-70, -15, 0, 15, 100)     # P,Q,R,S,T wave angular positions
-                                     # (degrees) in the ECGSYN model.
-ECG_AI = (1.2, -5, 30, -7.5, 0.75)  # P,Q,R,S,T RELATIVE wave heights.
-                                     # CAVEAT (verified empirically):
-                                     # scaling all five UNIFORMLY has no
-                                     # effect on the final signal -- nk
-                                     # renormalizes overall amplitude
-                                     # regardless (that's why ECG_AMPLITUDE
-                                     # exists as a separate post-scale).
-                                     # Changing the RATIOS between them
-                                     # (e.g. a taller T relative to R) does
-                                     # visibly reshape the waveform.
-ECG_BI = (0.25, 0.1, 0.1, 0.1, 0.4) # P,Q,R,S,T wave widths (Gaussian sigma).
-ECG_RANDOM_SEED = 1         # Base seed. ch2 uses ECG_RANDOM_SEED + 1, so the
-                            # two channels stay independent (different
-                            # traces) but reproducible -- same seed always
-                            # regenerates the same waveform.
-
-# Extra colored noise, generated separately via nk.signal_noise() and added
-# on top of the simulated ECG (distinct from ECG_NOISE above, which is
-# baked into nk.ecg_simulate() itself). See signal_gen.py's _simulate_raw().
-#
-# Five independent layers, one per named color (nk.signal_noise()'s
-# (1/f)**beta exponent: -2 violet, -1 blue, 0 white, 1 pink/flicker,
-# 2 brown) -- ANY COMBINATION can be enabled simultaneously, each at its
-# own level; enabled layers are generated separately and summed before
-# being added to the ECG. Each _LEVEL is that layer's peak-to-peak
-# amplitude as a fraction of the *clean ECG signal's own* peak-to-peak
-# (measured once, before any noise is added, so levels don't compound
-# against each other or drift as more layers get enabled) -- e.g. 0.1 =
-# that layer alone is 10% of the ECG's own swing. Not tied to uint16
-# directly since it's relative to the signal, not the wire -- ECG_AMPLITUDE
-# still governs the final (ECG + noise) mix's wire range.
-# Per channel, like the sine generators below: each colour is enabled and
-# scaled separately for ch1 and ch2. The two are decorrelated anyway (distinct
-# random_state per layer per channel), so this adds the ability to have a
-# colour on one lead and not the other, or at a different strength -- an
-# electrode going bad on one lead, rather than the same noise everywhere.
+# Colored noise added on top of the simulated ECG via nk.signal_noise()
+# (distinct from ECG_NOISE, which is baked into ecg_simulate itself) -- see
+# signal_gen.py's _simulate_raw(). Five layers ((1/f)**beta: -2 violet,
+# -1 blue, 0 white, 1 pink, 2 brown), any combination enabled at its own
+# level. Each _LEVEL is that layer's peak-to-peak as a fraction of the
+# *clean* ECG's own peak-to-peak (measured once before noise is added, so
+# levels don't compound). Per channel, decorrelated (distinct random_state
+# per layer per channel) -- models e.g. one bad electrode rather than
+# uniform noise everywhere.
 ECG_NOISE_VIOLET_CH1_ENABLED = False
 ECG_NOISE_VIOLET_CH1_LEVEL = 0.1
 ECG_NOISE_VIOLET_CH2_ENABLED = False
@@ -404,27 +221,16 @@ ECG_NOISE_BROWN_CH1_LEVEL = 0.1
 ECG_NOISE_BROWN_CH2_ENABLED = False
 ECG_NOISE_BROWN_CH2_LEVEL = 0.1
 
-# Four independent sine-wave interference generators, each configured
-# SEPARATELY PER CHANNEL -- e.g. powerline hum (50/60 Hz) or another discrete
-# periodic artifact, as opposed to the colored noise's broadband randomness.
-# See signal_gen.py's _sine_contribution().
-#
-# Per channel means per channel in everything: ch1 and ch2 each have their own
-# enable, frequency, phase and level for every generator. Real interference
-# does not arrive identically on two leads -- it couples in with a different
-# amplitude and a different phase, and a phase difference between the two is
-# exactly the thing a two-channel rejection scheme has to cope with. Set both
-# channels the same to get common-mode interference back.
-#
-# Evaluated at t = sample_index / ECG_SAMPLING_RATE, the same time base the raw
-# ECG buffer is built on, so a frequency is exact regardless of playback speed
-# (SEND_RATE/CHUNK_SIZE).
-#
-# _LEVEL is the sine's amplitude as a fraction of the *clean ECG's* own
-# peak-to-peak (same convention as ECG_NOISE_*_LEVEL above), so the sine's own
-# peak-to-peak swing is 2 * _LEVEL * (ECG ptp). The reference is ch1's clean
-# ECG for both channels, so equal levels mean equal amplitudes.
-# _PHASE is in degrees; converted to radians in signal_gen.py.
+# Four independent sine-wave interference generators (powerline hum, other
+# discrete periodic artifacts vs. colored noise's broadband randomness) --
+# see signal_gen.py's _sine_contribution(). Per-channel enable/freq/phase/
+# level: real interference doesn't arrive identically on both leads, and a
+# phase difference is exactly what a rejection scheme must cope with; set
+# both channels the same for common-mode interference. Evaluated at
+# t = sample_index / ECG_SAMPLING_RATE (ECG time base), so frequency is
+# exact regardless of playback speed. _LEVEL is a fraction of ch1's clean
+# ECG peak-to-peak (same convention as noise _LEVEL above, so equal levels
+# = equal amplitudes on both channels). _PHASE in degrees.
 ECG_SINE1_CH1_ENABLED = False
 ECG_SINE1_CH1_FREQ = 50.0     # Hz -- EU/UK/most-of-world mains
 ECG_SINE1_CH1_PHASE = 0.0     # degrees
@@ -461,58 +267,40 @@ ECG_SINE4_CH2_FREQ = 150.0
 ECG_SINE4_CH2_PHASE = 0.0
 ECG_SINE4_CH2_LEVEL = 0.05
 
-# Fraction (0.0-1.0) of each channel's wire dtype range (uint16 -> 0..65535)
-# that the signal's peak-to-peak amplitude occupies, centered at the
-# midpoint. 1.0 -> spans the full 0..65535; 0.0 -> flat line at 32767.
-# Live-editable from the panel -- see signal_gen.py's _scale_to_wire().
-# Deliberately tied to the wire dtype's own max rather than an arbitrary
-# plot constant, so it can never produce an out-of-range packet value.
+# Fraction (0.0-1.0) of the wire dtype's range the signal's peak-to-peak
+# amplitude occupies, centered at the midpoint -- see signal_gen.py's
+# _scale_to_wire(). Tied to the wire dtype's own max so it can never
+# produce an out-of-range packet value.
 ECG_AMPLITUDE = 0.75
 
 # ---------------------------------------------------------------------------
 # Session control: what happens at launch, and where the processing runs
 # ---------------------------------------------------------------------------
 
-# False: the app comes up idle -- window, plot and panel all live, but
-# nothing generated, connected or sent until "Start" is pressed. That is
-# deliberately the default: settings dialled in BEFORE a run beats settings
-# corrected while packets are already on the wire, and it makes
-# "run / capture / stop / change one thing / run again" a workflow rather
-# than a restart. Set True for the old launch-and-go behaviour (unattended
-# throughput runs, mostly).
+# False: app comes up idle (nothing generated/connected/sent) until "Start"
+# -- settings dialled in before a run beats correcting them mid-stream, and
+# makes run/capture/stop/tweak/rerun a workflow instead of a restart.
+# True = old launch-and-go behaviour (unattended throughput runs).
 AUTOSTART = False
 
-# "board" -- the real path: TCP to the relay, which forwards to the board;
-#            the board filters in fabric and echoes back (or, with
-#            BOARD_CONNECTED = False, the relay loops it straight back).
-# "local"  -- no socket, no relay, no board. The signal is generated,
-#            processed and plotted inside this process by local_proc.py.
+# "board" -- TCP to the relay -> board filters in fabric -> echoes back (or
+#            loops straight back if BOARD_CONNECTED=False).
+# "local" -- no socket/relay/board; generated, processed and plotted here
+#            by local_proc.py. Exists to develop algorithms bound for VHDL
+#            with a keystroke edit-run loop and no hardware required --
+#            written the way fabric computes (integer, fixed width,
+#            explicit wrapping, per-channel state); see pipelines.py.
+# Live-switchable per channel, index 0 = ch1, 1 = ch2.
 #
-# Local mode exists to develop processing algorithms that will later be
-# translated to VHDL, with a keystroke edit-run loop instead of a synthesis
-# run -- and to work at all when no hardware is present. Its algorithms are
-# written the way fabric has to compute (integer, fixed width, explicit
-# wrapping, per-channel state), so what is seen here is what the RTL will
-# do; see pipelines.py's header for the rule and how to add one.
+# Both channels always travel in the same frame and the board's TDM filter
+# has one shift register for all of them, so "local" doesn't change what's
+# sent/filtered on the wire -- the board still does its own work on that
+# channel, the PC just discards the echo and substitutes its own pipeline
+# output. Keeps hardware untouched until a pipeline is worth porting to HDL.
 #
-# Live-switchable from the panel, PER CHANNEL. Index 0 is ch1, index 1 is ch2.
-#
-# WHAT "local" ACTUALLY MEANS ON THE WIRE. Both channels always travel in the
-# same frame (ts + ch1 + ch2 -- see shared/marathon/packet_format.json), and
-# the board's TDM filter has one shift register for all of them, so there is
-# no way to send or filter a single channel on its own without changing the
-# packet format, the generated C header and the firmware. A channel marked
-# "local" is therefore still sent, and the board still filters it; the PC
-# just DISCARDS what came back for that channel and substitutes its own
-# pipeline output. The board's work on it is thrown away, which costs
-# nothing here and keeps the hardware untouched until a pipeline is mature
-# enough to be worth implementing in HDL.
-#
-# Thread ownership follows from these, rather than being a separate switch:
-#   any channel "board"  -> net.tcp_thread owns the run and does the local
-#                           channels inline (they have to travel in the same
-#                           plot tuple as the ones that came back).
-#   every channel "local" -> local_proc.local_thread owns it; no socket at all.
+# Thread ownership follows from this: any channel "board" -> net.tcp_thread
+# owns the run (local channels done inline, same plot tuple); all "local"
+# -> local_proc.local_thread owns it, no socket at all.
 CH_MODE = ["board", "board"]
 
 
@@ -522,9 +310,8 @@ def any_board():
 
 
 def any_local():
-    """True when at least one channel is processed here rather than on the
-    board -- which is what decides whether net.py has to keep the sent
-    inputs around for the round trip."""
+    """True when at least one channel is processed here -- decides whether
+    net.py must keep sent inputs around for the round trip."""
     return any(m == "local" for m in CH_MODE)
 
 
@@ -533,40 +320,30 @@ def all_local():
     return all(m == "local" for m in CH_MODE)
 
 
-# Which pipeline each channel runs, and in which implementation.
-# Both are keys into pipelines.PIPELINES, and the panel builds its dropdowns
-# from that dict -- so adding a pipeline there needs no edit here beyond
-# choosing a different default.
-#
-#   pipe   "bypass" passthrough (the control case)
-#          "iir"    bit-accurate model of axi_tdm_filter.vhd, the filter the
-#                   board actually runs -- the reference for "did the
-#                   hardware compute what I think it did"
-#          "pipe1"  baseline-wander removal (high-pass)
-#   impl   "scipy"  float64 via scipy.signal -- what the filter SHOULD do
-#          "manual" hand-written integer arithmetic -- what it WILL do once
-#                   it is RTL. This is the version that gets translated.
-#
-# A pipeline that offers only one implementation (iir is hardware-only) falls
-# back to the one it has rather than to passthrough.
+# Which pipeline each channel runs, and in which implementation. Both are
+# keys into pipelines.PIPELINES; the panel builds its dropdowns from that
+# dict, so adding a pipeline needs no edit here.
+#   pipe: "bypass" passthrough; "iir" bit-accurate axi_tdm_filter.vhd model
+#         (the "did hardware compute what I think" reference); "pipe1"
+#         baseline-wander removal (high-pass).
+#   impl: "scipy" float64, what the filter SHOULD do; "manual" hand-written
+#         integer arithmetic, what it WILL do as RTL -- the translated one.
+# A pipeline with only one implementation (iir is hardware-only) falls back
+# to that one rather than to passthrough.
 CH_PIPE = ["iir", "iir"]
 CH_IMPL = ["manual", "manual"]
 
-# alpha = 1 / 2**LOCAL_SHIFT for the local filter. Local mode's counterpart
-# of the board's shift register (Board tab), kept separate because there is
-# no hardware to write to here. 0 is an exact bypass -- in the model for the
-# same reason as in the fabric: y = y + (x - y) = x.
+# alpha = 1/2**LOCAL_SHIFT for the local filter -- local mode's counterpart
+# of the board's shift register, separate since there's no hardware to
+# write to here. 0 is exact bypass (y = y + (x-y) = x), same as in fabric.
 LOCAL_SHIFT = 4
-LOCAL_SHIFT_MAX = 31   # the register field is 5 bits (cfg_reg1[4:0])
+LOCAL_SHIFT_MAX = 31   # register field is 5 bits (cfg_reg1[4:0])
 
-# pipe2's three corner frequencies, in Hz, plus the notch's Q. Live-editable
-# from the Local tab and passed to the pipeline by local_proc.params_for(), so
-# both implementations see the same numbers. Set any of the three to 0 to skip
-# that stage; a stage at or above Nyquist is skipped as well.
-#
-# The same values appear as fallbacks in pipelines.py (PIPE2_*), for a caller
-# that runs a pipeline with no params at all -- the app and SAT both pass
-# these. Why 0.2 / 50 / 150 for ECG is documented there, next to the filter.
+# pipe2's 3 corner frequencies (Hz) + notch Q, live-editable from the Local
+# tab, passed to the pipeline via local_proc.params_for() so both
+# implementations see the same numbers. 0 skips that stage, as does a
+# stage at/above Nyquist. Same values fall back in pipelines.py (PIPE2_*)
+# for a caller with no params -- see there for why 0.2/50/150 for ECG.
 PIPE2_HP_HZ = 0.2
 PIPE2_NOTCH_HZ = 50.0
 PIPE2_NOTCH_Q = 30.0
@@ -575,15 +352,13 @@ PIPE2_LP_HZ = 150.0
 SEND_ENABLED = True
 RECEIVE_ENABLED = True
 
-RECONNECT_DELAY = 1.0  # seconds between reconnect attempts after a dropped/failed connection
+RECONNECT_DELAY = 1.0  # seconds between reconnect attempts after a drop/fail
 
 
 # --- Defaults ------------------------------------------------------------
-# Snapshot of every knob as written above, taken at import before anything
-# can edit one. This is what the panels' "Defaults" buttons restore, so the
-# defaults live in exactly one place: the value beside its own comment.
-# Lists are copied, or restoring would hand back the object the panel has
-# been mutating all along.
+# Snapshot of every knob above, taken at import before anything can edit
+# one -- what the panels' "Defaults" buttons restore. Lists are copied, or
+# restoring would hand back the object the panel has been mutating.
 _DEFAULTS = {name: (list(value) if isinstance(value, list) else value)
              for name, value in list(globals().items())
              if name.isupper() and not name.startswith("_")}

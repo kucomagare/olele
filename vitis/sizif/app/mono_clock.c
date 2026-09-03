@@ -3,10 +3,8 @@
 #include "xil_io.h"
 #include "sleep.h"
 
-/* Cortex-A9 SCU global timer: PERIPHBASE 0xF8F00000 + 0x200. Fixed by the
-   MPCore architecture, so no XPAR_* lookup is needed (and this SDT BSP
-   does not define XPAR_GLOBAL_TMR_BASEADDR anyway). Clocked at CPU_3x2x,
-   i.e. core clock / 2 = 325 MHz on this part. */
+/* SCU global timer, PERIPHBASE+0x200 -- fixed by MPCore arch, no XPAR_*
+   lookup (this SDT BSP doesn't define one). Clocked at core/2 = 325 MHz. */
 #define GTIMER_BASE       0xF8F00200U
 #define GTIMER_LOWER      0x00U
 #define GTIMER_UPPER      0x04U

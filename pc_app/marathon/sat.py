@@ -8,30 +8,17 @@ and the hardware against a model.
     ./sat.py --no-plot               # numbers only, for a terminal or a pipe
     ./sat.py --no-plot --model iir --peak-fmin 40
 
-Everything the flags do is also a control in the window (sat_gui.py) --
-pick the dump, the transform size, the axis limits, where to look for the
-peak, and which model to score against, all without going back to a prompt.
-The flags remain for scripting and for a box with no display.
+Every flag is also a control in the window (sat_gui.py); flags remain for
+scripting and headless boxes.
 
-WHY THIS IS A SEPARATE APP. The live client had a spectrum view for a while
-and it was the wrong place for it. An FFT over a rolling buffer costs
-something on every frame, forever, to answer a question that is not actually
-live: inject a tone, read the attenuation, compare against a model. None of
-that needs to happen at 24 fps, and all of it is easier when nothing is
-moving. So the live client stays lean and only has to do one thing well --
-stream and draw -- and the measurement happens here, on a file, where taking
-a second is free and the same input can be examined ten different ways.
+Separate from the live client: a rolling-buffer FFT there would cost every
+frame forever for a measurement that isn't actually live -- easier on a
+file, where the same capture can be examined many ways.
 
-WHAT IT READS. The pair of files the plot bar's "Log buffer" button writes:
-
+Reads the pair the plot bar's "Log buffer" button writes:
     plotdump_<stamp>.csv            index, time_s, and the four traces
-    plot_config_data_<stamp>.txt    every setting, plus the board's filter
-                                    registers and last metrics
-
-The sidecar is what makes a dump worth keeping: it is the ground truth for
-the samples next to it -- the exact heart rate, noise levels, injected tones
-and filter shift that produced them. This reads it rather than making you
-remember.
+    plot_config_data_<stamp>.txt    every setting, board registers, metrics
+The sidecar is the ground truth for the samples next to it.
 """
 
 import argparse
@@ -41,8 +28,8 @@ from pathlib import Path
 
 import numpy as np
 
-# Run from anywhere: the sibling modules (spectrum, and pipelines for
-# --model) live next to this file, not necessarily in the working directory.
+# Run from anywhere: sibling modules (spectrum, pipelines) live next to
+# this file, not necessarily in the working directory.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import spectrum
@@ -60,15 +47,14 @@ def find_dumps(log_dir):
 
 
 def sidecar_for(csv_path):
-    """The settings snapshot written alongside a dump, by naming convention."""
+    """Settings snapshot written alongside a dump, by naming convention."""
     name = csv_path.name.replace("plotdump_", "plot_config_data_")
     return csv_path.with_name(name).with_suffix(".txt")
 
 
 def read_sidecar(path):
-    """Parse `key = value` lines into a dict, keeping section headings as a
-    prefix so "shift" from the board registers cannot be confused with a
-    config knob of the same name."""
+    """Parse `key = value` lines into a dict, section heading as prefix
+    (so board-register "shift" can't collide with a config knob)."""
     out = {}
     if not path.exists():
         return out
@@ -90,17 +76,13 @@ def read_sidecar(path):
 
 
 def load_dump(csv_path):
-    """Return (traces dict, metadata dict).
-
-    Metadata comes from the sidecar first and the CSV's own `#` header lines
-    second, so a dump still analyses correctly if its sidecar was lost.
-    """
+    """Return (traces dict, metadata dict). Metadata from the sidecar
+    first, CSV `#` header lines second, so a lost sidecar still analyses."""
     meta = read_sidecar(sidecar_for(csv_path))
 
-    # Parsed by hand rather than with genfromtxt: the file leads with `#`
-    # metadata lines and then a header row, and genfromtxt's comment handling
-    # blanks those lines before names=True looks for the header, so it reads
-    # the column names off the wrong line and then rejects every data row.
+    # Parsed by hand, not genfromtxt: its comment handling blanks the `#`
+    # lines before names=True finds the header, so it reads column names
+    # off the wrong line and rejects every data row.
     header_meta, columns, rows = {}, None, []
     with open(csv_path) as f:
         for line in f:
@@ -117,11 +99,8 @@ def load_dump(csv_path):
                 continue
             rows.append(fields)
 
-    # ValueError, not SystemExit: the GUI catches Exception around this call
-    # to show "could not read <file>" in its report panel, and SystemExit
-    # derives from BaseException, so it would sail straight past that handler
-    # and take the window down -- the exact opposite of what the handler is
-    # for. main() turns these into a clean CLI error below.
+    # ValueError, not SystemExit: the GUI's Exception handler would let a
+    # BaseException-derived SystemExit through and take the window down.
     if columns is None or not rows:
         raise ValueError(f"{csv_path}: no data rows")
 
@@ -153,8 +132,8 @@ def load_dump(csv_path):
         "send_rate": number("SEND_RATE", "send_rate"),
         "chunk": number("CHUNK_SIZE", "chunk"),
         "trigger": meta.get("PLOT_TRIGGER", header_meta.get("trigger")),
-        # Four generators, each per channel -- a dump made before that change
-        # simply has none of these keys and the list comes out empty.
+        # 4 generators x 2 channels; a pre-per-channel dump has none of
+        # these keys and the list comes out empty.
         "sines": [(n, ch, meta.get(f"ECG_SINE{n}_CH{ch}_ENABLED"),
                    meta.get(f"ECG_SINE{n}_CH{ch}_FREQ"),
                    meta.get(f"ECG_SINE{n}_CH{ch}_PHASE"),
@@ -171,14 +150,10 @@ def load_dump(csv_path):
 
 def wire_full_scale(traces, info=None):
     """Full-scale value of the wire format the dump was captured in.
-
-    Read from the sidecar's `wire_dtype` when there is one, because inferring
-    it from the samples is only right when the capture happens to use the top
-    of its range. A quiet or offset-down 32-bit capture whose largest sample
-    is under 65535 would be read as 16-bit, and every dBFS number in the
-    report would come out 96 dB high. The inference stays as the fallback for
-    a dump whose sidecar was lost.
-    """
+    Prefers the sidecar's `wire_dtype`; inferring from sample values is only
+    right if the capture happens to hit the top of its range (a quiet
+    32-bit capture under 65535 would misread as 16-bit), so that's the
+    fallback only."""
     if info:
         dtype = (info.get("meta", {}) or {}).get("wire_dtype")
         if dtype:
@@ -208,10 +183,9 @@ def analyse_channel(traces, ch, rate, full_scale, size, peak_fmin):
     result["n"] = len(next(iter(win.values())))
     result["resolution"] = rate / result["n"]
 
-    # Locate on the INPUT when it is present, then read both there. A filter
-    # that works moves its output peak somewhere else entirely, so two
-    # independently located peaks would compare two different frequencies and
-    # report a meaningless attenuation.
+    # Locate on the input when present, read both there -- a working filter
+    # moves the output peak, so independently-located peaks would compare
+    # two different frequencies.
     ref = "in" if "in" in curves else "out"
     f, db = curves[ref]
     i = spectrum.peak(f, db, peak_fmin)
@@ -227,25 +201,17 @@ def analyse_channel(traces, ch, rate, full_scale, size, peak_fmin):
 
 
 def model_choices():
-    """Every pipeline, and every pipeline:implementation pair.
-
-    Built from pipelines.py rather than written out here, so a pipeline
-    added there is immediately scorable offline without touching this file.
-    The import is deferred for the same reason compare_model's is: the
-    filters pull in numba, and a run without --model should not pay for it.
-    """
+    """Every pipeline, and every pipeline:implementation pair, built from
+    pipelines.py so a new pipeline is scorable immediately. Import deferred
+    -- the filters pull in numba, not worth it without --model."""
     import pipelines
     out = []
     for pipe in sorted(pipelines.PIPELINES):
         impls = pipelines.implementations(pipe)
         if impls:
-            # A design pipeline: only the pairs are meaningful, since which
-            # implementation ran is the whole question being asked.
             out.extend(f"{pipe}:{impl}" for impl in impls)
         else:
-            # bypass and iir are single fixed things. Offering
-            # "bypass:manual" and "bypass:scipy" would advertise a choice
-            # that does not exist -- passthrough has nothing to quantise.
+            # bypass/iir have nothing to quantise -- no fake :impl choice.
             out.append(pipe)
     return out
 
@@ -255,14 +221,10 @@ _PIPE2_KEYS = ("PIPE2_HP_HZ", "PIPE2_NOTCH_HZ", "PIPE2_NOTCH_Q",
 
 
 def _model_params(shift, fs, meta=None):
-    """What a pipeline is handed for an OFFLINE run.
-
-    Corner frequencies come from the capture's own sidecar when it has them,
-    like fs does: scoring a dump against this machine's current Local-tab
-    settings would silently compare the recording to a filter it never saw.
-    A dump made before those knobs existed has no such keys, and the
-    pipeline's own defaults apply.
-    """
+    """What a pipeline is handed for an offline run. Corner frequencies come
+    from the capture's own sidecar when present (like fs) -- scoring against
+    this machine's live config would compare against a filter the recording
+    never saw. Missing keys (older dumps) fall back to pipeline defaults."""
     params = {"shift": shift, "fs": float(fs)}
     for key in _PIPE2_KEYS:
         value = (meta or {}).get(key)
@@ -276,18 +238,11 @@ def _model_params(shift, fs, meta=None):
 
 
 def compare_model(traces, ch, algorithm, shift, settle, fs, meta=None):
-    """Run a pipelines.py algorithm on the recorded input and score it against
-    the recorded output.
-
-    This is the question the whole rig exists to answer -- did the hardware
-    compute what I think it computed -- and a file is the right place to ask
-    it: both signals are already captured and aligned, so nothing has to be
-    live or reproducible to check.
-
-    `settle` samples are skipped before scoring: the model starts from zeroed
-    state, the board did not, so the first samples of any capture disagree
-    for a reason that says nothing about the algorithm.
-    """
+    """Run a pipelines.py algorithm on the recorded input, score it against
+    the recorded output -- did the hardware compute what I think it did.
+    `settle` samples are skipped: the model starts from zeroed state, the
+    board didn't, so early samples disagree for a reason unrelated to the
+    algorithm."""
     import pipelines
     src, ref = f"{ch}_in", f"{ch}_out"
     if src not in traces or ref not in traces:
@@ -295,19 +250,14 @@ def compare_model(traces, ch, algorithm, shift, settle, fs, meta=None):
 
     dtype = ">u4"
     x = traces[src].astype(np.uint32).astype(dtype)
-    # "pipe" or "pipe:impl" -- the implementation defaults to the pipeline's
-    # first, which for a hardware-only entry like iir is the only one there
-    # is. Same resolution the live app uses, so a capture scored here and the
-    # same selection running live cannot mean different things.
+    # "pipe" or "pipe:impl" -- same resolution the live app uses, so a
+    # capture scored here matches the same live selection.
     pipe, _, impl = algorithm.partition(":")
     fn = pipelines.resolve(pipe, impl or pipelines.DEFAULT_IMPL)
     if fn is None:
         return None
-    # One channel per call -- the pipeline functions take a single channel,
-    # which is also what this function scores.
-    # fs comes from the capture's own sidecar, not from this machine's
-    # current config -- a dump analysed months later has to be filtered at
-    # the rate it was recorded at, whatever the panel happens to say now.
+    # fs from the capture's own sidecar, not this machine's live config --
+    # a dump analysed months later filters at the rate it was recorded.
     modelled = fn(x, pipelines.new_state(), _model_params(shift, fs, meta))
     modelled = modelled.astype(np.float64)
 
@@ -337,9 +287,8 @@ def compare_model(traces, ch, algorithm, shift, settle, fs, meta=None):
 # ---------------------------------------------------------------------------
 
 def format_report(info, results, models):
-    """The report as text. Returns rather than prints so the GUI can put the
-    same words in its panel -- one place to change if a number is wrong or a
-    label is unclear."""
+    """The report as text -- returns rather than prints so the GUI can
+    reuse it verbatim in its panel."""
     out = []
     say = out.append
 
@@ -457,10 +406,8 @@ def main(argv=None):
         return 1
 
     if not args.no_plot:
-        # The window is the normal way to use this: every flag below is a
-        # control in it, so a question that needs three different settings
-        # to answer does not need three command lines. The CLI stays for
-        # scripting and for boxes with no display.
+        # The window is the normal path -- every flag below is also a
+        # control in it. CLI stays for scripting/headless boxes.
         import sat_gui
         sat_gui.SATWindow(
             log_dir=Path(args.log_dir), path=path, fft_size=args.fft_size,
@@ -486,8 +433,7 @@ def main(argv=None):
         results.append(r)
         curves_by_ch[ch] = curves
 
-    # Per channel, so a capture whose two channels came from different
-    # pipelines can be scored against the right one for each.
+    # Per channel -- each channel may have run a different pipeline.
     selection = {"ch1": args.model_ch1 or args.model,
                  "ch2": args.model_ch2 or args.model}
     models = []

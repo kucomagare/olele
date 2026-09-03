@@ -3,12 +3,10 @@
 
 #include <stdint.h>
 
-/* Generic circular byte buffer for staging inbound TCP bytes between the
-   fast lwIP recv callback (just pushes) and comm_process() (peeks/parses
-   full packets out at its own pace, since a TCP recv callback can hand
-   over a partial packet). No protocol/AXI knowledge here on purpose --
-   keep it that way, it's the one piece of this that's fully generic and
-   independently testable. */
+/* Circular byte buffer staging inbound TCP bytes between the fast lwIP
+   recv callback (pushes only) and comm_process() (peeks/parses full
+   packets at its own pace). No protocol/AXI knowledge here on purpose --
+   keep it generic and independently testable. */
 
 uint32_t rx_ring_used(void);
 uint32_t rx_ring_free(void);
@@ -26,17 +24,15 @@ void rx_ring_peek(uint32_t offset, uint8_t *dst, uint32_t len);
 void rx_ring_advance(uint32_t len);
 
 /* Discard everything -- call at the start of a fresh TCP connection so
-   leftover bytes from a connection cut mid-packet don't get prepended to
-   the next connection's stream and desync framing permanently. */
+   bytes left over from a connection cut mid-packet don't desync framing
+   permanently. */
 void rx_ring_reset(void);
 
-/* NOTE: there is deliberately no "drop the oldest N bytes to make room"
-   call here. There used to be (rx_ring_make_room), and it was the direct
-   cause of an unrecoverable failure under sustained overload: dropping an
-   arbitrary run of bytes out of a length-prefixed stream destroys packet
-   alignment, after which every subsequent header parse reads garbage. The
-   only safe response to a full ring is to discard the whole thing and
-   resync on a fresh connection -- see tcp_client_resync() in
-   lwip_comm_client_raw.c. Don't reintroduce partial dropping. */
+/* DO NOT add a "drop the oldest N bytes to make room" call. One existed
+   (rx_ring_make_room) and caused an unrecoverable failure under overload:
+   dropping bytes out of a length-prefixed stream destroys alignment, and
+   every later header parse reads garbage. The only safe response to a full
+   ring is discard-everything + resync on a fresh connection (see
+   tcp_client_resync() in lwip_comm_client_raw.c). */
 
 #endif /* RX_RING_H */

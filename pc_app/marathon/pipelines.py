@@ -1,33 +1,16 @@
-# The processing functions, and everything needed to add one. No threads,
-# sockets, queues, plot or board here -- that is local_proc.py.
+# Processing functions only -- no threads/sockets/plot/board (see local_proc.py).
 #
-# Each pipeline (pipe1, pipe2, ...) is written twice and both are kept:
-#   "scipy"  float64 via scipy.signal -- what the filter SHOULD do.
-#   "manual" integer, fixed width, explicit wrapping, one sample at a time --
-#            what it WILL do once it is RTL. This is what gets translated.
-# The gap between them (truncation bias, dead zones, overflow) is the thing a
-# float-only version hides; here it is one dropdown away.
+# Each pipeline has a "scipy" version (float64, what it SHOULD do) and a
+# "manual" version (integer, fixed-width, what it WILL do as RTL) -- the gap
+# between them (truncation bias, dead zones, overflow) is the point. `iir` is
+# different: a bit-accurate model of the board's own filter (axi_tdm_filter.vhd).
 #
-# `iir` is neither: a bit-accurate model of the filter the board already runs
-# (axi_tdm_filter.vhd), kept as the reference for "did the hardware compute
-# what I think it did".
-#
-# ADD A PIPELINE -- two functions and one registry line, nothing else. Both
-# GUIs and SAT build their dropdowns from PIPELINES.
-#
-#     def pipeN_scipy(x, state, params): ...   # x: ONE channel, wire dtype,
-#     def pipeN_manual(x, state, params): ...  # same dtype/length out
-#     PIPELINES["pipeN"] = {"manual": pipeN_manual, "scipy": pipeN_scipy}
-#
-# `state` is a dict that persists across chunks (filter memory); it is cleared
-# for you when the selection changes. `params` carries the panel's knobs plus
-# "fs", the signal's native rate -- it is ONE dict shared by every pipeline,
-# so prefix your own keys with the pipeline name (see _pipe2_freqs). Called once per channel per chunk, so two
-# local channels means two calls with two separate states.
-#
-# Convert with _from_wire()/_to_wire_centred(), NOT _to_signed() -- see
-# _from_wire's docstring. Raising is fine: local_proc reports it and passes
-# the chunk through.
+# ADD A PIPELINE: write pipeN_scipy/pipeN_manual(x, state, params) and add
+# PIPELINES["pipeN"] = {"manual": ..., "scipy": ...}. `state` persists across
+# chunks per channel; `params` is one dict shared by all pipelines -- prefix
+# your keys (see _pipe2_freqs). Convert with _from_wire()/_to_wire_centred(),
+# not _to_signed() (see its docstring). Raising is fine -- local_proc reports
+# it and passes the chunk through.
 
 import numpy as np
 
@@ -48,16 +31,11 @@ def _to_wire(values, dtype):
 
 
 def _iir_scalar(x, y_init, shift):
-    """One channel of  y[n] = y[n-1] + (x[n] - y[n-1]) >> SHIFT.
-
-    Written as a scalar recursion because that is what it IS -- the
-    truncating shift makes it non-linear, so there is no vectorised form
-    that gives the same bits. Both wraps below are the VHDL's: `signed`
-    arithmetic in numeric_std truncates back to the operand width, so a
-    subtraction that overflows wraps rather than saturating. It does
-    overflow, once, on the very first sample of a run: y starts at 0 and x
-    is near 2**31, so x - y does not fit. The hardware wraps there too, and
-    the filter recovers within a few samples -- reproducing it is the point.
+    """One channel of y[n] = y[n-1] + (x[n]-y[n-1])>>SHIFT, scalar because
+    the truncating shift is non-linear (no vectorised form matches the
+    bits). Wraps rather than saturates, matching VHDL's numeric_std --
+    including the one-sample startup overflow (y=0, x~2**31), which the
+    hardware also does and recovers from within a few samples.
     """
     out = np.empty(x.shape[0], dtype=np.int64)
     y = y_init
@@ -72,14 +50,12 @@ _kernels = {}
 
 
 def _compiled(fn, *probe):
-    """njit(fn) if numba will take it, else fn itself.
+    """njit(fn) if numba accepts it, else the plain Python fallback.
 
-    Compiled once, on a throwaway input, so a failure lands here rather than
-    mid-stream. nogil matters more than the speed: these loops are where the
-    local worker spends its time, and without it the plot thread cannot run
-    while a chunk is being filtered. They touch no Python objects, so it is
-    safe. A missing numba falls back rather than failing -- a slow local mode
-    still beats no local mode.
+    Compiled once, on a throwaway input, so a failure lands here rather
+    than mid-stream. nogil so the plot thread isn't blocked while a chunk
+    filters. Missing numba degrades gracefully -- a slow local mode still
+    beats no local mode.
     """
     if fn in _kernels:
         return _kernels[fn]
@@ -123,47 +99,31 @@ def bypass(x, state, params):
 
 
 # --- pipe1: baseline-wander removal (high-pass) -------------------------
-#
-# The worked example. ECG sits on a slow baseline drift (breathing, electrode
-# movement) that is far larger than the QRS complex, so removing it is the
-# usual first stage of any ECG chain -- which makes it a fair template for
-# the ones that follow.
-#
-# The two implementations are deliberately NOT identical: scipy's is a
-# 2nd-order Butterworth at 0.5 Hz, the manual one a 1st-order shift filter at
-# a comparable corner. Their rolloffs differ, and seeing that difference when
-# you flip the dropdown is the point -- if they matched exactly, keeping both
-# would tell you nothing.
+# Worked example: ECG's slow baseline drift is far larger than the QRS
+# complex, so removing it is usually the first stage of any ECG chain.
+# scipy = 2nd-order Butterworth @0.5Hz; manual = 1st-order shift filter at a
+# comparable corner -- the differing rolloffs are the point of keeping both.
 
-# The wire's own zero. signal_gen builds every chunk centred on dtype_max/2
-# in the UNSIGNED domain and clips there (signal_gen.py), and the plot shows
-# 0..2**32-1, so this is where "no signal" actually sits.
+# The wire's own zero: signal_gen centres every chunk on dtype_max/2 in the
+# UNSIGNED domain and clips there, so this is where "no signal" sits.
 _CENTRE = 1 << 31
 
 
 def _from_wire(x):
-    """Wire words as a zero-centred integer signal.
-
-    NOT _to_signed(). That one reinterprets offset-binary as two's
-    complement, which is what axi_tdm_filter.vhd does and therefore what
-    `iir` has to do -- but it maps the MIDDLE of the unsigned range to the
-    EXTREMES of the signed one, so a signal centred on 2**31 comes out
-    oscillating across the -2**31/+2**31 wrap boundary. `iir` tolerates that
-    because the hardware does exactly the same thing; a filter that is
-    supposed to compute a real frequency response cannot -- it sees a
-    discontinuity every time the signal crosses its own centre.
+    """Wire words as a zero-centred signal (NOT _to_signed(), which maps
+    the unsigned midpoint to the signed wrap boundary -- fine for `iir`
+    since the hardware does the same, but wrong for a filter computing a
+    real frequency response: it would see a discontinuity every time the
+    signal crosses centre).
     """
     return x.astype(np.int64) - _CENTRE
 
 
 def _to_wire_centred(values, dtype):
-    """Zero-centred results back to wire words.
-
-    CLIPS rather than wraps, matching what signal_gen already does to its own
-    output. Wrapping would turn one oversized excursion into a full-scale
-    spike at the opposite rail, which reads as a broken filter rather than as
-    the clipped signal it is. `iir` still wraps, because there the wrap is
-    the thing being modelled.
+    """Zero-centred results back to wire words. CLIPS rather than wraps
+    (matching signal_gen's own output) -- wrapping would turn an overshoot
+    into a full-scale spike at the opposite rail, reading as a broken
+    filter. `iir` still wraps, since there the wrap IS what's modelled.
     """
     return np.clip(np.asarray(values, dtype=np.int64) + _CENTRE,
                    0, _MASK).astype(dtype)
@@ -176,13 +136,11 @@ def pipe1_scipy(x, state, params):
     fs = float(params.get("fs", 2048.0))
     fc = float(params.get("hp_hz", 0.5))
     if "sos" not in state:
-        # Designed once per run, not per chunk: the coefficients only depend
-        # on fs/fc, and sosfilt_zi is not cheap enough to redo 50x a second.
+        # Designed once per run, not per chunk -- fs/fc rarely change and
+        # sosfilt_zi isn't cheap enough to redo 50x a second.
         state["sos"] = signal.butter(2, fc / (fs / 2.0),
                                      btype="highpass", output="sos")
-        # Start from rest rather than from sosfilt_zi's steady-state gain:
-        # the run begins with no history, and pretending otherwise puts a
-        # step at the front of the first chunk.
+        # Start from rest, not sosfilt_zi's steady state -- no history yet.
         state["zi"] = np.zeros_like(signal.sosfilt_zi(state["sos"]))
 
     xs = _from_wire(x).astype(np.float64)
@@ -194,20 +152,16 @@ def pipe1_manual(x, state, params):
     """1st-order high-pass as x - lowpass(x), in integer arithmetic.
 
     Reuses the same shift-and-accumulate kernel the fabric already
-    implements, which is the whole reason to write it this way: subtracting a
-    single-pole lowpass is a high-pass, and a single-pole lowpass is one
-    add and one shift per sample -- cheap in RTL, and already proven here.
+    implements: subtracting a single-pole lowpass IS a high-pass, cheap in RTL.
     """
     shift = int(params.get("hp_shift", 9)) & 0x1F
     kernel = _get_kernel()
     xs = _from_wire(x)
 
     if "y" not in state:
-        # Seed the lowpass with the first sample instead of 0. `iir` starts
-        # at 0 because the HARDWARE does and reproducing its startup
-        # transient is that function's job; this one is a design model, and a
-        # 2**31 step at the front of every run would swamp the plot for the
-        # first seconds and tell you nothing about the filter.
+        # Seed with the first sample, not 0 -- `iir` starts at 0 to
+        # reproduce hardware startup; this is a design model and a 2**31
+        # step would swamp the plot for the first seconds.
         state["y"] = int(xs[0]) if xs.size else 0
 
     lp, state["y"] = kernel(xs, state["y"], shift)
@@ -215,31 +169,18 @@ def pipe1_manual(x, state, params):
 
 
 # --- pipe2: the ECG diagnostic band -------------------------------------
+# HP 0.2Hz (baseline wander) -> notch 50Hz (mains) -> LP 150Hz (EMG+), in
+# that order since drift is by far the largest thing on the wire.
 #
-# Three stages in this order: 0.2 Hz high-pass (baseline wander), 50 Hz notch
-# (mains), 150 Hz low-pass (EMG and everything above the signal). The order is
-# not arbitrary -- drift is by far the largest thing on the wire, and removing
-# it first keeps the two later stages away from their headroom limits.
+# ECG-specific choices: 0.2Hz/2nd-order HP keeps the near-DC ST segment
+# from tilting (AHA: 0.05Hz diagnostic / 0.5Hz monitoring; 0.2Hz is the
+# usual compromise). Notch Q=30 (~1.7Hz wide) stays narrow since QRS has
+# real energy either side of 50Hz -- a notch is a last resort, not a
+# substitute for a decent electrode. 150Hz LP is the standard adult
+# diagnostic bandwidth.
 #
-# Why these numbers, for ECG specifically:
-#   0.2 Hz HP, 2nd order. The ST segment is nearly DC, so the high-pass sits
-#       directly on top of the diagnosis: too high a corner or too steep a
-#       rolloff tilts ST and invents depression/elevation that is not there.
-#       (AHA: 0.05 Hz diagnostic, 0.5 Hz monitoring; 0.2 Hz with a gentle
-#       2nd-order response is the usual compromise.)
-#   50 Hz notch, Q = 30 (~1.7 Hz wide). Narrow on purpose -- the QRS has real
-#       energy either side of 50 Hz and a wide notch takes a bite out of it.
-#       The price of narrow is ringing after each QRS, which is why a notch is
-#       a last resort rather than a substitute for a decent electrode.
-#   150 Hz LP. The standard adult diagnostic bandwidth. Lower, and QRS
-#       amplitude and notching start to go.
-#
-# Any stage set to 0, or at/above Nyquist, is skipped: at fs = 256 there is
-# nothing at 150 Hz to remove.
-#
-# These are FALLBACKS, for a caller that passes no params. The app and SAT
-# both hand in config.PIPE2_* (Local tab), so changing a corner there is what
-# actually takes effect at runtime.
+# Any stage at 0 or >=Nyquist is skipped. These are FALLBACKS -- the app
+# and SAT both pass config.PIPE2_* (Local tab) at runtime.
 PIPE2_HP_HZ = 0.2
 PIPE2_NOTCH_HZ = 50.0
 PIPE2_NOTCH_Q = 30.0
@@ -247,10 +188,8 @@ PIPE2_LP_HZ = 150.0
 
 
 def _pipe2_freqs(params):
-    # Keys are prefixed with the pipeline's own name. `params` is one flat
-    # dict shared by every pipeline, and pipe1 already reads "hp_hz" as its
-    # own 0.5 Hz corner -- an unprefixed "hp_hz" here would have retuned
-    # pipe1 from the Local tab without anything saying so.
+    # pipe2_-prefixed: params is one flat dict shared by every pipeline,
+    # and pipe1 already owns an unprefixed "hp_hz".
     return (float(params.get("pipe2_hp_hz", PIPE2_HP_HZ)),
             float(params.get("pipe2_notch_hz", PIPE2_NOTCH_HZ)),
             float(params.get("pipe2_notch_q", PIPE2_NOTCH_Q)),
@@ -279,8 +218,8 @@ def pipe2_scipy(x, state, params):
         if 0 < lp_hz < nyq:
             sections.append(signal.butter(2, lp_hz / nyq, btype="lowpass",
                                           output="sos"))
-        # Nothing applicable (fs below every corner): an all-pass section, so
-        # the chain stays a filter instead of becoming a special case.
+        # All corners out of range (fs too low): an all-pass section, so
+        # the chain stays a filter instead of a special case.
         state["sos"] = (np.vstack(sections) if sections
                         else np.array([[1., 0., 0., 1., 0., 0.]]))
         # From rest, not sosfilt_zi's steady state -- same reason as pipe1.
@@ -299,10 +238,9 @@ def _biquad_scalar(x, g, b1, a1, a2, shift, x1, x2, y1, y2):
     One kernel, not two: a notch and a Butterworth low-pass are both
     b = [g, b1, g], so the same recursion covers both stages.
 
-    Coefficients are pre-scaled by 2**shift so the sum stays exact until a
-    single truncating shift at the end -- shifting each term separately throws
-    away most of the precision the narrow notch depends on. Two multipliers
-    and four registers in RTL, with a ~52-bit accumulator at these widths.
+    Coefficients pre-scaled by 2**shift so the sum stays exact until one
+    final truncating shift -- shifting each term separately would throw
+    away the precision the narrow notch depends on.
     """
     out = np.empty(x.shape[0], dtype=np.int64)
     for i in range(x.shape[0]):
@@ -333,13 +271,12 @@ def _notch_coeffs(f0, q, fs):
 
 
 def _lowpass_coeffs(fc, fs):
-    """RBJ 2nd-order Butterworth low-pass (Q = 1/sqrt(2)).
-
-    A biquad rather than another shift filter, because a single pole's corner
-    is quantised to fs/(2*pi*2**s): at fs = 2048 that jumps from 163 Hz (s=1)
-    straight to a bypass (s=0), so there is no 150 Hz to be had -- and 6 dB
-    per octave leaves EMG at 400 Hz barely touched. The high-pass at the other
-    end of the band is the opposite case; see pipe2_manual.
+    """RBJ 2nd-order Butterworth low-pass (Q = 1/sqrt(2)). A biquad, not
+    another shift filter: a single pole's corner is quantised to
+    fs/(2*pi*2**s), which at fs=2048 jumps from 163Hz (s=1) straight to
+    bypass (s=0) -- no 150Hz to be had -- and 6dB/octave barely touches
+    EMG at 400Hz. The high-pass at the other end of the band is the
+    opposite case; see pipe2_manual.
     """
     w0 = 2.0 * np.pi * fc / fs
     cos_w0 = np.cos(w0)
@@ -364,15 +301,15 @@ def _biquad_kernel():
 def pipe2_manual(x, state, params):
     """The same chain in integer arithmetic -- this is what becomes RTL.
 
-    Two different structures on purpose, because the two ends of the band are
-    different problems in fixed point:
+    Two different structures on purpose, because the two ends of the band
+    are different problems in fixed point:
 
       HP 0.2 Hz   x - single_pole_lowpass(x): one add, one shift, no
-                  multiplier. A biquad this close to DC needs poles at radius
-                  ~0.9994, and quantising those is where fixed-point filters
-                  go to ring. The price is a corner quantised to a power of
-                  two -- 0.159 Hz at fs = 2048, not 0.2.
-      notch, LP   fixed-point biquads. Their poles sit well away from z = 1,
+                  multiplier. A biquad this close to DC needs poles at
+                  radius ~0.9994, and quantising those is where fixed-point
+                  filters go to ring. Costs a corner quantised to a power
+                  of two -- 0.159 Hz at fs = 2048, not 0.2.
+      notch, LP   fixed-point biquads. Their poles sit well away from z=1,
                   so Q20 coefficients are plenty, and the LP gets a real
                   12 dB/octave instead of a single pole's 6.
 
@@ -410,22 +347,12 @@ def pipe2_manual(x, state, params):
     return _to_wire_centred(xs, x.dtype)
 
 
-# An entry is EITHER a bare function -- one fixed thing, no implementation to
-# choose -- OR a {implementation: function} dict offering the scipy/manual
-# pair. The distinction is real, not cosmetic:
-#
-#   bypass  is passthrough. There is nothing to quantise, so a "float" and a
-#           "fixed-point" version of it would be the same function under two
-#           names, and offering the choice would imply a difference that
-#           cannot exist.
-#   iir     is the board's own filter, already in fabric. It is a MODEL of
-#           specific hardware, not a design being explored, so there is
-#           nothing for a float version to be the design of.
-#   pipe1+  are designs in progress, and those always come as the pair.
-#
-# Both GUIs read this shape directly: the implementation dropdown is offered
-# when there is a choice and greyed out when there is not, in the main panel
-# and in SAT alike.
+# An entry is EITHER a bare function (bypass/iir -- nothing to choose
+# between: bypass has no fixed-point version to differ, iir models
+# specific existing hardware rather than a design in progress) OR a
+# {implementation: function} dict (pipe1+, designs that always come as a
+# scipy/manual pair). Both GUIs read this shape to decide whether to show
+# an implementation dropdown.
 PIPELINES = {
     "bypass": bypass,
     "iir": iir,
@@ -433,8 +360,8 @@ PIPELINES = {
     "pipe2": {"manual": pipe2_manual, "scipy": pipe2_scipy},
 }
 
-# What a design pipeline always offers, in dropdown order. Named here so the
-# two GUIs and sat.py agree without each writing the pair out again.
+# What a design pipeline always offers, in dropdown order -- named here so
+# the two GUIs and sat.py agree without each writing the pair out again.
 IMPLS = ("manual", "scipy")
 
 DEFAULT_PIPE = "iir"
@@ -453,23 +380,17 @@ def implementations(pipe):
 
 
 def label(pipe, impl):
-    """How a selection is written wherever one is shown or logged.
-
-    "iir" for the fixed entries and "pipe1/scipy" for the rest -- naming an
-    implementation that was never chosen would be noise at best and a claim
-    about what ran at worst.
-    """
+    """How a selection is displayed/logged: "iir" for the fixed entries,
+    "pipe1/scipy" for the rest -- naming an implementation that was never
+    chosen would be misleading."""
     return f"{pipe}/{impl}" if has_implementations(pipe) else pipe
 
 
 def resolve(pipe, impl):
-    """The function for a (pipeline, implementation) pair, or None.
-
-    `impl` is ignored for the fixed entries, and falls back to the
-    pipeline's first implementation when the requested one does not exist --
-    a stale selection should still run the filter, not silently stop
-    filtering.
-    """
+    """The function for a (pipeline, implementation) pair, or None. `impl`
+    is ignored for the fixed entries, and falls back to the first
+    implementation when the requested one is stale, so filtering never
+    silently stops."""
     entry = PIPELINES.get(pipe)
     if entry is None:
         return None
@@ -481,11 +402,7 @@ def resolve(pipe, impl):
 
 
 def new_state():
-    """Fresh filter memory for ONE channel.
-
-    Empty rather than pre-seeded: each pipeline puts in whatever it needs
-    (`iir` a single integer, pipe1_scipy an sos matrix and a zi array), and
-    they are not interchangeable -- which is exactly why process_channel
-    clears it when the selection changes.
-    """
+    """Fresh filter memory for ONE channel -- empty, since each pipeline's
+    state shape (an integer, an sos/zi pair, ...) isn't interchangeable
+    with another's."""
     return {}

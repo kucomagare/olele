@@ -1,44 +1,8 @@
-# Runtime control panels: two Tkinter frames placed around the plot's
-# TkAgg canvas in the same window (same Tk root -- see plot.py's
-# DualPlot.__init__), letting config.py's knobs be changed while
-# python_client.py is running instead of edited and restarted.
-#
-# Split by what each knob is actually about, laid out differently since
-# one has few, short fields and the other has more:
-#   SignalControlPanel (right-side column) -- the ECG signal itself and how
-#     fast it's generated/streamed, in three tabs:
-#       Basic    -- SEND_RATE / CHUNK_SIZE / ECG_HEART_RATE /
-#                   ECG_SAMPLING_RATE / ECG_AMPLITUDE / RECEIVE_ENABLED,
-#                   plus the Pause/Resume button above the tabs.
-#       Waveform -- nk.ecg_simulate()'s ECGSYN-model kwargs: ECG_METHOD,
-#                   ECG_HEART_RATE_STD, ECG_LFHFRATIO, ECG_TI/AI/BI (each a
-#                   P,Q,R,S,T 5-tuple), ECG_RANDOM_SEED.
-#       Noise    -- ECG_NOISE (nk.ecg_simulate()'s own built-in noise), five
-#                   independent colored-noise layers (ECG_NOISE_
-#                   {VIOLET,BLUE,WHITE,PINK,BROWN}_ENABLED/_LEVEL, any
-#                   combination active at once), and two sine-wave
-#                   interference generators (ECG_SINE{1,2}_ENABLED/_FREQ/
-#                   _PHASE/_LEVEL, e.g. for mains hum) -- see
-#                   signal_gen.py's _simulate_raw()/_sine_contribution().
-#   PlotControlPanel (bottom bar, one row) -- purely how the plot displays
-#     that signal: PLOT_MIN / PLOT_MAX / PLOT_BUFFER / FRAME_RATE. None of
-#     these affect what's generated or sent on the wire, only what's drawn
-#     and how -- laid out horizontally via _add_entry_horizontal() rather
-#     than the vertical _add_entry() SignalControlPanel uses, since it
-#     spans the full window width as a single line instead of a sidebar.
-#
-# The Pause/Resume button toggles config.SEND_ENABLED -- net.py's send loop
-# checks it every cycle (net.py:78), so pausing stops new packets going out
-# but leaves the connection and receive path alone.
-#
-# Writes land directly on the config module's attributes. net.py and
-# signal_gen.py read those attributes live (not values frozen at import
-# time), so a change here takes effect within one send cycle -- no
-# threading/locking needed, plain attribute assignment is atomic and the
-# net thread just reads whatever's current. PLOT_MIN/PLOT_MAX/PLOT_BUFFER/
-# FRAME_RATE are consumed the same way by plot.py's DualPlot.refresh() /
-# python_client.py's main loop, which need a full canvas redraw (or a
-# recomputed frame period) to apply them -- see there for why.
+# Two Tkinter frames packed into the plot's TkAgg canvas window (see plot.py's
+# DualPlot.__init__), editing config.py's knobs live instead of edit-and-restart.
+# SignalControlPanel (right column) = ECG signal/streaming; PlotControlPanel
+# (bottom bar) = display only. Writes land directly on config attributes, read
+# live elsewhere -- no locking needed since plain attribute assignment is atomic.
 
 import tkinter as tk
 from tkinter import ttk
@@ -47,10 +11,7 @@ import config
 
 
 class _Tooltip:
-    """Minimal hover tooltip -- Tk/ttk has no built-in one. A small
-    borderless Toplevel appears near the widget on <Enter> and is
-    destroyed on <Leave>; there's deliberately no delay/fade logic, this
-    just needs to answer "what does this field do" on hover."""
+    """Minimal hover tooltip -- Tk/ttk has none built in."""
 
     def __init__(self, widget, text):
         self.widget = widget
@@ -91,11 +52,7 @@ def _add_entry(frame, row, label, var, on_commit, width=8, help_text=None):
 
 
 def _parse_5tuple(text, fallback):
-    """Parse a comma-separated "a,b,c,d,e" entry (used for the ECGSYN
-    model's ti/ai/bi wave parameters, each a 5-tuple for P,Q,R,S,T) back
-    into a tuple of 5 floats. Falls back to the last-good value on any
-    parse error or wrong count, same "reject the whole thing rather than
-    guess" policy as the other validated fields."""
+    """Parse "a,b,c,d,e" into 5 floats; falls back to last-good on any error."""
     try:
         parts = tuple(float(p.strip()) for p in text.split(","))
         if len(parts) != 5:
@@ -110,10 +67,7 @@ def _format_5tuple(values):
 
 
 def _add_entry_horizontal(frame, col, label, var, on_commit):
-    """Same as _add_entry but laid out left-to-right in a single row
-    (label, entry, label, entry, ...) instead of stacked rows -- used by
-    PlotControlPanel, which sits in one line along the bottom of the
-    window rather than a sidebar column."""
+    """Like _add_entry but laid left-to-right in one row (PlotControlPanel's bottom bar)."""
     ttk.Label(frame, text=label).grid(row=0, column=col, sticky="w", padx=(0, 4))
     entry = ttk.Entry(frame, textvariable=var, width=8)
     entry.grid(row=0, column=col + 1, sticky="w", padx=(0, 16))
@@ -122,8 +76,7 @@ def _add_entry_horizontal(frame, col, label, var, on_commit):
     return col + 2
 
 
-# (display name, config attr for "enabled", config attr for "level", beta,
-#  short description of that color's character for its tooltip)
+# (name, enabled attr, level attr, beta, tooltip description)
 _NOISE_ROWS = (
     ("Violet", "ECG_NOISE_VIOLET_ENABLED", "ECG_NOISE_VIOLET_LEVEL", -2,
      "emphasizes high frequencies (hiss-like)"),
@@ -143,10 +96,7 @@ _SINE_ROWS = (
     ("Sine 2", "ECG_SINE2_ENABLED", "ECG_SINE2_FREQ", "ECG_SINE2_PHASE", "ECG_SINE2_LEVEL"),
 )
 
-_METHODS = ["ecgsyn", "simple"]  # NOT "multileads" -- see config.py's
-                                  # ECG_METHOD comment. A readonly combobox
-                                  # (state="readonly" below) means the user
-                                  # can only ever pick from this list.
+_METHODS = ["ecgsyn", "simple"]  # NOT "multileads" -- readonly combobox, exhaustive.
 
 
 class SignalControlPanel:
@@ -159,10 +109,6 @@ class SignalControlPanel:
                                          command=self._toggle_pause)
         self._pause_button.pack(fill="x", pady=(0, 6))
 
-        # Tabbed rather than one long stacked column -- Basic covers the
-        # fields every session needs; Waveform/Noise are the nk.ecg_simulate
-        # kwargs and nk.signal_noise() injection from the parameter survey,
-        # most of which most sessions won't touch.
         notebook = ttk.Notebook(self.frame)
         notebook.pack(fill="both", expand=True)
         basic = ttk.Frame(notebook, padding=6)
@@ -182,9 +128,7 @@ class SignalControlPanel:
                   justify="left", foreground="#555").pack(anchor="w")
         self._update_rate_status()
 
-    # ------------------------------------------------------------------
-    # Basic tab: the fields from before this session's parameter survey.
-    # ------------------------------------------------------------------
+    # -- Basic tab --
     def _build_basic_tab(self, frame):
         self._send_rate = tk.StringVar(value=str(config.SEND_RATE))
         self._chunk_size = tk.StringVar(value=str(config.CHUNK_SIZE))
@@ -224,9 +168,7 @@ class SignalControlPanel:
         _Tooltip(rx, "When off, incoming (echoed) packets from the board/relay are ignored -- "
                       "the plot's \"out\" trace stops updating. Sending continues unaffected.")
 
-    # ------------------------------------------------------------------
-    # Waveform tab: nk.ecg_simulate()'s ECGSYN-model parameters.
-    # ------------------------------------------------------------------
+    # -- Waveform tab: nk.ecg_simulate()'s ECGSYN-model parameters --
     def _build_waveform_tab(self, frame):
         self._method = tk.StringVar(value=config.ECG_METHOD)
         self._heart_rate_std = tk.StringVar(value=f"{config.ECG_HEART_RATE_STD:g}")
@@ -289,10 +231,7 @@ class SignalControlPanel:
                                      "seed+1, so the two channels differ from each other but "
                                      "both stay reproducible.")
 
-    # ------------------------------------------------------------------
-    # Noise tab: nk.ecg_simulate()'s own noise param + a separate
-    # nk.signal_noise()-based colored noise added on top.
-    # ------------------------------------------------------------------
+    # -- Noise tab: built-in ecg_simulate noise + separate colored noise layers --
     def _build_noise_tab(self, frame):
         self._ecg_noise = tk.StringVar(value=f"{config.ECG_NOISE:g}")
 
@@ -312,10 +251,7 @@ class SignalControlPanel:
             row=row, column=0, columnspan=3, sticky="w", pady=(0, 4))
         row += 1
 
-        # One row per color: checkbox + level entry, each independently
-        # toggleable and summed together in signal_gen.py's _simulate_raw()
-        # -- this replaced a single enabled/color/level combo that only
-        # allowed one color active at a time.
+        # One row per color, independently toggleable, summed in signal_gen.py's _simulate_raw().
         self._noise_vars = {}
         for name, enabled_attr, level_attr, beta, character in _NOISE_ROWS:
             enabled_var = tk.BooleanVar(value=getattr(config, enabled_attr))
@@ -352,12 +288,8 @@ class SignalControlPanel:
             row=row, column=0, columnspan=3, sticky="w", pady=(0, 4))
         row += 1
 
-        # Each sine gets its own checkbox + 3 stacked fields (freq, phase,
-        # amplitude). Unlike the colored-noise rows, both generators can
-        # differ in every parameter but are added IDENTICALLY to both
-        # channels -- see signal_gen.py's _sine_contribution()/comment on
-        # why (real interference like mains hum affects every channel the
-        # same way, unlike the deliberately-decorrelated colored noise).
+        # Each sine added identically to both channels (unlike noise rows) --
+        # see signal_gen.py's _sine_contribution().
         self._sine_vars = {}
         for name, enabled_attr, freq_attr, phase_attr, level_attr in _SINE_ROWS:
             enabled_var = tk.BooleanVar(value=getattr(config, enabled_attr))
@@ -431,10 +363,7 @@ class SignalControlPanel:
             value = float(var.get())
         except ValueError:
             value = getattr(config, attr) * 100
-        value = max(0.0, min(value, 200.0))  # allow up to 2x the ECG's own
-                                              # ptp per layer for a
-                                              # genuinely noise-dominated
-                                              # signal if wanted
+        value = max(0.0, min(value, 200.0))  # up to 2x the ECG's own ptp
         var.set(f"{value:g}")
         setattr(config, attr, value / 100.0)
 
@@ -482,10 +411,7 @@ class SignalControlPanel:
             value = int(self._ecg_sample_rate.get())
         except ValueError:
             value = config.ECG_SAMPLING_RATE
-        value = max(50, min(value, 2000))  # 50 Hz floor keeps QRS shape
-                                            # recognizable; 2000 Hz ceiling
-                                            # is a sanity cap, well above
-                                            # any real ECG hardware rate.
+        value = max(50, min(value, 2000))  # 50 Hz floor keeps QRS shape recognizable.
         self._ecg_sample_rate.set(str(value))
         config.ECG_SAMPLING_RATE = value
         self._update_rate_status()
@@ -499,9 +425,7 @@ class SignalControlPanel:
         self._amplitude.set(f"{value:g}")
         config.ECG_AMPLITUDE = value / 100.0
 
-    # ------------------------------------------------------------------
-    # Waveform tab apply methods
-    # ------------------------------------------------------------------
+    # -- Waveform tab apply methods --
     def _apply_method(self, _event=None):
         config.ECG_METHOD = self._method.get()
 
@@ -549,9 +473,7 @@ class SignalControlPanel:
         self._random_seed.set(str(value))
         config.ECG_RANDOM_SEED = value
 
-    # ------------------------------------------------------------------
-    # Noise tab apply methods
-    # ------------------------------------------------------------------
+    # -- Noise tab apply methods --
     def _apply_ecg_noise(self):
         try:
             value = float(self._ecg_noise.get())
@@ -600,8 +522,7 @@ class PlotControlPanel:
             if hi <= lo:
                 raise ValueError
         except ValueError:
-            # Reject the whole pair on a bad edit rather than guessing which
-            # field was wrong -- both snap back to config's last-good values.
+            # Reject the whole pair rather than guess which field was wrong.
             self._plot_min.set(str(config.PLOT_MIN))
             self._plot_max.set(str(config.PLOT_MAX))
             return
@@ -613,8 +534,7 @@ class PlotControlPanel:
             value = int(self._plot_buffer.get())
         except ValueError:
             value = config.PLOT_BUFFER
-        value = max(10, min(value, 100_000))  # sanity bounds, not a
-                                               # protocol/hardware limit
+        value = max(10, min(value, 100_000))  # sanity bounds, not a hard limit
         self._plot_buffer.set(str(value))
         config.PLOT_BUFFER = value
 
@@ -623,11 +543,6 @@ class PlotControlPanel:
             value = int(self._frame_rate.get())
         except ValueError:
             value = config.FRAME_RATE
-        value = max(1, min(value, 60))  # plot.py's refresh() does a real
-                                         # canvas draw/blit each frame --
-                                         # 60 fps sanity cap keeps this from
-                                         # becoming a self-inflicted CPU
-                                         # hog (see config.py's FRAME_RATE
-                                         # comment on measured cost).
+        value = max(1, min(value, 60))  # each frame costs a real canvas draw/blit.
         self._frame_rate.set(str(value))
         config.FRAME_RATE = value

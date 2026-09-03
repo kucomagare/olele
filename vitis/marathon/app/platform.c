@@ -60,10 +60,7 @@ volatile int TcpSlowTmrFlag = 0;
 volatile u64_t tickcntr = 0;
 void timer_callback()
 {
-	/* we need to call tcp_fasttmr & tcp_slowtmr at intervals specified
-	 * by lwIP.
-	 * It is not important that the timing is absoluetly accurate.
-	 */
+	/* Call tcp_fasttmr/tcp_slowtmr at lwIP's specified intervals; exact timing isn't critical. */
 	static int odd = 1;
 #if LWIP_DHCP==1
 	static int dhcp_timer = 0;
@@ -99,7 +96,6 @@ void platform_setup_interrupts()
 	XIntc_Initialize(intcp, XPAR_INTC_0_DEVICE_ID);
 	XIntc_Start(intcp, XIN_REAL_MODE);
 
-	/* Start the interrupt controller */
 	XIntc_MasterEnable(XPAR_INTC_0_BASEADDR);
 
 #ifdef __MICROBLAZE__
@@ -109,7 +105,6 @@ void platform_setup_interrupts()
 	platform_setup_timer();
 
 #ifdef XPAR_ETHERNET_MAC_IP2INTC_IRPT_MASK
-	/* Enable timer and EMAC interrupts in the interrupt controller */
 	XIntc_EnableIntr(XPAR_INTC_0_BASEADDR,
 #ifdef __MICROBLAZE__
 			 PLATFORM_TIMER_INTERRUPT_MASK |
