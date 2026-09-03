@@ -7,6 +7,7 @@ small C++ relay server that sits between the Python client and the board.
 ```
 python_client.py     entry point -- main() only, wires the pieces below together
 config.py             all tunable knobs (SEND_RATE, CHUNK_SIZE, plot window, ...)
+                      and, in its SAT_* section, every default SAT opens with
 packet_format.py       loads packet_format.json, builds numpy dtypes, PacketReceiver
 signal_gen.py          ECG signal generation (neurokit2) + packet building
 plot.py                DualPlot (matplotlib, blitted + envelope-decimated)
@@ -141,6 +142,14 @@ source build/venv/bin/activate
 ./sat.py                            # window, on the newest dump
 ./sat.py FILE.csv                   # ...on a particular one
 ```
+
+**Every default it starts from lives in `config.py`**, in the `SAT_*`
+section near the bottom — field values, dropdown contents, figure size,
+overlay colours, and the measurement constants. The CLI's flag defaults and
+the window's field defaults both read those same names, so a change lands in
+both; they used to carry their own copies of the same eight numbers, which
+is exactly the arrangement where the two drift apart unnoticed. Unlike the
+client's knobs above it, nothing in that section is written at runtime.
 
 It opens a **window shaped like the client's** — matplotlib's own canvas
 with a Tk control column beside it — but nothing in it is live. There is no

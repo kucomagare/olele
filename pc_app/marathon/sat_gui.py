@@ -15,24 +15,13 @@ import matplotlib.pyplot as plt
 from matplotlib.ticker import MultipleLocator, ScalarFormatter
 import numpy as np
 
+import config
 import guiutil
 import sat
 
-FFT_SIZES = (0, 128, 256, 512, 1024, 2048, 4096, 8192)
-VIEWS = ("capture", "response")
-OVERLAYS = ("none", "gain", "spectrum", "both")
-OVERLAY_CHANNELS = ("ch1", "ch2", "both")
-
-# The capture overlays are drawn in greys, so nothing on the response axes
-# can be mistaken for a pipeline: colour there means "a pipeline", and a
-# recording is not one.
-_GAIN_COLORS = {"ch1": "0.15", "ch2": "0.50"}
-_SPECTRUM_COLOR = "0.45"
-
-# One colour per pipeline, one line style per implementation, so a stack of
-# curves on the response axes reads as "which filter" and "which arithmetic"
-# at a glance rather than as eight unrelated lines.
-_IMPL_STYLE = {"scipy": "-", "manual": "--"}
+# Defaults and choice lists all come from config.py's "SAT" section -- see
+# there to change one. Nothing is copied into module constants here, so
+# that file is the only edit.
 
 
 # Pipeline names only, built from the registry -- a pipeline added in
@@ -79,21 +68,14 @@ def _fmt(value):
     return "" if value is None else f"{float(value):g}"
 
 
-# A pipeline that does nothing has a delay of exactly zero, and autoscaling
-# onto +-8e-15 ms draws floating-point dust as though it were structure --
-# a bypass channel came out looking like a scatter plot. Delay axes get a
-# floor on their span so that nothing looks like nothing.
-_MIN_DELAY_SPAN_MS = 1.0
-
-
 def _pad_delay_axis(ax, units):
     if units == "deg":
         return                          # degrees already have a fixed scale
     lo, hi = ax.get_ylim()
-    if hi - lo < _MIN_DELAY_SPAN_MS:
+    if hi - lo < config.SAT_MIN_DELAY_SPAN_MS:
         mid = 0.5 * (lo + hi)
-        ax.set_ylim(mid - _MIN_DELAY_SPAN_MS / 2.0,
-                    mid + _MIN_DELAY_SPAN_MS / 2.0)
+        ax.set_ylim(mid - config.SAT_MIN_DELAY_SPAN_MS / 2.0,
+                    mid + config.SAT_MIN_DELAY_SPAN_MS / 2.0)
 
 
 def _curve_style(response):
@@ -104,7 +86,7 @@ def _curve_style(response):
     order = sorted(pipelines.PIPELINES)
     pipe = response["pipe"]
     idx = order.index(pipe) if pipe in order else len(order)
-    return f"C{idx % 10}", _IMPL_STYLE.get(response["impl"], "-")
+    return f"C{idx % 10}", config.SAT_IMPL_STYLE.get(response["impl"], "-")
 
 
 class _Tooltip:
@@ -134,22 +116,36 @@ class _Tooltip:
 
 
 class SATWindow:
-    def __init__(self, log_dir, path=None, fft_size=0, fmax=0.0, db_min=-120.0,
-                 peak_fmin=1.0, model=None, model_ch2=None, shift=None,
-                 settle=200, phase=sat.DEFAULT_PHASE_MODE,
-                 phase_units=sat.DEFAULT_PHASE_UNITS,
-                 view="capture", curves=(),
-                 response_size=sat.DEFAULT_RESPONSE_SIZE,
-                 response_points=sat.DEFAULT_RESPONSE_POINTS,
-                 response_drive=sat.DEFAULT_RESPONSE_DRIVE,
-                 response_averages=sat.DEFAULT_RESPONSE_AVERAGES,
-                 response_fmin=0.0, response_fmax=0.0, overrides=None,
-                 overlay="none", overlay_ch="both"):
+    # Every default comes from config.py's SAT section rather than being
+    # written out here as well -- the CLI reads the same names, and when
+    # both carried their own copies the two could drift apart unnoticed.
+    def __init__(self, log_dir, path=None,
+                 fft_size=config.SAT_FFT_SIZE,
+                 fmax=config.SAT_FMAX,
+                 db_min=config.SAT_DB_MIN,
+                 peak_fmin=config.SAT_PEAK_FMIN,
+                 model=config.SAT_MODEL,
+                 model_ch2=config.SAT_MODEL_CH2,
+                 shift=config.SAT_SHIFT,
+                 settle=config.SAT_SETTLE,
+                 phase=config.SAT_PHASE,
+                 phase_units=config.SAT_PHASE_UNITS,
+                 view=config.SAT_VIEW,
+                 curves=config.SAT_CURVES,
+                 response_size=config.SAT_RESPONSE_SIZE,
+                 response_points=config.SAT_RESPONSE_POINTS,
+                 response_drive=config.SAT_RESPONSE_DRIVE,
+                 response_averages=config.SAT_RESPONSE_AVERAGES,
+                 response_fmin=config.SAT_RESPONSE_FMIN,
+                 response_fmax=config.SAT_RESPONSE_FMAX,
+                 overrides=None,
+                 overlay=config.SAT_OVERLAY,
+                 overlay_ch=config.SAT_OVERLAY_CH):
         self.log_dir = log_dir
         self.traces = None
         self.info = None
 
-        self.fig = plt.figure(figsize=(13, 7))
+        self.fig = plt.figure(figsize=config.SAT_FIGSIZE)
         # The two views want different grids, so the axes are built on
         # demand (_layout) rather than fixed here.
         self._shape = None
@@ -179,12 +175,12 @@ class SATWindow:
         self._db_min = tk.StringVar(value=f"{db_min:g}")
         self._peak_fmin = tk.StringVar(value=f"{peak_fmin:g}")
         self._phase = tk.StringVar(
-            value=phase if phase in sat.PHASE_MODES else sat.DEFAULT_PHASE_MODE)
+            value=phase if phase in config.SAT_PHASE_CHOICES else config.SAT_PHASE)
         # Shared by both views' phase axes, like dB min -- "how is phase
         # displayed" is one question, not one per view.
         self._phase_units = tk.StringVar(
-            value=phase_units if phase_units in sat.PHASE_UNITS
-            else sat.DEFAULT_PHASE_UNITS)
+            value=phase_units if phase_units in config.SAT_PHASE_UNIT_CHOICES
+            else config.SAT_PHASE_UNITS)
         # Per channel: a capture's two channels may have run different
         # pipelines, so a single model could only ever be right for one.
         pipe0, impl0 = _split_model(model)
@@ -197,7 +193,7 @@ class SATWindow:
         self._file = tk.StringVar()
 
         # --- response view ---------------------------------------------
-        self._view = tk.StringVar(value=view if view in VIEWS else "capture")
+        self._view = tk.StringVar(value=view if view in config.SAT_VIEW_CHOICES else "capture")
         # One flag per pipe:impl, so any subset can be ticked and the ticked
         # ones are drawn over each other. Built from the registry, so a
         # pipeline added in pipelines.py gets a checkbox with no edit here.
@@ -222,7 +218,9 @@ class SATWindow:
         self._resp_averages = tk.StringVar(value=str(response_averages))
         self._resp_fmin = tk.StringVar(value=f"{response_fmin:g}")
         self._resp_fmax = tk.StringVar(value=f"{response_fmax:g}")
-        self._resp_rate = tk.StringVar()
+        self._resp_rate = tk.StringVar(
+            value="" if not config.SAT_RESPONSE_RATE
+            else f"{config.SAT_RESPONSE_RATE:g}")
         # A pipeline's own knobs, filled in from the loaded capture (or the
         # pipeline's own defaults) rather than left blank -- a corner you
         # cannot see is a corner you cannot sensibly change, and the point
@@ -232,12 +230,12 @@ class SATWindow:
         # --set from the command line is where you start and not a mode you
         # are stuck in.
         self._pending_tunables = dict(overrides or {})
-        self._resp_floor = tk.BooleanVar(value=True)
-        self._resp_ideal = tk.BooleanVar(value=False)
+        self._resp_floor = tk.BooleanVar(value=config.SAT_SHOW_FLOOR)
+        self._resp_ideal = tk.BooleanVar(value=config.SAT_SHOW_DESIGN)
         self._overlay = tk.StringVar(
-            value=overlay if overlay in OVERLAYS else "none")
+            value=overlay if overlay in config.SAT_OVERLAY_CHOICES else "none")
         self._overlay_ch = tk.StringVar(
-            value=overlay_ch if overlay_ch in OVERLAY_CHANNELS else "both")
+            value=overlay_ch if overlay_ch in config.SAT_OVERLAY_CH_CHOICES else "both")
 
         # What Defaults restores -- the dump file isn't in here, it's what
         # you're looking at, not a setting.
@@ -346,7 +344,7 @@ class SATWindow:
         ttk.Label(head, text="View", font=("", 10, "bold")).grid(
             row=0, column=0, sticky="w")
         view_box = ttk.Combobox(head, textvariable=self._view, width=10,
-                                state="readonly", values=list(VIEWS))
+                                state="readonly", values=list(config.SAT_VIEW_CHOICES))
         view_box.grid(row=0, column=1, sticky="e")
         view_box.bind("<<ComboboxSelected>>", lambda _e: self._switch_view())
         _Tooltip(view_box,
@@ -359,7 +357,8 @@ class SATWindow:
                  "keep their values, so switching back finds them unchanged.")
         head.columnconfigure(0, weight=1)
 
-        scroller = guiutil.ScrollFrame(self.controls, max_req_height=360,
+        scroller = guiutil.ScrollFrame(self.controls,
+                                       max_req_height=config.SAT_CONTROLS_MAX_HEIGHT,
                                        padding=0)
         scroller.outer.pack(side="top", fill="both", expand=True)
         # ttk sizes a notebook to its widest PAGE and never consults its tab
@@ -404,7 +403,7 @@ class SATWindow:
 
         was = self._view.get()
         strip = 0
-        for view in VIEWS:
+        for view in config.SAT_VIEW_CHOICES:
             self._view.set(view)
             strip = max(strip, sum(font.measure(label) + per_tab
                                    for _page, label in self._view_tabs()))
@@ -465,7 +464,7 @@ class SATWindow:
         ttk.Label(f, text="Size").grid(row=0, column=0, sticky="w", pady=2)
         size_box = ttk.Combobox(f, textvariable=self._fft_size, width=8,
                                 state="readonly",
-                                values=[_size_label(v) for v in FFT_SIZES])
+                                values=[_size_label(v) for v in config.SAT_FFT_SIZE_CHOICES])
         size_box.grid(row=0, column=1, sticky="e", pady=2)
         _Tooltip(size_box,
                  "How many of the newest samples are transformed. \"capture\" "
@@ -492,7 +491,7 @@ class SATWindow:
 
         ttk.Label(f, text="Phase").grid(row=row, column=0, sticky="w", pady=2)
         phase_box = ttk.Combobox(f, textvariable=self._phase, width=8,
-                                 state="readonly", values=list(sat.PHASE_MODES))
+                                 state="readonly", values=list(config.SAT_PHASE_CHOICES))
         phase_box.grid(row=row, column=1, sticky="e", pady=2)
         _Tooltip(phase_box,
                  "A third column beside the spectra: phase against "
@@ -519,7 +518,7 @@ class SATWindow:
         ttk.Label(f, text="Phase units").grid(row=row, column=0, sticky="w",
                                               pady=2)
         units_box = ttk.Combobox(f, textvariable=self._phase_units, width=8,
-                                 state="readonly", values=list(sat.PHASE_UNITS))
+                                 state="readonly", values=list(config.SAT_PHASE_UNIT_CHOICES))
         units_box.grid(row=row, column=1, sticky="e", pady=2)
         _Tooltip(units_box,
                  "What the phase axis plots. Degrees are the raw angle; "
@@ -659,7 +658,7 @@ class SATWindow:
         ttk.Label(f, text="Size").grid(row=0, column=0, sticky="w", pady=2)
         resp_size = ttk.Combobox(f, textvariable=self._resp_size, width=9,
                                  state="readonly",
-                                 values=[str(v) for v in sat.RESPONSE_SIZES])
+                                 values=[str(v) for v in config.SAT_RESPONSE_SIZE_CHOICES])
         resp_size.grid(row=0, column=1, sticky="e", pady=2)
         resp_size.bind("<<ComboboxSelected>>", lambda _e: self._pin_size())
         _Tooltip(resp_size,
@@ -738,7 +737,7 @@ class SATWindow:
         ttk.Label(f, text="Phase units").grid(row=row, column=0, sticky="w",
                                               pady=2)
         runits_box = ttk.Combobox(f, textvariable=self._phase_units, width=8,
-                                  state="readonly", values=list(sat.PHASE_UNITS))
+                                  state="readonly", values=list(config.SAT_PHASE_UNIT_CHOICES))
         runits_box.grid(row=row, column=1, sticky="e", pady=2)
         _Tooltip(runits_box,
                  "What the phase axis plots. Degrees are the raw angle; "
@@ -792,7 +791,7 @@ class SATWindow:
         ttk.Label(f, text="Overlay capture").grid(row=row, column=0,
                                                   sticky="w", pady=2)
         overlay_box = ttk.Combobox(f, textvariable=self._overlay, width=9,
-                                   state="readonly", values=list(OVERLAYS))
+                                   state="readonly", values=list(config.SAT_OVERLAY_CHOICES))
         overlay_box.grid(row=row, column=1, sticky="e", pady=2)
         _Tooltip(overlay_box,
                  "Put the loaded capture (Dump tab) on the response axes. "
@@ -817,7 +816,7 @@ class SATWindow:
                                                pady=2)
         overlay_ch_box = ttk.Combobox(f, textvariable=self._overlay_ch,
                                       width=9, state="readonly",
-                                      values=list(OVERLAY_CHANNELS))
+                                      values=list(config.SAT_OVERLAY_CH_CHOICES))
         overlay_ch_box.grid(row=row, column=1, sticky="e", pady=2)
         _Tooltip(overlay_ch_box,
                  "Which channel the overlay is taken from. The two channels "
@@ -1101,11 +1100,11 @@ class SATWindow:
 
         size = self._size_floor
         points = max(2, self._number(self._resp_points,
-                                     sat.DEFAULT_RESPONSE_POINTS, int))
+                                     config.SAT_RESPONSE_POINTS, int))
         drive = min(0.95, max(0.001, self._number(
-            self._resp_drive, sat.DEFAULT_RESPONSE_DRIVE * 100.0) / 100.0))
+            self._resp_drive, config.SAT_RESPONSE_DRIVE * 100.0) / 100.0))
         averages = max(1, self._number(self._resp_averages,
-                                       sat.DEFAULT_RESPONSE_AVERAGES, int))
+                                       config.SAT_RESPONSE_AVERAGES, int))
         fmin = max(0.0, self._number(self._resp_fmin, 0.0))
         fmax = max(0.0, self._number(self._resp_fmax, 0.0))
         # An inverted band would silently measure nothing; say so by
@@ -1118,7 +1117,7 @@ class SATWindow:
         # rather than quietly measuring nothing down there. Written back to
         # the Size box, because the cost is real and should be visible.
         size = min(max(size, sat.size_for_fmin(rate, fmin)),
-                   sat.RESPONSE_SIZE_MAX)
+                   config.SAT_RESPONSE_SIZE_CHOICES[-1])
         self._resp_size.set(str(size))
         self._resp_points.set(str(points))
         self._resp_drive.set(f"{drive * 100:g}")
@@ -1130,7 +1129,7 @@ class SATWindow:
         # pipeline, so this is the one control in the window that can take a
         # visible moment. Say so before starting rather than looking hung.
         self._say(f"Measuring {len(names)} pipeline(s) at {rate:g} Hz, "
-                  f"{averages} x {(sat.RESPONSE_SETTLE_PERIODS + 1) * size} samples each…")
+                  f"{averages} x {(config.SAT_RESPONSE_SETTLE_PERIODS + 1) * size} samples each…")
         self.report.update_idletasks()
 
         responses = []
@@ -1147,7 +1146,7 @@ class SATWindow:
 
         responses = [r for r in responses if r]
 
-        channels = (OVERLAY_CHANNELS[:2] if self._overlay_ch.get() == "both"
+        channels = (config.SAT_OVERLAY_CH_CHOICES[:2] if self._overlay_ch.get() == "both"
                     else (self._overlay_ch.get(),))
         gains, spectra = [], []
         if overlay in ("gain", "both"):
@@ -1308,9 +1307,9 @@ class SATWindow:
             ax_mag.patch.set_visible(False)
             for s in spectra:
                 self._twin.fill_between(s["freqs"], db_min - 200.0, s["db"],
-                                        color=_SPECTRUM_COLOR, alpha=0.07,
+                                        color=config.SAT_SPECTRUM_COLOR, alpha=0.07,
                                         lw=0)
-                self._twin.plot(s["freqs"], s["db"], color=_SPECTRUM_COLOR,
+                self._twin.plot(s["freqs"], s["db"], color=config.SAT_SPECTRUM_COLOR,
                                 lw=0.7, alpha=0.75,
                                 label=f"{s['channel']} {s['direction']} (dBFS)")
 
@@ -1359,7 +1358,7 @@ class SATWindow:
         # record, and drawing it as a continuous curve would claim a
         # resolution the capture does not have.
         for g in gains:
-            color = _GAIN_COLORS.get(g["channel"], "0.3")
+            color = config.SAT_GAIN_COLORS.get(g["channel"], "0.3")
             ax_mag.plot(g["freqs"], g["mag_db"], color=color, lw=1.1,
                         marker=".", ms=3.5, alpha=0.9,
                         label=f"{g['channel']} capture in→out")

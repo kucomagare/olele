@@ -40,10 +40,14 @@ import numpy as np
 # this file, not necessarily in the working directory.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import config
 import spectrum
 
 TRACES = ("ch1_in", "ch1_out", "ch2_in", "ch2_out")
-DEFAULT_LOGS = Path(__file__).resolve().parent / "build" / "logs"
+# Every default and choice list lives in config.py, next to the client's --
+# see its "SAT" section. Referenced through `config.` rather than copied
+# into module constants here, so editing that file is the only edit.
+DEFAULT_LOGS = Path(__file__).resolve().parent / config.SAT_LOG_DIR
 
 
 # ---------------------------------------------------------------------------
@@ -396,26 +400,6 @@ def compare_model(traces, ch, algorithm, shift, settle, fs, meta=None):
 # floor is how you see what fixed point costs.
 
 WIRE_DTYPE = ">u4"          # the same words compare_model feeds a pipeline
-# The lowest frequency a measurement can reach is one bin, rate/size, so the
-# only way down the frequency axis is a longer period. At 2 kHz the top of
-# this range reaches 0.001 Hz, and costs ~1.6 s and ~200 MB for one curve --
-# which is why it is the top of the range.
-RESPONSE_SIZES = (4096, 8192, 16384, 32768, 65536, 131072, 262144,
-                  524288, 1048576, 2097152)
-RESPONSE_SIZE_MAX = RESPONSE_SIZES[-1]
-DEFAULT_RESPONSE_SIZE = 16384
-DEFAULT_RESPONSE_POINTS = 96
-DEFAULT_RESPONSE_DRIVE = 0.25
-DEFAULT_RESPONSE_AVERAGES = 4
-
-# Periods run and thrown away before the one that gets transformed. Two,
-# not one: a 0.2 Hz high-pass at 2048 Hz has poles close enough to z=1 that
-# it is still settling most of the way through the first period, and the
-# leftover transient spreads across every bin -- it shows up as a floor
-# around -125 dB, which is right where the integer pipelines' real
-# truncation floor sits and would be read as one. A second period puts it
-# below -190 dB. Not a control: there is no reason to want less.
-RESPONSE_SETTLE_PERIODS = 2
 
 
 def size_for_fmin(fs, fmin):
@@ -522,10 +506,10 @@ def _crossings(freqs, db, level):
     return out
 
 
-def measure_response(algorithm, params, fs, size=DEFAULT_RESPONSE_SIZE,
-                     points=DEFAULT_RESPONSE_POINTS,
-                     drive=DEFAULT_RESPONSE_DRIVE,
-                     averages=DEFAULT_RESPONSE_AVERAGES,
+def measure_response(algorithm, params, fs, size=config.SAT_RESPONSE_SIZE,
+                     points=config.SAT_RESPONSE_POINTS,
+                     drive=config.SAT_RESPONSE_DRIVE,
+                     averages=config.SAT_RESPONSE_AVERAGES,
                      fmin=0.0, fmax=0.0, seed=20250903):
     """Amplitude and phase of one pipeline, measured by running it.
 
@@ -569,7 +553,7 @@ def measure_response(algorithm, params, fs, size=DEFAULT_RESPONSE_SIZE,
         # arithmetic at a third of the peak memory -- which is what makes
         # the million-sample periods needed for sub-0.01 Hz affordable.
         state = pipelines.new_state()
-        for _ in range(RESPONSE_SETTLE_PERIODS):
+        for _ in range(config.SAT_RESPONSE_SETTLE_PERIODS):
             fn(words, state, dict(params))
         out = np.asarray(fn(words, state, dict(params)))
         y = pipelines.from_wire(out).astype(np.float64)
@@ -674,14 +658,7 @@ def measure_response(algorithm, params, fs, size=DEFAULT_RESPONSE_SIZE,
 # where the input had something to say, and the gate below is what keeps
 # the rest off the plot.
 
-# How far below the strongest part of the input a band may sit before its
-# in/out ratio is dropped as unmeasurable. Past this the ratio is noise
-# over noise -- a confident line through the part of the capture that says
-# the least, which is worse than a gap.
-CAPTURE_GATE_DB = -60.0
-
-
-def capture_gain(traces, ch, rate, grid, gate_db=CAPTURE_GATE_DB):
+def capture_gain(traces, ch, rate, grid, gate_db=config.SAT_CAPTURE_GATE_DB):
     """One channel's recorded in -> out as amplitude and phase on `grid`.
 
     Returns None when the channel has no in/out pair or nothing survives
@@ -749,36 +726,6 @@ def capture_gain(traces, ch, rate, grid, gate_db=CAPTURE_GATE_DB):
     }
 
 
-# What the capture view's phase panel can show. "off" is a real setting --
-# the panel costs a third of the window's width, and the magnitude spectrum
-# alone is what you want most of the time.
-PHASE_MODES = ("off", "out-in", "raw")
-DEFAULT_PHASE_MODE = "out-in"
-
-# How a phase curve is displayed. Degrees are the raw quantity; the two
-# delays answer "so how far is the output actually shifted", which degrees
-# do not -- 45 degrees is 125 ms at 1 Hz and 1.25 ms at 100 Hz.
-PHASE_UNITS = ("deg", "phase ms", "group ms")
-DEFAULT_PHASE_UNITS = "deg"
-
-# How many bins apart the two points of a group-delay slope are taken.
-#
-# 1 is wrong wherever the spectrum was windowed. A Hann window's transform
-# spans three bins, so neighbouring bins of a windowed spectrum are
-# correlated, and a slope measured between two of them is partly a slope
-# measured against itself -- it comes out flattened. Checked against
-# scipy.signal.group_delay on a known 2nd-order Butterworth: at lag 1 the
-# estimate read 4.09 ms where the truth was 5.72, and 5.76 against 6.60,
-# a consistent ~25% low. At lag 2 and beyond it lands on the truth, so the
-# main lobe is the whole story. 4 leaves margin and buys a longer, quieter
-# baseline; the cost is that features narrower than four bins are smoothed.
-#
-# The response view passes 1 deliberately: its multisine sits on exact bins
-# and is never windowed, so nothing correlates its neighbours and the
-# maths is exact there (verified against an analytic exp(-2i*pi*f*tau)).
-PHASE_GROUP_LAG = 4
-
-
 def phase_display(freqs, deg, h, units, lag=1):
     """One phase curve as the chosen quantity: (x, y, axis label).
 
@@ -829,8 +776,8 @@ def phase_display(freqs, deg, h, units, lag=1):
     return mid, ms, "Group delay (ms)"
 
 
-def phase_spectrum(traces, ch, rate, mode=DEFAULT_PHASE_MODE, size=0,
-                   gate_db=CAPTURE_GATE_DB):
+def phase_spectrum(traces, ch, rate, mode=config.SAT_PHASE, size=0,
+                   gate_db=config.SAT_CAPTURE_GATE_DB):
     """Phase against frequency for one channel of a capture, in degrees.
 
     The rfft that produces the magnitude spectrum produces this at no extra
@@ -912,14 +859,14 @@ def phase_spectrum(traces, ch, rate, mode=DEFAULT_PHASE_MODE, size=0,
            "of": int(freqs.size - 1), "gate_db": float(gate_db),
            # These bins came from a windowed transform, so a group-delay
            # slope has to skip past the window's own width -- see
-           # PHASE_GROUP_LAG. Carried here so the GUI cannot forget.
-           "group_lag": PHASE_GROUP_LAG}
+           # config.SAT_PHASE_GROUP_LAG. Carried here so the GUI cannot forget.
+           "group_lag": config.SAT_PHASE_GROUP_LAG}
     # The headline number for "is the output shifted, and by how much":
     # the typical group delay across the band that survived the gate.
     # Median, not mean -- a single wild interval at a notch would otherwise
     # set it.
     _x, ms, _label = phase_display(out["freqs"], curves[0][1], curves[0][2],
-                                   "group ms", PHASE_GROUP_LAG)
+                                   "group ms", config.SAT_PHASE_GROUP_LAG)
     finite = ms[np.isfinite(ms)]
     out["group_ms"] = float(np.median(finite)) if finite.size else float("nan")
     out["group_spread_ms"] = (float(np.percentile(finite, 90)
@@ -1015,7 +962,7 @@ def format_report(info, results, models, responses=(), gains=(), phases=()):
         if 0 < first["fmin_asked"] < lo_hz * 0.999:
             say(f"    NOTE  F min {first['fmin_asked']:g} Hz would need a "
                 f"{size_for_fmin(first['fs'], first['fmin_asked'])}-sample "
-                f"period; {RESPONSE_SIZE_MAX} is the")
+                f"period; {config.SAT_RESPONSE_SIZE_CHOICES[-1]} is the")
             say(f"          longest offered, so the plot starts at "
                 f"{lo_hz:.4g} Hz. A lower Rate would also reach it: one bin "
                 f"is rate/Size.")
@@ -1093,23 +1040,26 @@ def main(argv=None):
     ap.add_argument("file", nargs="?", help="dump CSV (default: the newest)")
     ap.add_argument("--log-dir", default=str(DEFAULT_LOGS))
     ap.add_argument("--list", action="store_true", help="list dumps and exit")
-    ap.add_argument("--fft-size", type=int, default=0,
+    ap.add_argument("--fft-size", type=int, default=config.SAT_FFT_SIZE,
                     help="samples to transform, from the newest end "
                          "(0 = the whole capture). Truncates, never zero-pads")
-    ap.add_argument("--fmax", type=float, default=0.0,
+    ap.add_argument("--fmax", type=float, default=config.SAT_FMAX,
                     help="frequency axis limit, Hz (0 = Nyquist)")
-    ap.add_argument("--db-min", type=float, default=-120.0)
-    ap.add_argument("--peak-fmin", type=float, default=1.0,
+    ap.add_argument("--db-min", type=float, default=config.SAT_DB_MIN,
+                    help="bottom of the magnitude axis, in both views: dBFS "
+                         "for the capture's spectra, dB of gain for the "
+                         "response curves (default: %(default)s)")
+    ap.add_argument("--peak-fmin", type=float, default=config.SAT_PEAK_FMIN,
                     help="ignore bins below this when locating the peak")
-    ap.add_argument("--phase", default=DEFAULT_PHASE_MODE, choices=PHASE_MODES,
+    ap.add_argument("--phase", default=config.SAT_PHASE, choices=config.SAT_PHASE_CHOICES,
                     help="phase-vs-frequency panel beside the capture view's "
                          "spectra. 'out-in' is the phase the recorded "
                          "processing applied, and is the one that means "
                          "something on its own; 'raw' is the plain FFT angle, "
                          "which is dominated by where the record starts and "
                          "reads as a sawtooth; 'off' hides the panel")
-    ap.add_argument("--phase-units", default=DEFAULT_PHASE_UNITS,
-                    choices=PHASE_UNITS,
+    ap.add_argument("--phase-units", default=config.SAT_PHASE_UNITS,
+                    choices=config.SAT_PHASE_UNIT_CHOICES,
                     help="what the phase axes plot, in both views. 'deg' is "
                          "the angle; 'phase ms' is how late the sine at each "
                          "frequency comes out; 'group ms' is how late a band "
@@ -1128,9 +1078,9 @@ def main(argv=None):
                          "pipelines, so they can be scored separately")
     ap.add_argument("--model-ch2", choices=model_choices(),
                     help="score ch2 against this instead of --model")
-    ap.add_argument("--shift", type=int,
+    ap.add_argument("--shift", type=int, default=config.SAT_SHIFT,
                     help="shift for --model (default: the board's, from the sidecar)")
-    ap.add_argument("--settle", type=int, default=200,
+    ap.add_argument("--settle", type=int, default=config.SAT_SETTLE,
                     help="samples to skip before scoring the model, since it "
                          "starts from zeroed state and the board did not")
     ap.add_argument("--response", metavar="LIST", nargs="?", const="design",
@@ -1140,27 +1090,29 @@ def main(argv=None):
                          "has both implementations, or 'all' for the lot. "
                          "Opens the window on the response view; with "
                          "--no-plot, prints the summary instead")
-    ap.add_argument("--response-size", type=int, default=DEFAULT_RESPONSE_SIZE,
+    ap.add_argument("--response-size", type=int, default=config.SAT_RESPONSE_SIZE,
                     help="excitation period in samples -- resolution is "
                          "rate/N, so the low end of the axis needs a big one")
     ap.add_argument("--response-points", type=int,
-                    default=DEFAULT_RESPONSE_POINTS,
+                    default=config.SAT_RESPONSE_POINTS,
                     help="tones in the excitation, log-spaced (bins collapse "
                          "at the low end, so fewer usually land)")
     ap.add_argument("--response-drive", type=float,
-                    default=DEFAULT_RESPONSE_DRIVE,
+                    default=config.SAT_RESPONSE_DRIVE,
                     help="peak excitation as a fraction of full scale. A "
                          "fixed-point pipeline's response is level-dependent, "
                          "so this is part of the measurement, not a detail")
     ap.add_argument("--response-averages", type=int,
-                    default=DEFAULT_RESPONSE_AVERAGES,
+                    default=config.SAT_RESPONSE_AVERAGES,
                     help="realisations averaged, each with fresh random phases")
-    ap.add_argument("--response-fmin", type=float, default=0.0,
+    ap.add_argument("--response-fmin", type=float,
+                    default=config.SAT_RESPONSE_FMIN,
                     help="low end of the band the response is measured over, "
                          "Hz (0 = the lowest bin the size allows). Bounds the "
                          "excitation as well as the axis -- outside it, "
                          "nothing is asked and nothing is drawn")
-    ap.add_argument("--response-fmax", type=float, default=0.0,
+    ap.add_argument("--response-fmax", type=float,
+                    default=config.SAT_RESPONSE_FMAX,
                     help="high end of the band the response is measured over, "
                          "Hz (0 = Nyquist). Narrowing the band spends the "
                          "same tones over less of it, so it is also how you "
@@ -1172,16 +1124,16 @@ def main(argv=None):
                          "the capture's own settings, since it is scored "
                          "against what actually ran. "
                          f"Known: {', '.join(k for _s, k, _l in TUNABLES)}")
-    ap.add_argument("--overlay", default="none",
-                    choices=("none", "gain", "spectrum", "both"),
+    ap.add_argument("--overlay", default=config.SAT_OVERLAY,
+                    choices=config.SAT_OVERLAY_CHOICES,
                     help="draw the capture over the response. 'gain' is the "
                          "recording's own in/out ratio, in the same dB the "
                          "response is in, so the two compare directly. "
                          "'spectrum' is the input's dBFS level on a second "
                          "axis -- where the signal is, next to what the "
                          "filter does to it. A level, not a gain")
-    ap.add_argument("--overlay-ch", default="both",
-                    choices=("ch1", "ch2", "both"),
+    ap.add_argument("--overlay-ch", default=config.SAT_OVERLAY_CH,
+                    choices=config.SAT_OVERLAY_CH_CHOICES,
                     help="which channel(s) the overlay comes from")
     ap.add_argument("--no-plot", action="store_true",
                     help="print the report and exit instead of opening the "
@@ -1286,7 +1238,7 @@ def main(argv=None):
     # longer period, so grow it rather than measure nothing down there.
     response_size = min(max(args.response_size,
                             size_for_fmin(info["rate"], args.response_fmin)),
-                        RESPONSE_SIZE_MAX)
+                        config.SAT_RESPONSE_SIZE_CHOICES[-1])
     responses = [measure_response(name, params, info["rate"],
                                   size=response_size,
                                   points=args.response_points,

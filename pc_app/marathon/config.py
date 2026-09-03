@@ -355,6 +355,129 @@ RECEIVE_ENABLED = True
 RECONNECT_DELAY = 1.0  # seconds between reconnect attempts after a drop/fail
 
 
+# ---------------------------------------------------------------------------
+# SAT -- the offline analysis window (sat.py / sat_gui.py)
+# ---------------------------------------------------------------------------
+# Every default SAT starts from and every list its dropdowns offer. Here so
+# that a default is changed in one place: the CLI's flag defaults and the
+# window's field defaults both read from this, and used to carry their own
+# copies of the same eight numbers -- exactly the arrangement where the two
+# quietly disagree.
+#
+# Unlike the knobs above, nothing here is edited at runtime: SAT reads these
+# once at startup and the panels never write to them. Everything down to the
+# "measurement" heading is a preference; below it the values change what the
+# numbers mean, and the comments say what breaks.
+
+# Which view the window opens on, and where "Rescan" looks.
+SAT_VIEW = "capture"
+SAT_LOG_DIR = "build/logs"          # relative to marathon/
+
+# --- capture view ---------------------------------------------------------
+SAT_FFT_SIZE = 0            # samples transformed; 0 = the whole capture
+SAT_FMAX = 0.0              # spectrum axis limit, Hz; 0 = Nyquist
+SAT_DB_MIN = -120.0         # bottom of the magnitude axis; both views
+SAT_PEAK_FMIN = 1.0         # ignore bins below this when locating the peak
+SAT_PHASE = "out-in"        # phase column: off / out-in / raw
+SAT_PHASE_UNITS = "deg"     # deg / phase ms / group ms; both views
+
+# The reference-model comparison. None leaves a channel unscored, and a
+# None shift takes whatever the board's register held, from the sidecar.
+SAT_MODEL = None
+SAT_MODEL_CH2 = None
+SAT_SHIFT = None
+SAT_SETTLE = 200            # samples skipped before scoring, for the
+                            # model's zeroed start the board did not have
+
+# --- response view --------------------------------------------------------
+# Pipelines drawn on open, as "pipe" or "pipe:impl". Empty picks one design
+# pipeline's manual/scipy pair, which is the comparison the view exists for.
+SAT_CURVES = ()
+
+SAT_RESPONSE_SIZE = 16384       # excitation period, samples
+SAT_RESPONSE_POINTS = 96        # tones in the excitation, log-spaced
+SAT_RESPONSE_DRIVE = 0.25       # peak excitation as a fraction of full scale
+SAT_RESPONSE_AVERAGES = 4       # realisations averaged, fresh phases each
+SAT_RESPONSE_FMIN = 0.0         # band measured over, Hz; 0 = the limit at
+SAT_RESPONSE_FMAX = 0.0         # that end (one bin below, Nyquist above)
+SAT_RESPONSE_RATE = 0.0         # rate to run pipelines at; 0 = capture's
+
+SAT_SHOW_FLOOR = True           # dotted noise + distortion floor
+SAT_SHOW_DESIGN = False         # thin black curve straight from the sos
+SAT_OVERLAY = "none"            # capture on the response axes:
+                                # none / gain / spectrum / both
+SAT_OVERLAY_CH = "both"         # ch1 / ch2 / both
+
+# --- what the dropdowns offer ---------------------------------------------
+SAT_VIEW_CHOICES = ("capture", "response")
+SAT_FFT_SIZE_CHOICES = (0, 128, 256, 512, 1024, 2048, 4096, 8192)
+SAT_PHASE_CHOICES = ("off", "out-in", "raw")
+SAT_PHASE_UNIT_CHOICES = ("deg", "phase ms", "group ms")
+SAT_OVERLAY_CHOICES = ("none", "gain", "spectrum", "both")
+SAT_OVERLAY_CH_CHOICES = ("ch1", "ch2", "both")
+
+# The lowest frequency a measurement can reach is one bin, rate/size, so the
+# only way down the frequency axis is a longer period. At 2 kHz the top of
+# this range reaches 0.001 Hz and costs ~1.6 s and ~200 MB for one curve --
+# which is why it is the top of the range.
+SAT_RESPONSE_SIZE_CHOICES = (4096, 8192, 16384, 32768, 65536, 131072,
+                             262144, 524288, 1048576, 2097152)
+
+# --- measurement: these change what the numbers mean ----------------------
+# Periods run and thrown away before the one that gets transformed. Two, not
+# one: a 0.2 Hz high-pass at 2048 Hz is still settling most of the way
+# through the first period, and the leftover transient spreads across every
+# bin -- it shows up as a floor around -125 dB, which is right where the
+# integer pipelines' real truncation floor sits and would be read as one. A
+# second period puts it below -190 dB. There is no reason to want less.
+SAT_RESPONSE_SETTLE_PERIODS = 2
+
+# How many bins apart the two points of a group-delay slope are taken.
+#
+# 1 is wrong wherever the spectrum was windowed. A Hann window's transform
+# spans three bins, so neighbouring bins of a windowed spectrum are
+# correlated, and a slope measured between two of them is partly a slope
+# measured against itself -- it comes out flattened. Checked against
+# scipy.signal.group_delay on a known 2nd-order Butterworth: at lag 1 the
+# estimate read 4.09 ms where the truth was 5.72, and 5.76 against 6.60, a
+# consistent ~25% low. At lag 2 and beyond it lands on the truth, so the
+# main lobe is the whole story. 4 leaves margin and buys a longer, quieter
+# baseline; the cost is that features narrower than four bins are smoothed.
+#
+# The response view passes 1 deliberately: its multisine sits on exact bins
+# and is never windowed, so nothing correlates its neighbours and the maths
+# is exact there (verified against an analytic exp(-2i*pi*f*tau)).
+SAT_PHASE_GROUP_LAG = 4
+
+# How far below the strongest part of a trace a band may sit before it is
+# dropped from the phase and capture-gain measurements. Past this the answer
+# is noise over noise -- a confident line through the part of the capture
+# that says the least, which is worse than a gap.
+SAT_CAPTURE_GATE_DB = -60.0
+
+# --- appearance -----------------------------------------------------------
+SAT_FIGSIZE = (13, 7)
+SAT_CONTROLS_MAX_HEIGHT = 360   # px before the control column scrolls
+
+# One colour per pipeline (from the registry's order), one line style per
+# implementation, so a stack of response curves reads as "which filter" and
+# "which arithmetic" at a glance rather than as eight unrelated lines.
+SAT_IMPL_STYLE = {"scipy": "-", "manual": "--"}
+
+# The capture overlays are greys, so nothing on the response axes can be
+# mistaken for a pipeline: colour there means "a pipeline", and a recording
+# is not one.
+SAT_GAIN_COLORS = {"ch1": "0.15", "ch2": "0.50"}
+SAT_SPECTRUM_COLOR = "0.45"
+
+# A pipeline that does nothing has a delay of exactly zero, and autoscaling
+# onto +-8e-15 ms draws floating-point dust as though it were structure -- a
+# bypass channel came out looking like a scatter plot. Delay axes get this
+# floor on their span so that nothing looks like nothing.
+SAT_MIN_DELAY_SPAN_MS = 1.0
+
+
+
 # --- Defaults ------------------------------------------------------------
 # Snapshot of every knob above, taken at import before anything can edit
 # one -- what the panels' "Defaults" buttons restore. Lists are copied, or
