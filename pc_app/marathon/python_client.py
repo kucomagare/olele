@@ -24,7 +24,7 @@ def main():
     stop_event = threading.Event()
 
     # Both workers are started unconditionally and each idles unless it
-    # owns config.PROCESSING_MODE -- so switching between board and local is
+    # owns the current per-channel modes -- so switching board/local is
     # an attribute write from the panel with no thread lifecycle to get
     # wrong, and no way to end up with two of them driving the plot at once.
     #
@@ -52,7 +52,10 @@ def main():
             from signal_gen import generate_ecg_chunk
             import local_proc
             generate_ecg_chunk(0)
-            local_proc.iir(np.zeros(8, dtype=">u4"), np.zeros(8, dtype=">u4"),
+            # One channel's worth is enough -- the numba compile is per
+            # kernel, not per channel, and every pipeline that uses it goes
+            # through the same one.
+            local_proc.iir(np.zeros(8, dtype=">u4"),
                            local_proc.new_state(), {"shift": 4})
         except Exception as exc:                      # noqa: BLE001
             # Warming is an optimisation, never a requirement -- if it fails,

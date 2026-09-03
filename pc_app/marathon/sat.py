@@ -221,7 +221,31 @@ def analyse_channel(traces, ch, rate, full_scale, size, peak_fmin):
     return result, curves
 
 
-def compare_model(traces, ch, algorithm, shift, settle):
+def model_choices():
+    """Every pipeline, and every pipeline:implementation pair.
+
+    Built from local_proc rather than written out here, so a pipeline added
+    there is immediately scorable offline without touching this file. The
+    import is deferred for the same reason compare_model's is: local_proc
+    pulls in numba, and a run without --model should not pay for it.
+    """
+    import local_proc
+    out = []
+    for pipe in sorted(local_proc.PIPELINES):
+        impls = local_proc.implementations(pipe)
+        if impls:
+            # A design pipeline: only the pairs are meaningful, since which
+            # implementation ran is the whole question being asked.
+            out.extend(f"{pipe}:{impl}" for impl in impls)
+        else:
+            # bypass and iir are single fixed things. Offering
+            # "bypass:manual" and "bypass:scipy" would advertise a choice
+            # that does not exist -- passthrough has nothing to quantise.
+            out.append(pipe)
+    return out
+
+
+def compare_model(traces, ch, algorithm, shift, settle, fs):
     """Run a local_proc algorithm on the recorded input and score it against
     the recorded output.
 
@@ -241,13 +265,20 @@ def compare_model(traces, ch, algorithm, shift, settle):
 
     dtype = ">u4"
     x = traces[src].astype(np.uint32).astype(dtype)
-    algo = local_proc.ALGORITHMS[algorithm]
-    # An algorithm takes both channels, but only one is being scored here.
-    # Hand it a length-0 array as the second rather than `x` again: these are
-    # scalar per-sample recursions, so passing the same trace twice ran the
-    # slowest part of this tool twice and threw half of it away.
-    empty = x[:0]
-    modelled, _ = algo(x, empty, local_proc.new_state(), {"shift": shift})
+    # "pipe" or "pipe:impl" -- the implementation defaults to the pipeline's
+    # first, which for a hardware-only entry like iir is the only one there
+    # is. Same resolution the live app uses, so a capture scored here and the
+    # same selection running live cannot mean different things.
+    pipe, _, impl = algorithm.partition(":")
+    fn = local_proc.resolve(pipe, impl or local_proc.DEFAULT_IMPL)
+    if fn is None:
+        return None
+    # One channel per call -- the pipeline functions take a single channel,
+    # which is also what this function scores.
+    # fs comes from the capture's own sidecar, not from this machine's
+    # current config -- a dump analysed months later has to be filtered at
+    # the rate it was recorded at, whatever the panel happens to say now.
+    modelled = fn(x, local_proc.new_state(), {"shift": shift, "fs": float(fs)})
     modelled = modelled.astype(np.float64)
 
     a = modelled[settle:]
@@ -353,9 +384,18 @@ def main(argv=None):
     ap.add_argument("--db-min", type=float, default=-120.0)
     ap.add_argument("--peak-fmin", type=float, default=1.0,
                     help="ignore bins below this when locating the peak")
-    ap.add_argument("--model", choices=("iir", "bypass"),
-                    help="also run this local_proc algorithm on the recorded "
-                         "input and score it against the recorded output")
+    ap.add_argument("--model", choices=model_choices(),
+                    help="also run this local_proc pipeline on the recorded "
+                         "input and score it against the recorded output. "
+                         "bypass and iir take no implementation; design "
+                         "pipelines are named pipe:impl (e.g. pipe1:scipy). "
+                         "Applies to both channels unless overridden below")
+    ap.add_argument("--model-ch1", choices=model_choices(),
+                    help="score ch1 against this instead of --model. The two "
+                         "channels can have been produced by different "
+                         "pipelines, so they can be scored separately")
+    ap.add_argument("--model-ch2", choices=model_choices(),
+                    help="score ch2 against this instead of --model")
     ap.add_argument("--shift", type=int,
                     help="shift for --model (default: the board's, from the sidecar)")
     ap.add_argument("--settle", type=int, default=200,
@@ -394,7 +434,9 @@ def main(argv=None):
         sat_gui.SATWindow(
             log_dir=Path(args.log_dir), path=path, fft_size=args.fft_size,
             fmax=args.fmax, db_min=args.db_min, peak_fmin=args.peak_fmin,
-            model=args.model, shift=args.shift, settle=args.settle).run()
+            model=args.model_ch1 or args.model,
+            model_ch2=args.model_ch2 or args.model,
+            shift=args.shift, settle=args.settle).run()
         return 0
 
     try:
@@ -413,13 +455,19 @@ def main(argv=None):
         results.append(r)
         curves_by_ch[ch] = curves
 
+    # Per channel, so a capture whose two channels came from different
+    # pipelines can be scored against the right one for each.
+    selection = {"ch1": args.model_ch1 or args.model,
+                 "ch2": args.model_ch2 or args.model}
     models = []
-    if args.model:
+    if any(selection.values()):
         shift = args.shift
         if shift is None:
             shift = int(info["shift"]) if info.get("shift") is not None else 4
         for ch in ("ch1", "ch2"):
-            models.append(compare_model(traces, ch, args.model, shift, args.settle))
+            if selection[ch]:
+                models.append(compare_model(traces, ch, selection[ch], shift,
+                                            args.settle, info["rate"]))
 
     print_report(info, results, models)
     return 0

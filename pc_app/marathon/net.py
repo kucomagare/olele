@@ -9,7 +9,10 @@ import socket
 import time
 import queue
 
+import collections
+
 import config
+import local_proc
 import runctl
 from config import HOST, PORT, RECONNECT_DELAY
 from packet_format import (CONFIG_OP_READ, CONFIG_OP_WRITE, CONFIG_TYPE,
@@ -130,8 +133,15 @@ def _connect():
 def _may_run():
     """True when this thread owns the current mode and the session is
     started. Both are checked in the same place because both mean the same
-    thing to the socket: do not have one open."""
-    return runctl.is_running() and config.PROCESSING_MODE == "board"
+    thing to the socket: do not have one open.
+
+    ANY channel on the board is enough to need the socket. The locally
+    processed ones are done inline in this thread rather than by
+    local_proc.local_thread, because both channels have to arrive at the plot
+    in the same tuple -- handing half of it to another thread would mean
+    ch1 and ch2 drifting apart on a shared time axis.
+    """
+    return runctl.is_running() and config.any_board()
 
 
 def tcp_thread(plot_in_q, plot_out_q, stop_event):
@@ -192,6 +202,22 @@ def _run_session(sock, plot_in_q, plot_out_q, stop_event):
     # Reads config.SEND_RATE per chunk, so a rate change from the panel takes
     # effect on the very next packet rather than at the next reconnect.
     schedule = RateScheduler(lambda: config.SEND_RATE)
+
+    # Per-channel filter memory for any channel marked "local", and the
+    # inputs those channels still need after the round trip.
+    #
+    # WHY A QUEUE. A locally processed channel is filtered from what was
+    # SENT, but its result has to leave here in the same tuple as the
+    # channels that came BACK -- and the board's reply for a chunk arrives
+    # some milliseconds after that chunk was generated. So the inputs are
+    # parked here on the way out and collected when the matching reply
+    # lands. The board echoes one reply per packet in order, and TCP keeps
+    # that order, so plain FIFO is the whole matching rule.
+    #
+    # maxlen bounds it: if replies stop coming (board wedged, cable out) this
+    # drops the oldest instead of growing without limit until the reconnect.
+    local_states = [local_proc.new_state(), local_proc.new_state()]
+    sent_inputs = collections.deque(maxlen=256)
 
     packets_sent = 0
     send_stalls = 0
@@ -295,6 +321,11 @@ def _run_session(sock, plot_in_q, plot_out_q, stop_event):
                 else:
                     pending_is_data = True
                     send_stalls += 1
+                if config.any_local():
+                    # Only parked when something will actually need them --
+                    # with both channels on the board this is pure overhead
+                    # on the hot path.
+                    sent_inputs.append((ch1, ch2))
                 try:
                     plot_in_q.put_nowait((ch1, ch2))
                 except queue.Full:
@@ -368,9 +399,28 @@ def _run_session(sock, plot_in_q, plot_out_q, stop_event):
                 ptype, records = received
                 if ptype == DATA_TYPE:
                     # Proof of life from the far end -- see rx_stale_s.
+                    # Counted even for channels whose result is about to be
+                    # thrown away: the point of the watchdog is whether the
+                    # BOARD is still answering, not whether we use what it
+                    # said.
                     last_rx = time.perf_counter()
+                    out1, out2 = records["ch1"], records["ch2"]
+                    if config.any_local():
+                        # Substitute locally processed channels over the
+                        # board's answer for the same chunk. If the queue is
+                        # empty the reply has no matching input (a reconnect
+                        # dropped it), so keep the board's samples rather
+                        # than filtering the wrong chunk.
+                        src = sent_inputs.popleft() if sent_inputs else None
+                        if src is not None:
+                            if config.CH_MODE[0] == "local":
+                                out1 = local_proc.process_channel(
+                                    src[0], 0, local_states[0])
+                            if config.CH_MODE[1] == "local":
+                                out2 = local_proc.process_channel(
+                                    src[1], 1, local_states[1])
                     try:
-                        plot_out_q.put_nowait((records["ch1"], records["ch2"]))
+                        plot_out_q.put_nowait((out1, out2))
                     except queue.Full:
                         plot_dropped += 1
                 elif ptype == CONFIG_TYPE and len(records):
