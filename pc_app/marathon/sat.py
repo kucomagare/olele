@@ -7,6 +7,8 @@ the hardware against a model, and the pipelines' own amplitude/phase response.
     ./sat.py --list                  # what dumps exist
     ./sat.py --no-plot               # numbers only, for a terminal or a pipe
     ./sat.py --no-plot --model iir --peak-fmin 40
+    ./sat.py --phase raw             # plain FFT angle beside the spectra
+    ./sat.py --phase-units "group ms"   # how late is each frequency, in ms
     ./sat.py --response pipe2        # Bode plot: pipe2 manual vs scipy
     ./sat.py --response pipe1:scipy,pipe2:scipy,iir     # any mix, overlaid
     ./sat.py --response pipe2 --overlay both            # capture on top
@@ -629,6 +631,9 @@ def measure_response(algorithm, params, fs, size=DEFAULT_RESPONSE_SIZE,
         "impl": impl or ("" if not pipelines.has_implementations(pipe)
                          else pipelines.DEFAULT_IMPL),
         "freqs": freqs, "mag_db": mag_db, "phase_deg": phase_deg,
+        # The complex response itself, so the phase axis can be redrawn as
+        # a delay without re-measuring (see phase_display).
+        "h": h,
         "floor_freqs": floor_freqs, "floor_db": floor_db,
         "floor_median_db": floor_median,
         "ref_db": ref_db,
@@ -735,10 +740,192 @@ def capture_gain(traces, ch, rate, grid, gate_db=CAPTURE_GATE_DB):
         "freqs": np.array(out_f)[keep],
         "mag_db": 20.0 * np.log10(np.maximum(np.abs(h), 1e-30)),
         "phase_deg": np.degrees(np.unwrap(np.angle(h))),
+        # So the overlay follows the phase axis into delay units with the
+        # curves it is drawn against, rather than staying in degrees.
+        "h": h,
         "points": int(keep.sum()), "of": int(keep.size),
         "top_hz": float(np.array(out_f)[keep].max()),
         "samples": n, "resolution": rate / n, "gate_db": float(gate_db),
     }
+
+
+# What the capture view's phase panel can show. "off" is a real setting --
+# the panel costs a third of the window's width, and the magnitude spectrum
+# alone is what you want most of the time.
+PHASE_MODES = ("off", "out-in", "raw")
+DEFAULT_PHASE_MODE = "out-in"
+
+# How a phase curve is displayed. Degrees are the raw quantity; the two
+# delays answer "so how far is the output actually shifted", which degrees
+# do not -- 45 degrees is 125 ms at 1 Hz and 1.25 ms at 100 Hz.
+PHASE_UNITS = ("deg", "phase ms", "group ms")
+DEFAULT_PHASE_UNITS = "deg"
+
+# How many bins apart the two points of a group-delay slope are taken.
+#
+# 1 is wrong wherever the spectrum was windowed. A Hann window's transform
+# spans three bins, so neighbouring bins of a windowed spectrum are
+# correlated, and a slope measured between two of them is partly a slope
+# measured against itself -- it comes out flattened. Checked against
+# scipy.signal.group_delay on a known 2nd-order Butterworth: at lag 1 the
+# estimate read 4.09 ms where the truth was 5.72, and 5.76 against 6.60,
+# a consistent ~25% low. At lag 2 and beyond it lands on the truth, so the
+# main lobe is the whole story. 4 leaves margin and buys a longer, quieter
+# baseline; the cost is that features narrower than four bins are smoothed.
+#
+# The response view passes 1 deliberately: its multisine sits on exact bins
+# and is never windowed, so nothing correlates its neighbours and the
+# maths is exact there (verified against an analytic exp(-2i*pi*f*tau)).
+PHASE_GROUP_LAG = 4
+
+
+def phase_display(freqs, deg, h, units, lag=1):
+    """One phase curve as the chosen quantity: (x, y, axis label).
+
+    "deg"       the angle itself, as handed in -- each view has its own
+                wrap/unwrap policy and this preserves it.
+    "phase ms"  -phi / (2 pi f): how late the SINE at this frequency comes
+                out. Reads directly as "the 10 Hz component is 3 ms late".
+                Needs absolute phase, so it is only as good as the caller's
+                unwrapping -- fine in a passband, meaningless past a wrap.
+    "group ms"  -d(phi)/d(omega): the delay of a narrow BAND around f, which
+                is the delay of the waveform's shape rather than of the
+                carrier. The one that matters for an ECG -- constant group
+                delay moves the QRS, varying group delay changes it.
+
+    Group delay is taken from consecutive complex ratios rather than by
+    differentiating the degrees: angle(h[i+1] * conj(h[i])) is already
+    wrapped into (-pi, pi], so it is right regardless of how the caller
+    unwrapped, and it never needs an unwrap of its own. It lands on the
+    midpoints between bins, which is why x comes back too.
+    """
+    freqs = np.asarray(freqs, dtype=np.float64)
+    if units == "phase ms":
+        with np.errstate(divide="ignore", invalid="ignore"):
+            ms = -np.asarray(deg, dtype=np.float64) / (360.0 * freqs) * 1e3
+        return freqs, ms, "Phase delay (ms)"
+    lag = max(1, int(lag))
+    if units != "group ms" or h is None or len(freqs) <= lag:
+        return freqs, np.asarray(deg, dtype=np.float64), "Phase (deg)"
+
+    h = np.asarray(h)
+    step = np.angle(h[lag:] * np.conj(h[:-lag]))
+    df = freqs[lag:] - freqs[:-lag]
+    with np.errstate(divide="ignore", invalid="ignore"):
+        ms = -step / (2.0 * np.pi * df) * 1e3
+    # Geometric midpoint: the response view's tones are log-spaced, and on
+    # that axis the arithmetic midpoint sits visibly off centre.
+    mid = np.sqrt(freqs[:-lag] * freqs[lag:])
+    # A step approaching half a turn is where this stops being measurable:
+    # angle() folds anything past +-pi back into range, so the delay would
+    # come out small and confident instead of large and unknown. Happens
+    # across a gap the gate left, and genuinely at a notch, where the phase
+    # really does flip. Tested on the step itself rather than on the bin
+    # spacing -- a spacing test needs to know whether the grid is linear or
+    # logarithmic, and this one does not.
+    d = np.asarray(deg, dtype=np.float64)
+    bad = (np.abs(step) > 0.9 * np.pi) | ~np.isfinite(d[:-lag]) | ~np.isfinite(d[lag:])
+    ms[bad] = np.nan
+    return mid, ms, "Group delay (ms)"
+
+
+def phase_spectrum(traces, ch, rate, mode=DEFAULT_PHASE_MODE, size=0,
+                   gate_db=CAPTURE_GATE_DB):
+    """Phase against frequency for one channel of a capture, in degrees.
+
+    The rfft that produces the magnitude spectrum produces this at no extra
+    cost, but the two are not equally useful and the mode picks which:
+
+    "out-in"  output phase minus input phase, per bin -- the phase the
+              recorded processing actually applied. Both traces share the
+              record's start, so that arbitrary origin cancels and what is
+              left is the filter. This is the one that means something on
+              its own, and it is the default for that reason.
+    "raw"     the plain angle of each trace's own FFT, which is what "the
+              phase from an FFT" usually names. It is dominated by where
+              the record happens to start: a shift of t0 rotates every bin
+              by -2*pi*f*t0, a ramp that wraps many times across the band.
+              Measured on this repo's own dumps it spans the full +-180
+              with a sign change between most adjacent bins, so expect a
+              sawtooth. The information is in differences between curves,
+              never in the values.
+
+    Wrapped to +-180 rather than unwrapped: the gate below leaves gaps, and
+    unwrapping across a gap invents a turn count nothing measured.
+
+    Bins whose input sits more than `gate_db` below the strongest are left
+    out -- the phase of noise is noise.
+    """
+    src, dst = f"{ch}_in", f"{ch}_out"
+    if src not in traces:
+        return None
+    x = np.asarray(traces[src], dtype=np.float64)
+    y = np.asarray(traces[dst], dtype=np.float64) if dst in traces else None
+    if size:
+        x = x[-size:]
+        y = y[-size:] if y is not None else None
+    n = len(x)
+    if n < 8 or (mode == "out-in" and y is None):
+        return None
+
+    win = np.hanning(n)
+    spec_in = np.fft.rfft((x - x.mean()) * win)
+    spec_out = (np.fft.rfft((y - y.mean()) * win)
+                if y is not None and len(y) == n else None)
+    freqs = np.fft.rfftfreq(n, d=1.0 / rate)
+
+    # Gated on BOTH traces, not just the input. A tone the processing
+    # nulled -- a 50 Hz notch is exactly this -- passes an input-only gate
+    # with plenty to spare while its output is down at the noise floor, and
+    # the phase difference it yields is the phase of that noise. Those bins
+    # came out as a scatter of outliers sitting right on the notch, which is
+    # the one place on the plot you would most want to trust.
+    ratio = 10.0 ** (gate_db / 20.0)
+    mag = np.abs(spec_in)
+    # A silent trace has no peak to be 60 dB down from, and "x >= 0" would
+    # otherwise pass every bin and report a confident 0 degrees across the
+    # band. Nothing to measure is None, not zero.
+    if mag.max() <= 0:
+        return None
+    keep = (freqs > 0) & (mag >= mag.max() * ratio)
+    if spec_out is not None:
+        mag_out = np.abs(spec_out)
+        if mag_out.max() <= 0:
+            return None
+        keep &= mag_out >= mag_out.max() * ratio
+    if not keep.any():
+        return None
+
+    # Complex kept alongside the degrees: group delay is taken from ratios
+    # of these (see phase_display), which is immune to how the degrees were
+    # wrapped.
+    if mode == "out-in":
+        curves = [("out − in", spec_out[keep] * np.conj(spec_in[keep]))]
+    else:
+        curves = [("in", spec_in[keep])]
+        if spec_out is not None:
+            curves.append(("out", spec_out[keep]))
+    curves = [(label, np.degrees(np.angle(h)), h) for label, h in curves]
+
+    out = {"channel": ch, "mode": mode, "freqs": freqs[keep],
+           "curves": curves, "points": int(keep.sum()),
+           "of": int(freqs.size - 1), "gate_db": float(gate_db),
+           # These bins came from a windowed transform, so a group-delay
+           # slope has to skip past the window's own width -- see
+           # PHASE_GROUP_LAG. Carried here so the GUI cannot forget.
+           "group_lag": PHASE_GROUP_LAG}
+    # The headline number for "is the output shifted, and by how much":
+    # the typical group delay across the band that survived the gate.
+    # Median, not mean -- a single wild interval at a notch would otherwise
+    # set it.
+    _x, ms, _label = phase_display(out["freqs"], curves[0][1], curves[0][2],
+                                   "group ms", PHASE_GROUP_LAG)
+    finite = ms[np.isfinite(ms)]
+    out["group_ms"] = float(np.median(finite)) if finite.size else float("nan")
+    out["group_spread_ms"] = (float(np.percentile(finite, 90)
+                                    - np.percentile(finite, 10))
+                              if finite.size else float("nan"))
+    return out
 
 
 def capture_spectrum(traces, ch, rate, full_scale, direction="in"):
@@ -758,7 +945,7 @@ def capture_spectrum(traces, ch, rate, full_scale, direction="in"):
 # Reporting
 # ---------------------------------------------------------------------------
 
-def format_report(info, results, models, responses=(), gains=()):
+def format_report(info, results, models, responses=(), gains=(), phases=()):
     """The report as text -- returns rather than prints so the GUI can
     reuse it verbatim in its panel. Sections with nothing in them are
     left out entirely: the response view computes no model comparison and
@@ -860,6 +1047,28 @@ def format_report(info, results, models, responses=(), gains=()):
                 say("             asked for " + ", ".join(
                     f"{k.split('_', 1)[1]} {v:g}" for k, v in asked.items()))
 
+    if any(phases):
+        say("")
+        say("  phase spectrum")
+        for p in phases:
+            if not p:
+                continue
+            say(f"    {p['channel']:8} {p['mode']:8} {p['points']} of "
+                f"{p['of']} bins above the {p['gate_db']:.0f} dB gate, to "
+                f"{p['freqs'][-1]:.4g} Hz")
+            if p["mode"] == "out-in" and np.isfinite(p["group_ms"]):
+                # What "is the output shifted" actually comes to. The
+                # spread is the part that matters clinically: a constant
+                # group delay moves the QRS, a varying one reshapes it.
+                say(f"             output lags input by {p['group_ms']:+.2f} ms "
+                    f"(median group delay), spread "
+                    f"{p['group_spread_ms']:.2f} ms over the band")
+        if any(p and p["mode"] == "raw" for p in phases):
+            say("      raw is the plain FFT angle, so it is dominated by "
+                "where the record starts")
+            say("      and reads as a sawtooth -- out-in cancels that origin "
+                "and shows the filter")
+
     if any(gains):
         say("")
         say("  capture in -> out (the response this recording actually shows)")
@@ -872,9 +1081,9 @@ def format_report(info, results, models, responses=(), gains=()):
     return "\n".join(out)
 
 
-def print_report(info, results, models, responses=(), gains=()):
+def print_report(info, results, models, responses=(), gains=(), phases=()):
     print()
-    print(format_report(info, results, models, responses, gains))
+    print(format_report(info, results, models, responses, gains, phases))
     print()
 
 
@@ -892,6 +1101,21 @@ def main(argv=None):
     ap.add_argument("--db-min", type=float, default=-120.0)
     ap.add_argument("--peak-fmin", type=float, default=1.0,
                     help="ignore bins below this when locating the peak")
+    ap.add_argument("--phase", default=DEFAULT_PHASE_MODE, choices=PHASE_MODES,
+                    help="phase-vs-frequency panel beside the capture view's "
+                         "spectra. 'out-in' is the phase the recorded "
+                         "processing applied, and is the one that means "
+                         "something on its own; 'raw' is the plain FFT angle, "
+                         "which is dominated by where the record starts and "
+                         "reads as a sawtooth; 'off' hides the panel")
+    ap.add_argument("--phase-units", default=DEFAULT_PHASE_UNITS,
+                    choices=PHASE_UNITS,
+                    help="what the phase axes plot, in both views. 'deg' is "
+                         "the angle; 'phase ms' is how late the sine at each "
+                         "frequency comes out; 'group ms' is how late a band "
+                         "around it comes out, which is the delay of the "
+                         "waveform's shape and the one that matters for an "
+                         "ECG. The report always prints the group delay")
     ap.add_argument("--model", choices=model_choices(),
                     help="also run this pipeline on the recorded "
                          "input and score it against the recorded output. "
@@ -1009,6 +1233,7 @@ def main(argv=None):
         sat_gui.SATWindow(
             log_dir=Path(args.log_dir), path=path, fft_size=args.fft_size,
             fmax=args.fmax, db_min=args.db_min, peak_fmin=args.peak_fmin,
+            phase=args.phase, phase_units=args.phase_units,
             model=args.model_ch1 or args.model,
             model_ch2=args.model_ch2 or args.model,
             shift=args.shift, settle=args.settle,
@@ -1084,7 +1309,13 @@ def main(argv=None):
         channels = ("ch1", "ch2") if args.overlay_ch == "both" else (args.overlay_ch,)
         gains = [capture_gain(traces, ch, info["rate"], grid) for ch in channels]
 
-    print_report(info, results, models, responses, gains)
+    phases = []
+    if args.phase != "off":
+        phases = [phase_spectrum(traces, ch, info["rate"], args.phase,
+                                 args.fft_size)
+                  for ch in ("ch1", "ch2")]
+
+    print_report(info, results, models, responses, gains, phases)
     return 0
 
 

@@ -79,6 +79,23 @@ def _fmt(value):
     return "" if value is None else f"{float(value):g}"
 
 
+# A pipeline that does nothing has a delay of exactly zero, and autoscaling
+# onto +-8e-15 ms draws floating-point dust as though it were structure --
+# a bypass channel came out looking like a scatter plot. Delay axes get a
+# floor on their span so that nothing looks like nothing.
+_MIN_DELAY_SPAN_MS = 1.0
+
+
+def _pad_delay_axis(ax, units):
+    if units == "deg":
+        return                          # degrees already have a fixed scale
+    lo, hi = ax.get_ylim()
+    if hi - lo < _MIN_DELAY_SPAN_MS:
+        mid = 0.5 * (lo + hi)
+        ax.set_ylim(mid - _MIN_DELAY_SPAN_MS / 2.0,
+                    mid + _MIN_DELAY_SPAN_MS / 2.0)
+
+
 def _curve_style(response):
     """(colour, linestyle) for one measured curve. Colour is fixed by the
     pipeline's position in the registry, so a given pipeline keeps the same
@@ -119,7 +136,9 @@ class _Tooltip:
 class SATWindow:
     def __init__(self, log_dir, path=None, fft_size=0, fmax=0.0, db_min=-120.0,
                  peak_fmin=1.0, model=None, model_ch2=None, shift=None,
-                 settle=200, view="capture", curves=(),
+                 settle=200, phase=sat.DEFAULT_PHASE_MODE,
+                 phase_units=sat.DEFAULT_PHASE_UNITS,
+                 view="capture", curves=(),
                  response_size=sat.DEFAULT_RESPONSE_SIZE,
                  response_points=sat.DEFAULT_RESPONSE_POINTS,
                  response_drive=sat.DEFAULT_RESPONSE_DRIVE,
@@ -159,6 +178,13 @@ class SATWindow:
         self._fmax = tk.StringVar(value=f"{fmax:g}")
         self._db_min = tk.StringVar(value=f"{db_min:g}")
         self._peak_fmin = tk.StringVar(value=f"{peak_fmin:g}")
+        self._phase = tk.StringVar(
+            value=phase if phase in sat.PHASE_MODES else sat.DEFAULT_PHASE_MODE)
+        # Shared by both views' phase axes, like dB min -- "how is phase
+        # displayed" is one question, not one per view.
+        self._phase_units = tk.StringVar(
+            value=phase_units if phase_units in sat.PHASE_UNITS
+            else sat.DEFAULT_PHASE_UNITS)
         # Per channel: a capture's two channels may have run different
         # pipelines, so a single model could only ever be right for one.
         pipe0, impl0 = _split_model(model)
@@ -217,7 +243,8 @@ class SATWindow:
         # you're looking at, not a setting.
         self._initial = {id(v): v.get() for v in
                          (self._fft_size, self._fmax, self._db_min,
-                          self._peak_fmin, self._shift, self._settle,
+                          self._peak_fmin, self._phase, self._phase_units,
+                          self._shift, self._settle,
                           self._view, self._resp_size, self._resp_points,
                           self._resp_drive, self._resp_averages,
                           self._resp_fmin, self._resp_fmax, self._resp_floor,
@@ -462,6 +489,55 @@ class SATWindow:
                           "Raise it above the ECG band (say 40) to measure an "
                           "injected tone -- otherwise the ECG's harmonics win, "
                           "because they are genuinely stronger.")
+
+        ttk.Label(f, text="Phase").grid(row=row, column=0, sticky="w", pady=2)
+        phase_box = ttk.Combobox(f, textvariable=self._phase, width=8,
+                                 state="readonly", values=list(sat.PHASE_MODES))
+        phase_box.grid(row=row, column=1, sticky="e", pady=2)
+        _Tooltip(phase_box,
+                 "A third column beside the spectra: phase against "
+                 "frequency, out of the same FFT that gives the magnitude.\n\n"
+                 "out-in — output phase minus input phase, per bin: the "
+                 "phase the recorded processing actually applied. Both "
+                 "traces share the record's start, so that arbitrary origin "
+                 "cancels and what is left is the filter. This is the one "
+                 "that means something on its own.\n\n"
+                 "raw — the plain FFT angle of each trace, which is what "
+                 "'the phase from an FFT' usually names. Be ready for it to "
+                 "look like noise, because it largely is: it is dominated by "
+                 "where the record happens to start, which rotates every bin "
+                 "by -2*pi*f*t0. On this project's own dumps it spans the "
+                 "full ±180° with a sign change between most adjacent bins. "
+                 "The information is in differences between the curves, "
+                 "never in the values.\n\n"
+                 "off — hide the column and give the width back to the time "
+                 "and magnitude panels.\n\n"
+                 "Bins where the input is more than 60 dB below its peak are "
+                 "left out either way: the phase of noise is noise.")
+        row += 1
+
+        ttk.Label(f, text="Phase units").grid(row=row, column=0, sticky="w",
+                                              pady=2)
+        units_box = ttk.Combobox(f, textvariable=self._phase_units, width=8,
+                                 state="readonly", values=list(sat.PHASE_UNITS))
+        units_box.grid(row=row, column=1, sticky="e", pady=2)
+        _Tooltip(units_box,
+                 "What the phase axis plots. Degrees are the raw angle; "
+                 "the two delays answer \"so how far is the output actually "
+                 "shifted\", which degrees do not -- 45 degrees is 125 ms at "
+                 "1 Hz and 1.25 ms at 100 Hz.\n\n"
+                 "phase ms — how late the SINE at that frequency comes out. "
+                 "Reads directly: 'the 10 Hz component is 3 ms late'. Only "
+                 "as good as the unwrapping, so trust it in a passband and "
+                 "not past a wrap.\n\n"
+                 "group ms — how late a narrow BAND around that frequency "
+                 "comes out: the delay of the waveform's shape rather than "
+                 "of the carrier. This is the one that matters for an ECG. "
+                 "Constant group delay just moves the QRS; group delay that "
+                 "varies with frequency changes its shape, which is what an "
+                 "IIR chain does and a linear-phase FIR does not. Taken from "
+                 "ratios of adjacent bins, so it needs no unwrapping and is "
+                 "blank across a gap rather than wrong.")
         return f
 
     def _build_model_tab(self):
@@ -659,6 +735,30 @@ class SATWindow:
                           "is unity). Shared with the capture view's Plot "
                           "tab, where the same number is dBFS.")
 
+        ttk.Label(f, text="Phase units").grid(row=row, column=0, sticky="w",
+                                              pady=2)
+        runits_box = ttk.Combobox(f, textvariable=self._phase_units, width=8,
+                                  state="readonly", values=list(sat.PHASE_UNITS))
+        runits_box.grid(row=row, column=1, sticky="e", pady=2)
+        _Tooltip(runits_box,
+                 "What the phase axis plots. Degrees are the raw angle; "
+                 "the two delays answer \"so how far is the output actually "
+                 "shifted\", which degrees do not -- 45 degrees is 125 ms at "
+                 "1 Hz and 1.25 ms at 100 Hz.\n\n"
+                 "phase ms — how late the SINE at that frequency comes out. "
+                 "Reads directly: 'the 10 Hz component is 3 ms late'. Only "
+                 "as good as the unwrapping, so trust it in a passband and "
+                 "not past a wrap.\n\n"
+                 "group ms — how late a narrow BAND around that frequency "
+                 "comes out: the delay of the waveform's shape rather than "
+                 "of the carrier. This is the one that matters for an ECG. "
+                 "Constant group delay just moves the QRS; group delay that "
+                 "varies with frequency changes its shape, which is what an "
+                 "IIR chain does and a linear-phase FIR does not. Taken from "
+                 "ratios of adjacent bins, so it needs no unwrapping and is "
+                 "blank across a gap rather than wrong.")
+        row += 1
+
         ttk.Separator(f, orient="horizontal").grid(
             row=row, column=0, columnspan=2, sticky="ew", pady=(8, 4))
         row += 1
@@ -807,7 +907,8 @@ class SATWindow:
     def reset_defaults(self):
         """Every analysis field back to its startup value, then redraw."""
         for var in (self._fft_size, self._fmax, self._db_min, self._peak_fmin,
-                    self._shift, self._settle, self._view, self._resp_size,
+                    self._phase, self._phase_units, self._shift, self._settle,
+                    self._view, self._resp_size,
                     self._resp_points, self._resp_drive, self._resp_averages,
                     self._resp_fmin, self._resp_fmax, self._resp_floor,
                     self._resp_ideal, self._overlay, self._overlay_ch,
@@ -975,8 +1076,16 @@ class SATWindow:
                                             settle, self.info["rate"],
                                             self.info.get("meta")))
 
-        self._say(sat.format_report(self.info, results, models))
-        self._draw(curves, models, fmax, db_min)
+        mode = self._phase.get()
+        phases = []
+        if mode != "off":
+            phases = [sat.phase_spectrum(self.traces, ch, self.info["rate"],
+                                         mode, size)
+                      for ch in ("ch1", "ch2")]
+
+        self._say(sat.format_report(self.info, results, models,
+                                    phases=[p for p in phases if p]))
+        self._draw(curves, models, fmax, db_min, [p for p in phases if p])
 
     def _refresh_response(self, params, db_min, rate):
         names = self._selected_curves()
@@ -1066,20 +1175,25 @@ class SATWindow:
         self.report.insert("1.0", text)
         self.report.configure(state="disabled")
 
-    def _draw(self, curves_by_ch, models, fmax, db_min):
+    def _draw(self, curves_by_ch, models, fmax, db_min, phases=()):
         rate = self.info["rate"]
         channels = [ch for ch in ("ch1", "ch2")
                     if f"{ch}_in" in self.traces or f"{ch}_out" in self.traces]
         model_by_ch = {m["channel"]: m for m in models if m}
+        phase_by_ch = {p["channel"]: p for p in phases if p}
         t = np.arange(self.info["samples"]) / rate
 
-        self._layout((2, 2))
+        # A third column only when there is phase to put in it -- an empty
+        # one would take a third of the width from the two panels that have
+        # something in them.
+        cols = 3 if phase_by_ch else 2
+        self._layout((2, cols))
         for row in range(2):
-            for col in range(2):
+            for col in range(cols):
                 self.axes[row][col].set_visible(row < len(channels))
 
         for row, ch in enumerate(channels):
-            ax_t, ax_f = self.axes[row]
+            ax_t, ax_f = self.axes[row][0], self.axes[row][1]
             for direction, color in (("in", "tab:blue"), ("out", "tab:red")):
                 key = f"{ch}_{direction}"
                 if key in self.traces:
@@ -1105,6 +1219,44 @@ class SATWindow:
             ax_f.set_ylim(db_min, 6)
             ax_f.legend(fontsize=8)
             ax_f.grid(alpha=0.3)
+
+            p = phase_by_ch.get(ch)
+            if p is None:
+                continue
+            ax_p = self.axes[row][2]
+            # Points, not a line: the gate leaves gaps wherever the input
+            # had nothing to say, and joining across one would draw a
+            # confident segment through the part of the band the capture
+            # says least about. Small and semi-transparent because in raw
+            # mode there are thousands of them.
+            colors = {"in": "tab:blue", "out": "tab:red", "out − in": "tab:purple"}
+            units = self._phase_units.get()
+            ylabel = "Phase (deg)"
+            for label, deg, h in p["curves"]:
+                x, y, ylabel = sat.phase_display(p["freqs"], deg, h, units,
+                                                 p.get("group_lag", 1))
+                ax_p.plot(x, y, ".", ms=1.6, alpha=0.55,
+                          color=colors.get(label, "tab:purple"), label=label)
+            ax_p.set_title(f"{ch} — phase ({p['mode']})")
+            ax_p.set_xlabel("Frequency (Hz)")
+            ax_p.set_ylabel(ylabel)
+            # Its own span, not the spectrum's: the gate usually leaves
+            # phase over a fraction of the band, and stretching to Nyquist
+            # crushes every point into the left few percent of the panel.
+            # The title carries the mode and the report the extent, so the
+            # narrower axis reads as a limit rather than as a mismatch.
+            ax_p.set_xlim(0, min(fmax, p["freqs"][-1]) if fmax
+                          else p["freqs"][-1])
+            # Degrees have a natural full-scale; a delay does not, so let it
+            # autoscale rather than crushing it into a fixed window.
+            if units == "deg":
+                ax_p.set_ylim(-190, 190)
+                ax_p.yaxis.set_major_locator(MultipleLocator(90))
+            ax_p.axhline(0.0, color="0.5", lw=0.6)
+            _pad_delay_axis(ax_p, units)
+            # Markers this small vanish in a legend, so give it big ones.
+            ax_p.legend(fontsize=8, markerscale=6, handletextpad=0.4)
+            ax_p.grid(alpha=0.3)
 
         self.fig.tight_layout()
         self.fig.canvas.draw_idle()
@@ -1140,6 +1292,9 @@ class SATWindow:
         if hi <= lo:                       # a band with nothing in it
             lo, hi = measured_lo, measured_hi
         ideal = self._resp_ideal.get()
+        units = self._phase_units.get()
+        phase_label = {"phase ms": "Phase delay (ms)",
+                       "group ms": "Group delay (ms)"}.get(units, "Phase (deg)")
 
         # Behind everything: a level on its own axis, so it can never be
         # read off the gain scale by accident. Drawn first and z-ordered
@@ -1174,7 +1329,9 @@ class SATWindow:
             color, ls = _curve_style(r)
             ax_mag.plot(r["freqs"], r["mag_db"], color=color, ls=ls, lw=1.2,
                         label=r["algorithm"])
-            ax_ph.plot(r["freqs"], r["phase_deg"], color=color, ls=ls, lw=1.2,
+            px, py, _lab = sat.phase_display(r["freqs"], r["phase_deg"],
+                                             r.get("h"), units)
+            ax_ph.plot(px, py, color=color, ls=ls, lw=1.2,
                        label=r["algorithm"])
             # Only when some of it is actually on the axis: a floor 70 dB
             # below the bottom is good news, but as a legend entry pointing
@@ -1193,8 +1350,9 @@ class SATWindow:
                 mag = 20.0 * np.log10(np.maximum(np.abs(h), 1e-30))
                 ax_mag.plot(w, mag, color="k", lw=0.7, alpha=0.7,
                             label=once("design", "design (from sos)"))
-                ax_ph.plot(w, np.degrees(np.unwrap(np.angle(h))), color="k",
-                           lw=0.7, alpha=0.7)
+                dx, dy, _lab = sat.phase_display(
+                    w, np.degrees(np.unwrap(np.angle(h))), h, units)
+                ax_ph.plot(dx, dy, color="k", lw=0.7, alpha=0.7)
 
         # The recording's own in->out, in the same dB as the curves above it.
         # Markers, not a smooth line: each point is one band of a five-second
@@ -1205,7 +1363,9 @@ class SATWindow:
             ax_mag.plot(g["freqs"], g["mag_db"], color=color, lw=1.1,
                         marker=".", ms=3.5, alpha=0.9,
                         label=f"{g['channel']} capture in→out")
-            ax_ph.plot(g["freqs"], g["phase_deg"], color=color, lw=1.1,
+            gx, gy, _lab = sat.phase_display(g["freqs"], g["phase_deg"],
+                                             g.get("h"), units)
+            ax_ph.plot(gx, gy, color=color, lw=1.1,
                        marker=".", ms=3.5, alpha=0.9,
                        label=f"{g['channel']} capture in→out")
 
@@ -1250,11 +1410,16 @@ class SATWindow:
             handles, labels = handles + h2, labels + l2
         ax_mag.legend(handles, labels, fontsize=8, ncol=2, framealpha=0.85)
 
-        ax_ph.set_ylabel("Phase (deg)")
+        ax_ph.set_ylabel(phase_label)
         ax_ph.set_xlabel("Frequency (Hz)")
-        span = [float(np.ptp(r["phase_deg"])) for r in responses]
-        if span and max(span) > 180.0:
-            ax_ph.yaxis.set_major_locator(MultipleLocator(90))
+        # 90-degree ticks only make sense for degrees; a delay in ms wants
+        # matplotlib's own choice.
+        if units == "deg":
+            span = [float(np.nanmax(r["phase_deg"]) - np.nanmin(r["phase_deg"]))
+                    for r in responses if np.isfinite(r["phase_deg"]).any()]
+            if span and max(span) > 180.0:
+                ax_ph.yaxis.set_major_locator(MultipleLocator(90))
+        _pad_delay_axis(ax_ph, units)
         ax_ph.axhline(0.0, color="0.5", lw=0.6)
 
         self.fig.tight_layout()

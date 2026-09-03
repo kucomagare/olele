@@ -148,10 +148,77 @@ blitting, no animated artist and no frame rate, because there is no stream;
 every control just recomputes from the file and redraws once. The report
 sits underneath in a panel you can select and copy out of.
 
-**View** switches between the two things it draws. `capture` is a 2×2 grid:
-time on the left and spectrum on the right, per channel. `response` is a
-Bode plot of the pipelines themselves — amplitude over phase, log frequency
-— and is described further down.
+**View** switches between the two things it draws. `capture` is a grid per
+channel: time, magnitude spectrum, and — when **Phase** is on — a third
+column of phase against frequency. `response` is a Bode plot of the
+pipelines themselves, amplitude over phase on log frequency, and is
+described further down.
+
+### The capture view's phase column
+
+The rfft that gives the magnitude spectrum gives the phase for free, but the
+two are not equally useful and **Phase** picks which you get:
+
+- **`out-in`** (the default) — output phase minus input phase, per bin: the
+  phase the recorded processing actually applied. Both traces share the
+  record's start, so that arbitrary origin cancels and what is left is the
+  filter. On a `pipe2` capture it draws a clean ramp to about −45° across
+  the ECG band with a step at the 50 Hz notch.
+- **`raw`** — the plain FFT angle of each trace, which is what "the phase
+  from an FFT" usually names. **Expect it to look like noise, because it
+  largely is.** It is dominated by where the record happens to start, which
+  rotates every bin by −2π·f·t₀. Measured on this repo's own dumps: `raw`
+  scatters across the full ±180° with 170° of jitter between adjacent bins,
+  against 4.6° for `out-in` — a 37× difference. The information in `raw` is
+  in *differences between the curves*, never in the values; two traces whose
+  raw phase lands on top of each other are the same signal.
+- **`off`** — hide the column and give the width back to the other two.
+
+### Degrees are not a shift — **Phase units**
+
+"Is the output shifted, and by how much" is a question in milliseconds, and
+degrees do not answer it: 45° is 125 ms at 1 Hz and 1.25 ms at 100 Hz. The
+**Phase units** control converts, and applies to *both* views' phase axes:
+
+- **`deg`** — the angle itself.
+- **`phase ms`** — `−φ/(2πf)`: how late the *sine* at that frequency comes
+  out. Reads directly as "the 10 Hz component is 3 ms late". Only as good as
+  the unwrapping, so trust it in a passband and not past a wrap.
+- **`group ms`** — `−dφ/dω`: how late a narrow *band* around that frequency
+  comes out, which is the delay of the waveform's shape rather than of the
+  carrier. **This is the one that matters for an ECG**: constant group delay
+  just moves the QRS, group delay that varies with frequency reshapes it —
+  which is what an IIR chain does and a linear-phase FIR does not. The
+  report prints it regardless of the display units, as
+  `output lags input by +2.03 ms (median group delay), spread 5.70 ms`.
+
+Group delay is taken from ratios of complex bins, `angle(h[i+L]·conj(h[i]))`,
+which is already wrapped into (−π, π] and so needs no unwrapping of its own.
+
+**`L` is not 1, and that matters.** A Hann window's transform spans three
+bins, so neighbouring bins of a windowed spectrum are correlated and a slope
+measured between two of them is partly measured against itself — it comes
+out flattened. Checked against `scipy.signal.group_delay` on a known 2nd-order
+Butterworth, lag 1 read **4.09 ms where the truth was 5.72**, and 5.76
+against 6.60: ~25% low across the band. At lag 2 and beyond it lands on the
+truth, so the main lobe is the whole story; the code uses 4 for margin and a
+quieter baseline (`PHASE_GROUP_LAG`), which measures 5.82 / 6.50 / 5.16 /
+1.28 against a true 5.72 / 6.60 / 4.95 / 1.30. A synthetic 7-sample delay
+reads back as 3.428 ms against an exact 3.418.
+
+The response view passes **lag 1 deliberately**: its multisine sits on exact
+bins and is never windowed, so nothing correlates its neighbours. There the
+maths is exact — verified against an analytic `exp(−2πifτ)` — and `iir` at
+`shift=4` measures 7.3 ms against its theoretical 2⁴/2048 = 7.8 ms.
+
+Bins are gated on **both** traces being within 60 dB of their own peak. The
+input-only gate that came first let a notched tone through — strong going
+in, at the noise floor coming out — and its meaningless phase difference
+drew a scatter of outliers sitting exactly on the notch, which is the one
+place on the plot you would most want to trust. The panel also takes its own
+x-limit rather than the spectrum's, since the gate typically leaves phase
+over a fraction of the band and stretching to Nyquist crushes every point
+into the left few percent.
 
 It sits above a notebook whose **tabs change with it**, so each view gets the
 controls that act on it and no others. Pages are forgotten rather than
@@ -162,11 +229,11 @@ and apply to every tab at once.
 | Tab | View | Controls |
 |---|---|---|
 | **Dump** | both | which capture; Rescan / Open… / Delete all logs |
-| **Plot** | capture | **Size**, **F max**, **dB min**, **Peak from** — how the spectra are computed and shown |
+| **Plot** | capture | **Size**, **F max**, **dB min**, **Peak from**, **Phase**, **Phase units** — how the spectra are computed and shown |
 | **Model** | capture | **Ch1/Ch2 pipe + impl**, **Shift**, **Settle** — the reference-model comparison |
 | **Curves** | response | which pipelines to draw, a row per pipeline with manual and scipy side by side, + All / None; then **pipe2 HP / notch / Q / LP** and *Corners from capture* |
 | **Measure** | response | **Size**, **Tones**, **Drive**, **Averages**, **Rate** — how hard it looks |
-| **Plot** | response | **F min**, **F max**, **dB min**, the floor and design overlays, **Overlay capture** / **Overlay from** |
+| **Plot** | response | **F min**, **F max**, **dB min**, **Phase units**, the floor and design overlays, **Overlay capture** / **Overlay from** |
 
 Two notes on that table. **Dump is in both views deliberately**: the response
 view reads the loaded capture's sample rate, its filter corners and — for the
