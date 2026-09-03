@@ -49,6 +49,7 @@ from tkinter import ttk
 import numpy as np
 
 import config
+import guiutil
 import local_proc
 import net
 import packet_format
@@ -64,6 +65,15 @@ SAT_SCRIPT = Path(__file__).resolve().parent / "sat.py"
 # uint16 range long after marathon moved to 32-bit slots.
 _WIRE_MAX = int(np.iinfo(packet_format.CH1_DTYPE).max)
 _WIRE_BITS = np.dtype(packet_format.CH1_DTYPE).itemsize * 8
+
+
+# Apply-button captions. The marker is the only signal that a typed or
+# ticked change has not reached config yet, which without it reads as a
+# control that simply does not work.
+_APPLY_CLEAN = "Apply changes"
+_APPLY_DIRTY = "Apply changes  \u25cf"
+_APPLY_BAR_CLEAN = "Apply"
+_APPLY_BAR_DIRTY = "Apply \u25cf"
 
 
 class _Tooltip:
@@ -102,8 +112,11 @@ def _add_entry(frame, row, label, var, on_commit, width=8, help_text=None):
     lbl.grid(row=row, column=0, sticky="w", pady=2)
     entry = ttk.Entry(frame, textvariable=var, width=width)
     entry.grid(row=row, column=1, sticky="e", pady=2)
+    # Enter applies everything, as a keyboard shortcut for the Apply button.
+    # There is deliberately no <FocusOut> binding: committing as soon as the
+    # cursor leaves a field IS applying on every change, which is the thing
+    # the Apply button exists to replace.
     entry.bind("<Return>", lambda _e: on_commit())
-    entry.bind("<FocusOut>", lambda _e: on_commit())
     if help_text:
         _Tooltip(lbl, help_text)
         _Tooltip(entry, help_text)
@@ -129,16 +142,33 @@ def _format_5tuple(values):
     return ",".join(f"{v:g}" for v in values)
 
 
-def _add_entry_horizontal(frame, col, label, var, on_commit):
+def _fmt_limit(value):
+    """Format a y-limit for its entry box: 4294967295, not 4294967295.0.
+
+    The limits are parsed with float() (so 2.1e9 is typeable) but they are
+    sample counts, and a trailing ".0" is two wasted characters in a field
+    where every character is already spoken for."""
+    value = float(value)
+    return str(int(value)) if value.is_integer() else f"{value:g}"
+
+
+def _add_entry_horizontal(frame, col, label, var, on_commit, width=8,
+                          help_text=None):
     """Same as _add_entry but laid out left-to-right in a single row
     (label, entry, label, entry, ...) instead of stacked rows -- used by
     PlotControlPanel, which sits in one line along the bottom of the
-    window rather than a sidebar column."""
+    window rather than a sidebar column.
+
+    `width` because the y-limits are raw sample counts: full scale is
+    4294967295, ten digits, and in an 8-character box that reads
+    "42949672" -- a number the user then reasonably believes is the
+    current maximum. Fields have to show what they hold."""
     ttk.Label(frame, text=label).grid(row=0, column=col, sticky="w", padx=(0, 4))
-    entry = ttk.Entry(frame, textvariable=var, width=8)
+    entry = ttk.Entry(frame, textvariable=var, width=width)
     entry.grid(row=0, column=col + 1, sticky="w", padx=(0, 16))
     entry.bind("<Return>", lambda _e: on_commit())
-    entry.bind("<FocusOut>", lambda _e: on_commit())
+    if help_text:
+        _Tooltip(entry, help_text)
     return col + 2
 
 
@@ -157,10 +187,10 @@ GUI_SECTIONS = (
         "PLOT_STEPS_MIN_PX", "UI_POLL_RATE",
     )),
     ("Session (Start / Mode, above the tabs)", (
-        "AUTOSTART", "PROCESSING_MODE",
+        "AUTOSTART", "CH_MODE",
     )),
     ("Signal / Local tab", (
-        "LOCAL_ALGORITHM", "LOCAL_SHIFT",
+        "CH_PIPE", "CH_IMPL", "LOCAL_SHIFT",
     )),
     ("Signal / Basic tab", (
         "SEND_RATE", "CHUNK_SIZE", "ECG_HEART_RATE", "ECG_SAMPLING_RATE",
@@ -211,9 +241,27 @@ _METHODS = ["ecgsyn", "simple"]  # NOT "multileads" -- see config.py's
                                   # can only ever pick from this list.
 
 
+# Why the panels batch instead of applying per field
+# -------------------------------------------------
+# Every control used to write config the moment it changed -- on Enter, on
+# leaving a field, on every checkbox click. That makes a multi-field change
+# into a sequence of half-applied states: setting SEND_RATE and CHUNK_SIZE
+# together meant the stream ran at the new rate with the old chunk size for
+# however long it took to reach the second field.
+#
+# Now every control writes only its own Tk variable, and an Apply button
+# commits them all in one pass. Enter in any field does the same thing, so
+# the keyboard still works. What stays immediate is anything that is an
+# ACTION rather than a setting -- Start/Stop, Pause, Log buffer, SAT, and
+# the Board tab's own Apply (which writes hardware registers and has always
+# been explicit).
 class SignalControlPanel:
     def __init__(self, parent):
         self.frame = ttk.Frame(parent, padding=8)
+        # Commit callables, in creation order. apply_all() runs them all.
+        self._commits = []
+        # Editable input variables, for the pending-change marker.
+        self._watched = []
 
         ttk.Label(self.frame, text="Signal", font=("", 10, "bold")).pack(anchor="w", pady=(0, 6))
 
@@ -238,23 +286,35 @@ class SignalControlPanel:
         # Mode picker. Both worker threads are always alive and each idles
         # unless it owns the mode, so switching is just this attribute
         # write -- see python_client.py.
-        mode_row = ttk.Frame(self.frame)
-        mode_row.pack(fill="x", pady=(0, 6))
-        ttk.Label(mode_row, text="Mode").pack(side="left", padx=(0, 6))
-        self._mode = tk.StringVar(value=config.PROCESSING_MODE)
-        for label, value, tip in (
-            ("Board", "board", "The real path: TCP to the relay, which forwards "
-                                "to the board; the board filters in fabric and "
-                                "echoes back."),
-            ("Local", "local", "No socket, no relay, no board -- generate, process "
-                                "and plot inside this process. For developing an "
-                                "algorithm before it is RTL, and for working with "
-                                "no hardware present. See the Local tab."),
-        ):
-            rb = ttk.Radiobutton(mode_row, text=label, value=value,
-                                 variable=self._mode, command=self._apply_mode)
-            rb.pack(side="left")
-            _Tooltip(rb, tip)
+        # One row per channel: the two are independent, so ch1 can run on the
+        # board while ch2 runs a pipeline being developed here.
+        self._mode = []
+        for ch in range(2):
+            mode_row = ttk.Frame(self.frame)
+            mode_row.pack(fill="x", pady=(0, 2 if ch == 0 else 6))
+            ttk.Label(mode_row, text=f"Ch{ch + 1}").pack(side="left", padx=(0, 6))
+            var = tk.StringVar(value=config.CH_MODE[ch])
+            self._mode.append(var)
+            self._commits.append(self._apply_mode)
+            self._watch(var)
+            for label, value, tip in (
+                ("Board", "board",
+                 "The real path: TCP to the relay, which forwards to the "
+                 "board; the board filters this channel in fabric and echoes "
+                 "it back."),
+                ("Local", "local",
+                 "This channel is processed here instead, by its Local-tab "
+                 "pipeline. It is still SENT (both channels share one frame "
+                 "and the board cannot be given just one), and the board "
+                 "still filters it -- that answer is simply discarded and "
+                 "replaced. For developing a pipeline before it is RTL, and "
+                 "for working with no hardware present."),
+            ):
+                rb = ttk.Radiobutton(mode_row, text=label, value=value,
+                                     variable=var,
+                                     )
+                rb.pack(side="left")
+                _Tooltip(rb, tip)
 
         self._pause_button = ttk.Button(self.frame, text=self._pause_label(),
                                          command=self._toggle_pause)
@@ -275,28 +335,52 @@ class SignalControlPanel:
         self._last_config_seen = None
 
         notebook = ttk.Notebook(self.frame)
-        notebook.pack(fill="both", expand=True)
-        basic = ttk.Frame(notebook, padding=6)
-        waveform = ttk.Frame(notebook, padding=6)
-        noise = ttk.Frame(notebook, padding=6)
-        board = ttk.Frame(notebook, padding=6)
-        local = ttk.Frame(notebook, padding=6)
-        notebook.add(basic, text="Basic")
-        notebook.add(waveform, text="Waveform")
-        notebook.add(noise, text="Noise")
-        notebook.add(board, text="Board")
-        notebook.add(local, text="Local")
+        tabs = {}
+        for name in ("Basic", "Waveform", "Noise", "Board", "Local"):
+            tab = guiutil.ScrollFrame(notebook)
+            notebook.add(tab.outer, text=name)
+            tabs[name] = tab.body
 
-        self._build_basic_tab(basic)
-        self._build_waveform_tab(waveform)
-        self._build_noise_tab(noise)
-        self._build_board_tab(board)
-        self._build_local_tab(local)
-
-        ttk.Separator(self.frame, orient="horizontal").pack(fill="x", pady=6)
+        # Everything below the tabs is packed FIRST, from the bottom up, so
+        # it reserves its space before the notebook (which takes what is
+        # left). Packed the other way round, the notebook's expand=True
+        # swallowed the whole cavity and the Apply button below it was
+        # never mapped -- the button was not broken, it was not on screen.
         self._rate_status = tk.StringVar()
         ttk.Label(self.frame, textvariable=self._rate_status, wraplength=200,
-                  justify="left", foreground="#555").pack(anchor="w")
+                  justify="left", foreground="#555").pack(side="bottom",
+                                                          anchor="w")
+        ttk.Separator(self.frame, orient="horizontal").pack(side="bottom",
+                                                            fill="x", pady=6)
+        # Directly under the tabs, so it is visible whichever tab is open --
+        # a change made on Basic and one made on Noise are applied by the
+        # same press.
+        self._apply_button = ttk.Button(self.frame, text=_APPLY_CLEAN,
+                                        command=self.apply_all)
+        apply_btn = self._apply_button
+        apply_btn.pack(side="bottom", fill="x", pady=(6, 0))
+
+        notebook.pack(fill="both", expand=True)
+
+        self._build_basic_tab(tabs["Basic"])
+        self._build_waveform_tab(tabs["Waveform"])
+        self._build_noise_tab(tabs["Noise"])
+        self._build_board_tab(tabs["Board"])
+        self._build_local_tab(tabs["Local"])
+
+        _Tooltip(apply_btn,
+                 "Apply every field in every tab at once. Nothing typed or "
+                 "ticked here takes effect until this is pressed (Enter in "
+                 "any field does the same). Start/Stop, Pause, Log buffer "
+                 "and SAT act immediately -- they are actions, not "
+                 "settings, and the Board tab keeps its own Apply because "
+                 "that one writes hardware registers.")
+
+        # Watch every control for edits, so the button can say there is
+        # something waiting. Without this a ticked checkbox looks broken:
+        # nothing happens until Apply, and nothing said so.
+        self._watch_vars()
+
         self._update_rate_status()
 
     # ------------------------------------------------------------------
@@ -332,10 +416,10 @@ class SignalControlPanel:
         self._filter_swap = tk.BooleanVar(value=True)
         self._filter_clear = tk.BooleanVar(value=False)
 
-        row = _add_entry(frame, row, "N channels", self._filter_nchan, self._noop,
+        row = self._entry(frame, row, "N channels", self._filter_nchan, self._noop,
                           help_text="Slots per frame the filter expects, written to the "
                                      "filter's reg0. Nothing is sent until you press Apply.")
-        row = _add_entry(frame, row, "Shift (0=bypass)", self._filter_shift, self._noop,
+        row = self._entry(frame, row, "Shift (0=bypass)", self._filter_shift, self._noop,
                           help_text="IIR cutoff: alpha = 1/2**SHIFT, so bigger means more "
                                      "smoothing and more lag. 0 is exactly a bypass "
                                      "(y = y + (x-y) = x), which is the quickest way to check "
@@ -382,7 +466,7 @@ class SignalControlPanel:
     def _noop():
         """Entry commit handler for fields that are only sent on Apply.
 
-        _add_entry() binds Return/FocusOut to a callback, and these two fields
+        self._entry() binds Return/FocusOut to a callback, and these two fields
         deliberately do not push on every keystroke -- writing a half-typed
         channel count into live fabric registers is not something to do by
         accident."""
@@ -457,6 +541,59 @@ class SignalControlPanel:
     # Basic tab: the fields from before this session's parameter survey.
     # ------------------------------------------------------------------
     # ------------------------------------------------------------------
+    def _entry(self, frame, row, label, var, on_commit, width=8, help_text=None):
+        """_add_entry, but the commit is deferred to Apply instead of run now."""
+        self._commits.append(on_commit)
+        self._watch(var)
+        return _add_entry(frame, row, label, var, self.apply_all, width, help_text)
+
+    def _watch(self, *variables):
+        """Track these as editable inputs, for the pending-change marker.
+
+        Registered explicitly rather than by walking every Tk variable on
+        the panel: several of them are read-only DISPLAYS -- the status
+        line, and the board metrics that arrive once a second -- and
+        watching those would leave the button permanently claiming there
+        was something to apply.
+        """
+        for var in variables:
+            self._watched.append(var)
+        return variables[0] if len(variables) == 1 else variables
+
+    def _watch_vars(self):
+        for var in self._watched:
+            var.trace_add("write", lambda *_: self._mark_dirty())
+        self._dirty = False
+
+    def _mark_dirty(self):
+        if getattr(self, "_dirty", False):
+            return
+        self._dirty = True
+        if getattr(self, "_apply_button", None) is not None:
+            self._apply_button.config(text=_APPLY_DIRTY)
+
+    def apply_all(self):
+        """Commit every pending field, then refresh what the panel shows.
+
+        Each commit validates and clamps its own value and writes the
+        corrected text back into its variable, so pressing Apply is also how
+        you find out that 2048 became 2000.
+        """
+        for commit in self._commits:
+            try:
+                commit()
+            except Exception as exc:                  # noqa: BLE001
+                # One bad field must not stop the rest from applying, or a
+                # typo in a box you are not looking at silently swallows the
+                # change you actually came to make.
+                print(f"[panel] {getattr(commit, '__name__', commit)} "
+                      f"failed: {exc}")
+        # Commits write clamped values back into their variables, which trips
+        # the dirty trace again -- so clear the flag after, not before.
+        self._dirty = False
+        self._apply_button.config(text=_APPLY_CLEAN)
+        self.poll_state()
+
     # Local tab: the in-process algorithm and its parameters. Deliberately
     # separate from the Board tab even though "iir" models the same filter
     # -- the Board tab WRITES HARDWARE REGISTERS and reads back what the
@@ -465,52 +602,126 @@ class SignalControlPanel:
     # ------------------------------------------------------------------
     def _build_local_tab(self, frame):
         row = 0
-        ttk.Label(frame, text="In-process algorithm",
+        ttk.Label(frame, text="Processing pipeline",
                   font=("", 9, "bold")).grid(row=row, column=0, columnspan=2,
                                               sticky="w", pady=(0, 4))
         row += 1
 
-        ttk.Label(frame, text="Algorithm").grid(row=row, column=0, sticky="w", pady=2)
-        self._local_algorithm = tk.StringVar(value=config.LOCAL_ALGORITHM)
-        combo = ttk.Combobox(frame, textvariable=self._local_algorithm,
-                             values=sorted(local_proc.ALGORITHMS), width=10,
-                             state="readonly")
-        combo.grid(row=row, column=1, sticky="e", pady=2)
-        combo.bind("<<ComboboxSelected>>", self._apply_local_algorithm)
-        _Tooltip(combo,
-                 "iir: a bit-accurate model of axi_tdm_filter.vhd -- the "
-                 "filter the board actually runs, including its truncation "
-                 "bias and dead zone.\n"
-                 "bypass: passthrough, as a control case.\n"
-                 "Add your own in local_proc.ALGORITHMS and it appears here.")
-        row += 1
+        # Two independent pairs of dropdowns, one per channel. Both are built
+        # from local_proc.PIPELINES, so adding a pipeline there makes it
+        # appear here with no edit to this file.
+        self._pipe = []
+        self._impl = []
+        self._impl_combo = []
+        for ch in range(2):
+            ttk.Label(frame, text=f"Ch{ch + 1} pipe").grid(
+                row=row, column=0, sticky="w", pady=2)
+            pipe_var = tk.StringVar(value=config.CH_PIPE[ch])
+            self._pipe.append(pipe_var)
+            pipe_combo = ttk.Combobox(frame, textvariable=pipe_var,
+                                      values=sorted(local_proc.PIPELINES),
+                                      width=8, state="readonly")
+            pipe_combo.grid(row=row, column=1, sticky="e", pady=2)
+            # Retargets the implementation dropdown at once -- that is
+            # showing you what is available, not applying anything. The
+            # config write waits for Apply like everything else.
+            pipe_combo.bind(
+                "<<ComboboxSelected>>",
+                lambda _e, c=ch: self._sync_impl(c))
+            self._commits.append(lambda c=ch: self._apply_pipe(c))
+            self._watch(pipe_var)
+            _Tooltip(pipe_combo,
+                     "Which pipeline processes this channel.\n"
+                     "bypass: passthrough, as a control case.\n"
+                     "iir: bit-accurate model of axi_tdm_filter.vhd -- the "
+                     "filter the board actually runs, including its "
+                     "truncation bias and dead zone.\n"
+                     "pipe1...: your pipelines. Add them in "
+                     "local_proc.PIPELINES and they appear here.")
+            row += 1
+
+            ttk.Label(frame, text=f"Ch{ch + 1} impl").grid(
+                row=row, column=0, sticky="w", pady=(0, 6))
+            impl_var = tk.StringVar(value=config.CH_IMPL[ch])
+            self._impl.append(impl_var)
+            impl_combo = ttk.Combobox(frame, textvariable=impl_var,
+                                      width=8, state="readonly")
+            impl_combo.grid(row=row, column=1, sticky="e", pady=(0, 6))
+            # No binding: the variable is the pending value, and
+            # _apply_pipe commits pipe and impl together.
+            self._impl_combo.append(impl_combo)
+            self._watch(impl_var)
+            self._sync_impl(ch)
+            _Tooltip(impl_combo,
+                     "scipy: float64 via scipy.signal -- what the filter "
+                     "SHOULD do. The place to decide cutoffs and response "
+                     "shape.\n"
+                     "manual: hand-written integer arithmetic -- what it WILL "
+                     "do once it is RTL. This is the version that gets "
+                     "translated to VHDL.\n"
+                     "The difference between them is the quantisation error, "
+                     "which is the reason both are kept.")
+            row += 1
 
         self._local_shift = tk.StringVar(value=str(config.LOCAL_SHIFT))
-        row = _add_entry(frame, row, "Shift", self._local_shift,
+        row = self._entry(frame, row, "Shift", self._local_shift,
                          self._apply_local_shift,
-                         help_text="alpha = 1/2**shift for the local filter. "
-                                   "0 is an exact bypass, in the model for the "
-                                   "same reason as in the fabric: "
-                                   "y = y + (x - y) = x. This is the local "
-                                   "counterpart of the board's shift register, "
-                                   "kept separate because there is no hardware "
-                                   "to write to here.")
+                         help_text="alpha = 1/2**shift, used by the iir "
+                                   "pipeline only. 0 is an exact bypass, in "
+                                   "the model for the same reason as in the "
+                                   "fabric: y = y + (x - y) = x. This is the "
+                                   "local counterpart of the board's shift "
+                                   "register, kept separate because there is "
+                                   "no hardware to write to here.")
 
         ttk.Separator(frame, orient="horizontal").grid(
             row=row, column=0, columnspan=2, sticky="ew", pady=6)
         row += 1
         ttk.Label(frame, wraplength=190, justify="left", foreground="#555",
-                  text="Local mode bypasses TCP, the relay and the board "
-                       "entirely. Algorithms here are written the way fabric "
-                       "has to compute -- integer, fixed width, explicit "
-                       "wrapping, per-channel state -- so what you see is "
-                       "what the RTL will do. See local_proc.py."
+                  text="Applies to channels set to Local above. Those are "
+                       "still sent (both share one frame), but the board's "
+                       "answer for them is discarded and replaced by the "
+                       "pipeline's. Changing pipe or impl resets that "
+                       "channel's filter state. See local_proc.py."
                   ).grid(row=row, column=0, columnspan=2, sticky="w")
 
-    def _apply_local_algorithm(self, _event=None):
-        name = self._local_algorithm.get()
-        if name in local_proc.ALGORITHMS:
-            config.LOCAL_ALGORITHM = name
+    def _sync_impl(self, ch):
+        """Point the implementation dropdown at what this pipeline offers.
+
+        bypass and iir are single fixed things rather than a design with a
+        float and a fixed-point version, so for those the dropdown is greyed
+        out and shows a dash instead of naming an implementation that was
+        never chosen. Both channels get the same treatment for the same
+        pipeline -- the only reason they can look different is that they are
+        running different pipelines.
+        """
+        combo = self._impl_combo[ch]
+        # The variable, not config: this runs before Apply, so config still
+        # holds the previous pipeline and would offer its implementations.
+        choices = local_proc.implementations(self._pipe[ch].get())
+        if choices:
+            combo["values"] = choices
+            combo["state"] = "readonly"
+            if self._impl[ch].get() not in choices:
+                self._impl[ch].set(choices[0])
+        else:
+            combo["values"] = ()
+            self._impl[ch].set("--")
+            combo["state"] = "disabled"
+
+    def _apply_pipe(self, ch):
+        """Commit one channel's pipeline and implementation together.
+
+        Together because they are one selection: writing the pipeline
+        without its implementation leaves a moment where pipe1 is paired
+        with whatever the previous pipeline's implementation was.
+        """
+        name = self._pipe[ch].get()
+        if name in local_proc.PIPELINES:
+            config.CH_PIPE[ch] = name
+        impl = self._impl[ch].get()
+        if impl in local_proc.implementations(config.CH_PIPE[ch]):
+            config.CH_IMPL[ch] = impl
 
     def _apply_local_shift(self):
         try:
@@ -529,7 +740,11 @@ class SignalControlPanel:
         self.poll_state()
 
     def _apply_mode(self):
-        config.PROCESSING_MODE = self._mode.get()
+        # Written per channel rather than replacing the list, so a worker
+        # thread reading it mid-update sees one changed element, never a
+        # half-built list.
+        for ch, var in enumerate(self._mode):
+            config.CH_MODE[ch] = var.get()
 
     def _status_text(self):
         """One line saying what the app is actually doing right now.
@@ -544,8 +759,11 @@ class SignalControlPanel:
         if not runctl.warm.is_set():
             return "starting (warming up)"
         paused = "" if config.SEND_ENABLED else ", paused"
-        if config.PROCESSING_MODE == "local":
-            return f"running: local, {config.LOCAL_ALGORITHM}{paused}"
+        if config.all_local():
+            return (f"running: local, "
+                    f"ch1 {local_proc.label(config.CH_PIPE[0], config.CH_IMPL[0])}, "
+                    f"ch2 {local_proc.label(config.CH_PIPE[1], config.CH_IMPL[1])}"
+                    f"{paused}")
         # "connected" only means the RELAY took the connection. The relay
         # accepts and discards everything when its other peer is gone, so a
         # dead board looks exactly like a healthy one from the send side --
@@ -554,7 +772,15 @@ class SignalControlPanel:
         if net.rx_stale_s > config.RX_WATCHDOG_S:
             return (f"running: board, connected but NOTHING RECEIVED for "
                     f"{net.rx_stale_s:.0f}s -- board wedged or unplugged?{paused}")
-        return f"running: board, {net.link_state}{paused}"
+        # Name the locally processed channels explicitly. Mixed mode looks
+        # identical to all-board from the link's point of view, and "why is
+        # ch2 not what the board sent" is exactly the question this line
+        # exists to answer.
+        local = ", ".join(
+            f"ch{i + 1} {local_proc.label(config.CH_PIPE[i], config.CH_IMPL[i])}"
+            for i in range(2) if config.CH_MODE[i] == "local")
+        mixed = f", local: {local}" if local else ""
+        return f"running: board, {net.link_state}{mixed}{paused}"
 
     def poll_state(self):
         """Re-derive the run/pause labels and the status line from the real
@@ -579,21 +805,21 @@ class SignalControlPanel:
         self._ecg_enabled = tk.BooleanVar(value=config.ECG_ENABLED)
 
         row = 0
-        row = _add_entry(frame, row, "Send rate (pkt/s)", self._send_rate, self._apply_send_rate,
+        row = self._entry(frame, row, "Send rate (pkt/s)", self._send_rate, self._apply_send_rate,
                           help_text="How many packets/second are sent. Together with Chunk "
                                      "size, this sets the effective streaming rate (samples/s) "
                                      "-- see the status box below to check it against the ECG's "
                                      "own sample rate.")
-        row = _add_entry(frame, row, "Chunk size (smp/pkt)", self._chunk_size, self._apply_chunk_size,
+        row = self._entry(frame, row, "Chunk size (smp/pkt)", self._chunk_size, self._apply_chunk_size,
                           help_text="Samples per packet. Together with Send rate, sets the "
                                      "effective streaming rate (samples/s). Rounded down to a "
                                      "multiple of 8: one packet is one DMA buffer, which must "
                                      "be a whole number of frames and a multiple of 32 bytes.")
-        row = _add_entry(frame, row, "Heart rate (bpm)", self._heart_rate, self._apply_heart_rate,
+        row = self._entry(frame, row, "Heart rate (bpm)", self._heart_rate, self._apply_heart_rate,
                           help_text="Mean simulated heart rate. Actual beat-to-beat timing can "
                                      "vary slightly for realism -- see Heart rate std on the "
                                      "Waveform tab.")
-        row = _add_entry(frame, row, "ECG sample rate (Hz)", self._ecg_sample_rate,
+        row = self._entry(frame, row, "ECG sample rate (Hz)", self._ecg_sample_rate,
                           self._apply_ecg_sample_rate,
                           help_text="Native rate the ECG waveform itself is generated at. This "
                                      "is what the plot's Time axis is calculated from -- not "
@@ -603,7 +829,7 @@ class SignalControlPanel:
         # 32-bit TDM slots, so the panel was quoting sizif's numbers. Taken
         # from the same packet_format.json the firmware header is generated
         # from, it cannot go stale again.
-        row = _add_entry(frame, row, "Amplitude (% of FS)", self._amplitude,
+        row = self._entry(frame, row, "Amplitude (% of FS)", self._amplitude,
                           self._apply_amplitude,
                           help_text=f"How much of the wire format's range "
                                      f"({_WIRE_BITS}-bit, 0-{_WIRE_MAX}) the signal's "
@@ -611,7 +837,7 @@ class SignalControlPanel:
                                      f"A pure wire/display scale -- it does not change "
                                      f"the waveform's shape, only its size.")
 
-        row = _add_entry(frame, row, "Offset (% of FS)", self._offset,
+        row = self._entry(frame, row, "Offset (% of FS)", self._offset,
                           self._apply_offset,
                           help_text="DC shift of the whole signal, as a percentage of the wire "
                                      "format's full scale. 0 centres it; +25 puts it at "
@@ -619,8 +845,9 @@ class SignalControlPanel:
                                      "the band, that sizes it. Push it far enough and the signal "
                                      "clips at the range ends.")
 
-        ecg_on = ttk.Checkbutton(frame, text="ECG enabled", variable=self._ecg_enabled,
-                                  command=self._apply_ecg_enabled)
+        ecg_on = ttk.Checkbutton(frame, text="ECG enabled", variable=self._ecg_enabled)
+        self._commits.append(self._apply_ecg_enabled)
+        self._watch(self._ecg_enabled)
         ecg_on.grid(row=row, column=0, columnspan=2, sticky="w", pady=2)
         _Tooltip(ecg_on, "Off removes the heartbeat and leaves only the noise and sine "
                           "generators from the Noise tab, at exactly the levels they already "
@@ -628,8 +855,10 @@ class SignalControlPanel:
                           "nothing jumps when you toggle this.")
         row += 1
 
-        rx = ttk.Checkbutton(frame, text="Receive enabled", variable=self._receive_enabled,
-                              command=self._apply_receive_enabled)
+        rx = ttk.Checkbutton(frame, text="Receive enabled",
+                              variable=self._receive_enabled)
+        self._commits.append(self._apply_receive_enabled)
+        self._watch(self._receive_enabled)
         rx.grid(row=row, column=0, columnspan=2, sticky="w", pady=2)
         _Tooltip(rx, "When off, incoming (echoed) packets from the board/relay are ignored -- "
                       "the plot's \"out\" trace stops updating. Sending continues unaffected.")
@@ -652,7 +881,9 @@ class SignalControlPanel:
         method_box = ttk.Combobox(frame, textvariable=self._method, values=_METHODS,
                                    state="readonly", width=8)
         method_box.grid(row=row, column=1, sticky="e", pady=2)
-        method_box.bind("<<ComboboxSelected>>", self._apply_method)
+        self._commits.append(self._apply_method)
+        self._watch(self._method)
+
         method_help = ("\"ecgsyn\" (default) -- full dynamical model, realistic morphology, "
                         "every field below has an effect. \"simple\" -- cheaper wavelet "
                         "approximation of one cardiac cycle; verified it silently ignores "
@@ -662,12 +893,12 @@ class SignalControlPanel:
         _Tooltip(method_box, method_help)
         row += 1
 
-        row = _add_entry(frame, row, "Heart rate std (bpm)", self._heart_rate_std,
+        row = self._entry(frame, row, "Heart rate std (bpm)", self._heart_rate_std,
                           self._apply_heart_rate_std,
                           help_text="Beat-to-beat heart rate variability. 0 = perfectly regular "
                                      "rhythm; higher values add realistic jitter between beats. "
                                      "Only affects the \"ecgsyn\" method.")
-        row = _add_entry(frame, row, "LF/HF ratio", self._lfhfratio, self._apply_lfhfratio,
+        row = self._entry(frame, row, "LF/HF ratio", self._lfhfratio, self._apply_lfhfratio,
                           help_text="Low/high-frequency ratio of the heart-rate-variability "
                                      "power spectrum -- shapes HOW the beat-to-beat variability "
                                      "above is distributed over time, not how much of it there "
@@ -677,23 +908,23 @@ class SignalControlPanel:
         ttk.Label(frame, text="Only affect \"ecgsyn\" method:", foreground="#777",
                   font=("", 8)).grid(row=row, column=0, columnspan=2, sticky="w", pady=(6, 2))
         row += 1
-        row = _add_entry(frame, row, "P,Q,R,S,T angles (ti)", self._ti, self._apply_ti, width=18,
+        row = self._entry(frame, row, "P,Q,R,S,T angles (ti)", self._ti, self._apply_ti, width=18,
                           help_text="Angular position (degrees) of each wave in the cardiac "
                                      "cycle, comma-separated for P,Q,R,S,T in that order. "
                                      "Shifts the timing/spacing between waves. Default: "
                                      "-70,-15,0,15,100.")
-        row = _add_entry(frame, row, "P,Q,R,S,T heights (ai)", self._ai, self._apply_ai, width=18,
+        row = self._entry(frame, row, "P,Q,R,S,T heights (ai)", self._ai, self._apply_ai, width=18,
                           help_text="Relative height of each wave (P,Q,R,S,T). Changing the "
                                      "RATIOS between them reshapes the waveform (e.g. a taller "
                                      "T wave) -- but scaling all five by the same factor has no "
                                      "visible effect, since the overall signal gets renormalized "
                                      "regardless (use Amplitude on the Basic tab for that "
                                      "instead). Default: 1.2,-5,30,-7.5,0.75.")
-        row = _add_entry(frame, row, "P,Q,R,S,T widths (bi)", self._bi, self._apply_bi, width=18,
+        row = self._entry(frame, row, "P,Q,R,S,T widths (bi)", self._bi, self._apply_bi, width=18,
                           help_text="Width (spread) of each wave -- larger values widen that "
                                      "wave's bump, e.g. a wide value for T broadens the T wave "
                                      "noticeably. Default: 0.25,0.1,0.1,0.1,0.4.")
-        row = _add_entry(frame, row, "Random seed", self._random_seed, self._apply_random_seed,
+        row = self._entry(frame, row, "Random seed", self._random_seed, self._apply_random_seed,
                           help_text="Seed for the random generator. The same seed always "
                                      "regenerates the identical waveform. Channel 2 always uses "
                                      "seed+1, so the two channels differ from each other but "
@@ -707,7 +938,7 @@ class SignalControlPanel:
         self._ecg_noise = tk.StringVar(value=f"{config.ECG_NOISE:g}")
 
         row = 0
-        row = _add_entry(frame, row, "Built-in noise", self._ecg_noise, self._apply_ecg_noise,
+        row = self._entry(frame, row, "Built-in noise", self._ecg_noise, self._apply_ecg_noise,
                           help_text="Amplitude of the small random noise the model itself adds "
                                      "while generating the waveform (Laplace-distributed). "
                                      "Baked into the model at generation time -- separate from "
@@ -732,9 +963,10 @@ class SignalControlPanel:
             level_var = tk.StringVar(value=f"{getattr(config, level_attr) * 100:g}")
             self._noise_vars[enabled_attr] = (enabled_var, level_var)
 
-            cb = ttk.Checkbutton(frame, text=name, variable=enabled_var,
-                                  command=lambda a=enabled_attr, v=enabled_var:
-                                  self._apply_noise_enabled(a, v))
+            cb = ttk.Checkbutton(frame, text=name, variable=enabled_var)
+            self._commits.append(lambda a=enabled_attr, v=enabled_var:
+                                 self._apply_noise_enabled(a, v))
+            self._watch(enabled_var)
             cb.grid(row=row, column=0, sticky="w", pady=2)
             _Tooltip(cb, f"beta={beta} -- {character}. Independent of the other colors; "
                           f"check any combination to layer them together.")
@@ -742,8 +974,9 @@ class SignalControlPanel:
             entry = ttk.Entry(frame, textvariable=level_var, width=6)
             entry.grid(row=row, column=1, sticky="e", pady=2)
             commit = (lambda a=level_attr, v=level_var: self._apply_noise_level(a, v))
-            entry.bind("<Return>", lambda _e, c=commit: c())
-            entry.bind("<FocusOut>", lambda _e, c=commit: c())
+            self._commits.append(commit)
+            self._watch(level_var)
+            entry.bind("<Return>", lambda _e: self.apply_all())
             level_help = (f"{name} noise's strength, as a percentage of the ECG signal's OWN "
                            f"peak-to-peak swing -- so a given percentage means the same thing "
                            f"regardless of heart rate or Amplitude settings, and regardless of "
@@ -776,25 +1009,26 @@ class SignalControlPanel:
             level_var = tk.StringVar(value=f"{getattr(config, level_attr) * 100:g}")
             self._sine_vars[enabled_attr] = (enabled_var, freq_var, phase_var, level_var)
 
-            cb = ttk.Checkbutton(frame, text=f"{name} enabled", variable=enabled_var,
-                                  command=lambda a=enabled_attr, v=enabled_var:
-                                  self._apply_sine_enabled(a, v))
+            cb = ttk.Checkbutton(frame, text=f"{name} enabled", variable=enabled_var)
+            self._commits.append(lambda a=enabled_attr, v=enabled_var:
+                                 self._apply_sine_enabled(a, v))
+            self._watch(enabled_var)
             cb.grid(row=row, column=0, columnspan=3, sticky="w", pady=(4, 0))
             _Tooltip(cb, f"Adds a pure sine wave to BOTH channels identically (e.g. to "
                           f"simulate powerline hum) -- independent of the other sine generator "
                           f"and the colored noise above; any combination can be active.")
             row += 1
 
-            row = _add_entry(frame, row, "  Frequency (Hz)", freq_var,
+            row = self._entry(frame, row, "  Frequency (Hz)", freq_var,
                               lambda a=freq_attr, v=freq_var: self._apply_sine_freq(a, v),
                               help_text=f"{name}'s frequency, evaluated at the ECG's own sample "
                                          f"rate -- exact regardless of Send rate/Chunk size "
                                          f"playback speed. Clamped below Nyquist (half the "
                                          f"current ECG sample rate) to avoid aliasing.")
-            row = _add_entry(frame, row, "  Phase (deg)", phase_var,
+            row = self._entry(frame, row, "  Phase (deg)", phase_var,
                               lambda a=phase_attr, v=phase_var: self._apply_sine_phase(a, v),
                               help_text=f"{name}'s starting phase offset in degrees.")
-            row = _add_entry(frame, row, "  Amplitude (%)", level_var,
+            row = self._entry(frame, row, "  Amplitude (%)", level_var,
                               lambda a=level_attr, v=level_var: self._apply_sine_level(a, v),
                               help_text=f"{name}'s strength, as a percentage of the ECG "
                                          f"signal's OWN peak-to-peak swing -- same convention "
@@ -1063,50 +1297,82 @@ class PlotControlPanel:
         # Optional so the panel stays constructible on its own; the button
         # just disables itself when there is nothing to dump.
         self._plot = plot
+        # Same deferred-commit model as SignalControlPanel -- see the comment
+        # above that class.
+        self._commits = []
 
-        self._plot_min = tk.StringVar(value=str(config.PLOT_MIN))
-        self._plot_max = tk.StringVar(value=str(config.PLOT_MAX))
+        self._plot_min = tk.StringVar(value=_fmt_limit(config.PLOT_MIN))
+        self._plot_max = tk.StringVar(value=_fmt_limit(config.PLOT_MAX))
         self._plot_buffer = tk.StringVar(value=str(config.PLOT_BUFFER))
         self._frame_rate = tk.StringVar(value=str(config.FRAME_RATE))
         self._trigger_on = tk.BooleanVar(value=bool(config.PLOT_TRIGGER))
         self._trigger_level = tk.StringVar(value=str(config.PLOT_TRIGGER_LEVEL))
 
+        # Two groups, not one long grid row: the buttons are packed to the
+        # RIGHT edge and the fields fill what is left. In one grid, a window
+        # narrower than the whole row (~1210px with these fonts) clipped
+        # whatever sat in the last columns -- which was the Apply button, so
+        # it came out half-drawn or missing entirely while every field was
+        # still visible. Now a narrow window eats into the fields instead,
+        # and the buttons are always fully there.
+        buttons = ttk.Frame(self.frame)
+        buttons.pack(side="right", padx=(16, 0))
+        fields = ttk.Frame(self.frame)
+        fields.pack(side="left", fill="x", expand=True)
+
         col = 0
-        ttk.Label(self.frame, text="Plot", font=("", 10, "bold")).grid(
+        ttk.Label(fields, text="Plot", font=("", 10, "bold")).grid(
             row=0, column=col, sticky="w", padx=(0, 16))
         col += 1
 
-        col = _add_entry_horizontal(self.frame, col, "Y min", self._plot_min, self._apply_plot_ylim)
-        col = _add_entry_horizontal(self.frame, col, "Y max", self._plot_max, self._apply_plot_ylim)
-        col = _add_entry_horizontal(self.frame, col, "Buffer (smp)", self._plot_buffer,
+        # Wider than the rest: these hold up to 10 digits (full scale is
+        # 4294967295) and an 8-character box shows the wrong number.
+        ylim_help = (f"Y-axis range, in RAW SAMPLE COUNTS -- not millivolts "
+                     f"and not a percentage. Full scale is 0.."
+                     f"{config.WIRE_FULL_SCALE}, and the ECG sits around "
+                     f"mid-scale ({config.WIRE_FULL_SCALE // 2}), so a "
+                     f"small range like 0..100 is valid but puts the trace "
+                     f"far off screen. Max must be greater than min or the "
+                     f"pair is rejected.")
+        col = self._entry_h(fields, col, "Y min", self._plot_min,
+                            self._apply_plot_ylim, width=11,
+                            help_text=ylim_help)
+        col = self._entry_h(fields, col, "Y max", self._plot_max,
+                            self._apply_plot_ylim, width=11,
+                            help_text=ylim_help)
+        col = self._entry_h(fields, col, "Buffer (smp)", self._plot_buffer,
                                      self._apply_plot_buffer)
-        col = _add_entry_horizontal(self.frame, col, "Frame rate (fps)", self._frame_rate,
+        col = self._entry_h(fields, col, "Frame rate (fps)", self._frame_rate,
                                      self._apply_frame_rate)
 
         # Scope trigger. Without it the window shows whatever phase happened
         # to be newest at frame time, which above a few thousand samples/s
         # means a different phase every frame -- see the PLOT_TRIGGER comment
         # in config.py. Untick to get the old free-running behaviour back.
-        ttk.Checkbutton(self.frame, text="Trigger", variable=self._trigger_on,
-                        command=self._apply_trigger).grid(
+        ttk.Checkbutton(fields, text="Trigger",
+                        variable=self._trigger_on).grid(
             row=0, column=col, sticky="w", padx=(0, 8))
         col += 1
-        col = _add_entry_horizontal(self.frame, col, "Level (0-1)", self._trigger_level,
+        col = self._entry_h(fields, col, "Level (0-1)", self._trigger_level,
                                      self._apply_trigger)
 
         # Writes the on-screen window of all four traces to a CSV under
         # build/logs/. For inspecting a trace that looks wrong -- far more
         # useful than describing it, since the file carries the settings that
         # produced it alongside the samples.
-        self._dump_button = ttk.Button(self.frame, text="Log buffer",
+        self._dump_button = ttk.Button(buttons, text="Log buffer",
                                        command=self._dump_buffers)
-        self._dump_button.grid(row=0, column=col, sticky="w", padx=(8, 4))
+        self._dump_button.pack(side="left", padx=(0, 4))
         if self._plot is None:
             self._dump_button.state(["disabled"])
-        col += 1
-        self._dump_status = ttk.Label(self.frame, text="")
-        self._dump_status.grid(row=0, column=col, sticky="w")
-        col += 1
+        # No filename label beside the button: it grew and shrank the bar
+        # every time a dump was written, which moved every control to its
+        # right. The names are listed in SAT's file picker, which is where
+        # you go to open one anyway -- failures still print to the console.
+        _Tooltip(self._dump_button,
+                 "Write the on-screen window of all four traces to "
+                 "build/logs/, with a sidecar recording every setting that "
+                 "produced them. Open it with the SAT button.")
 
         # Launches sat.py as its own process rather than importing it
         # in-process: it opens its own Tk root and event loop, and this way a
@@ -1114,15 +1380,71 @@ class PlotControlPanel:
         # down with it. sys.executable so it runs under whichever interpreter
         # is already running this app (the venv, with numpy etc. installed),
         # regardless of what "python3" resolves to on PATH.
-        self._sat_button = ttk.Button(self.frame, text="SAT",
+        self._sat_button = ttk.Button(buttons, text="SAT",
                                       command=self._open_sat)
-        self._sat_button.grid(row=0, column=col, sticky="w", padx=(8, 4))
+        self._sat_button.pack(side="left", padx=(0, 4))
+
+        self._commits.append(self._apply_trigger)
+        self._apply_button = ttk.Button(buttons, text=_APPLY_BAR_CLEAN,
+                                        command=self.apply_all)
+        apply_btn = self._apply_button
+        apply_btn.pack(side="left", padx=(12, 0))
+        # Same pending-change marker as the signal panel.
+        for var in (self._plot_min, self._plot_max, self._plot_buffer,
+                    self._frame_rate, self._trigger_on, self._trigger_level):
+            var.trace_add("write", lambda *_: self._mark_dirty())
+        self._dirty = False
+        _Tooltip(apply_btn,
+                 "Apply the plot fields above. Nothing here takes effect "
+                 "until this is pressed (Enter in any field does the same). "
+                 "Also puts the view back where these fields say, which is "
+                 "how you undo a toolbar pan or zoom.")
         _Tooltip(self._sat_button,
                  "SAT -- Static Analysis Tool. Opens sat.py in its own "
                  "window, on the newest logged buffer: spectra, peak "
                  "readout, and the board-vs-model comparison. A new click "
                  "opens another instance.")
-        col += 1
+
+    def _entry_h(self, frame, col, label, var, on_commit, width=8,
+                 help_text=None):
+        """_add_entry_horizontal, with the commit deferred to Apply."""
+        self._commits.append(on_commit)
+        return _add_entry_horizontal(frame, col, label, var, self.apply_all,
+                                     width=width, help_text=help_text)
+
+    def _mark_dirty(self):
+        if getattr(self, "_dirty", False):
+            return
+        self._dirty = True
+        if getattr(self, "_apply_button", None) is not None:
+            self._apply_button.config(text=_APPLY_BAR_DIRTY)
+
+    def apply_all(self):
+        """Commit every pending field in the plot bar.
+
+        Some of these (buffer length, y-limits) make plot.py reallocate and
+        redraw, which is another reason not to do it per keystroke.
+        """
+        seen = set()
+        for commit in self._commits:
+            # _apply_plot_ylim is registered by both Y min and Y max; running
+            # it twice would just redo the same work.
+            if commit in seen:
+                continue
+            seen.add(commit)
+            try:
+                commit()
+            except Exception as exc:                  # noqa: BLE001
+                print(f"[plot] {getattr(commit, '__name__', commit)} "
+                      f"failed: {exc}")
+        # Re-assert the view even when nothing in config changed: the axes
+        # may have been moved by the matplotlib toolbar since the last
+        # press, and "Apply" has to put them back where these fields say.
+        # See DualPlot.invalidate_view().
+        if self._plot is not None:
+            self._plot.invalidate_view()
+        self._dirty = False
+        self._apply_button.config(text=_APPLY_BAR_CLEAN)
 
     def _open_sat(self):
         try:
@@ -1140,10 +1462,9 @@ class PlotControlPanel:
             # Never let a dump failure take down the plot: this is a
             # diagnostic, and losing the live view to save a file would be a
             # bad trade. Report it in the panel and in the log, carry on.
-            self._dump_status.configure(text="dump failed")
             print(f"[plot] buffer dump failed: {exc}")
             return
-        self._dump_status.configure(text=path.name)
+        print(f"[plot] logged buffer to {path.name}")
 
     def _apply_trigger(self):
         config.PLOT_TRIGGER = bool(self._trigger_on.get())
@@ -1167,11 +1488,20 @@ class PlotControlPanel:
         except ValueError:
             # Reject the whole pair on a bad edit rather than guessing which
             # field was wrong -- both snap back to config's last-good values.
-            self._plot_min.set(str(config.PLOT_MIN))
-            self._plot_max.set(str(config.PLOT_MAX))
+            # Say so: silently replacing what someone just typed, with no
+            # message anywhere, is indistinguishable from the button being
+            # broken.
+            print(f"[plot] Y min/Y max rejected "
+                  f"({self._plot_min.get()!r}, {self._plot_max.get()!r}) -- "
+                  f"need two numbers with max > min; "
+                  f"full scale is 0..{config.WIRE_FULL_SCALE}")
+            self._plot_min.set(_fmt_limit(config.PLOT_MIN))
+            self._plot_max.set(_fmt_limit(config.PLOT_MAX))
             return
-        config.PLOT_MIN = lo
-        config.PLOT_MAX = hi
+        # Stored as int when the value is integral: these are sample
+        # counts, and they end up in the log sidecar's settings snapshot.
+        config.PLOT_MIN = int(lo) if lo.is_integer() else lo
+        config.PLOT_MAX = int(hi) if hi.is_integer() else hi
 
     def _apply_plot_buffer(self):
         try:
