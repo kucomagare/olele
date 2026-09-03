@@ -25,20 +25,20 @@ import sat
 FFT_SIZES = (0, 128, 256, 512, 1024, 2048, 4096, 8192)
 # Pipeline names only -- the implementation is its own dropdown, as in the
 # client's Local tab. Built from the registry rather than written out, so a
-# pipeline added in local_proc.py appears here with no edit.
+# pipeline added in pipelines.py appears here with no edit.
 def _pipes():
-    import local_proc
-    return ("none",) + tuple(sorted(local_proc.PIPELINES))
+    import pipelines
+    return ("none",) + tuple(sorted(pipelines.PIPELINES))
 
 
 def _impls(pipe):
-    import local_proc
-    return local_proc.implementations(pipe)
+    import pipelines
+    return pipelines.implementations(pipe)
 
 
 def _default_impl():
-    import local_proc
-    return local_proc.DEFAULT_IMPL
+    import pipelines
+    return pipelines.DEFAULT_IMPL
 
 
 def _split_model(model):
@@ -139,6 +139,14 @@ class SATWindow:
         self._settle = tk.StringVar(value=str(settle))
         self._file = tk.StringVar()
 
+        # What Defaults restores: the values this window opened with, which
+        # with no CLI arguments are sat.py's own defaults. The dump file is
+        # not in here -- that is what you are looking at, not a setting.
+        self._initial = {id(v): v.get() for v in
+                         (self._fft_size, self._fmax, self._db_min,
+                          self._peak_fmin, self._shift, self._settle,
+                          *self._pipe, *self._impl)}
+
         self._build_controls()
         self._build_report()
 
@@ -198,6 +206,13 @@ class SATWindow:
         recompute = ttk.Button(self.controls, text="Apply / Recompute",
                                command=self.refresh)
         recompute.pack(side="bottom", fill="x", pady=(6, 0))
+        defaults = ttk.Button(self.controls, text="Defaults",
+                              command=self.reset_defaults)
+        defaults.pack(side="bottom", fill="x", pady=(6, 0))
+        _Tooltip(defaults,
+                 "Put every field back to what this window opened with "
+                 "(sat.py's defaults, unless overridden on the command "
+                 "line) and recompute. The loaded dump is kept.")
         _Tooltip(recompute,
                  "Apply every field above and redraw. Nothing typed or "
                  "selected here takes effect until this is pressed (Enter "
@@ -311,6 +326,15 @@ class SATWindow:
                           "from zeroed state and the board did not, so the "
                           "first samples disagree for a reason that says "
                           "nothing about the algorithm.")
+
+    def reset_defaults(self):
+        """Every analysis field back to its startup value, then redraw."""
+        for var in (self._fft_size, self._fmax, self._db_min, self._peak_fmin,
+                    self._shift, self._settle, *self._pipe, *self._impl):
+            var.set(self._initial[id(var)])
+        for ch in range(2):
+            self._sync_impl(ch)
+        self.refresh()
 
     def _build_report(self):
         # A Text rather than a Label so the numbers can be selected and

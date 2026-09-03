@@ -41,7 +41,7 @@ from pathlib import Path
 
 import numpy as np
 
-# Run from anywhere: the sibling modules (spectrum, and local_proc for
+# Run from anywhere: the sibling modules (spectrum, and pipelines for
 # --model) live next to this file, not necessarily in the working directory.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -224,15 +224,15 @@ def analyse_channel(traces, ch, rate, full_scale, size, peak_fmin):
 def model_choices():
     """Every pipeline, and every pipeline:implementation pair.
 
-    Built from local_proc rather than written out here, so a pipeline added
-    there is immediately scorable offline without touching this file. The
-    import is deferred for the same reason compare_model's is: local_proc
-    pulls in numba, and a run without --model should not pay for it.
+    Built from pipelines.py rather than written out here, so a pipeline
+    added there is immediately scorable offline without touching this file.
+    The import is deferred for the same reason compare_model's is: the
+    filters pull in numba, and a run without --model should not pay for it.
     """
-    import local_proc
+    import pipelines
     out = []
-    for pipe in sorted(local_proc.PIPELINES):
-        impls = local_proc.implementations(pipe)
+    for pipe in sorted(pipelines.PIPELINES):
+        impls = pipelines.implementations(pipe)
         if impls:
             # A design pipeline: only the pairs are meaningful, since which
             # implementation ran is the whole question being asked.
@@ -246,7 +246,7 @@ def model_choices():
 
 
 def compare_model(traces, ch, algorithm, shift, settle, fs):
-    """Run a local_proc algorithm on the recorded input and score it against
+    """Run a pipelines.py algorithm on the recorded input and score it against
     the recorded output.
 
     This is the question the whole rig exists to answer -- did the hardware
@@ -258,7 +258,7 @@ def compare_model(traces, ch, algorithm, shift, settle, fs):
     state, the board did not, so the first samples of any capture disagree
     for a reason that says nothing about the algorithm.
     """
-    import local_proc
+    import pipelines
     src, ref = f"{ch}_in", f"{ch}_out"
     if src not in traces or ref not in traces:
         return None
@@ -270,7 +270,7 @@ def compare_model(traces, ch, algorithm, shift, settle, fs):
     # is. Same resolution the live app uses, so a capture scored here and the
     # same selection running live cannot mean different things.
     pipe, _, impl = algorithm.partition(":")
-    fn = local_proc.resolve(pipe, impl or local_proc.DEFAULT_IMPL)
+    fn = pipelines.resolve(pipe, impl or pipelines.DEFAULT_IMPL)
     if fn is None:
         return None
     # One channel per call -- the pipeline functions take a single channel,
@@ -278,7 +278,7 @@ def compare_model(traces, ch, algorithm, shift, settle, fs):
     # fs comes from the capture's own sidecar, not from this machine's
     # current config -- a dump analysed months later has to be filtered at
     # the rate it was recorded at, whatever the panel happens to say now.
-    modelled = fn(x, local_proc.new_state(), {"shift": shift, "fs": float(fs)})
+    modelled = fn(x, pipelines.new_state(), {"shift": shift, "fs": float(fs)})
     modelled = modelled.astype(np.float64)
 
     a = modelled[settle:]
@@ -385,7 +385,7 @@ def main(argv=None):
     ap.add_argument("--peak-fmin", type=float, default=1.0,
                     help="ignore bins below this when locating the peak")
     ap.add_argument("--model", choices=model_choices(),
-                    help="also run this local_proc pipeline on the recorded "
+                    help="also run this pipeline on the recorded "
                          "input and score it against the recorded output. "
                          "bypass and iir take no implementation; design "
                          "pipelines are named pipe:impl (e.g. pipe1:scipy). "

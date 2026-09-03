@@ -13,6 +13,7 @@ import collections
 
 import config
 import local_proc
+import pipelines
 import runctl
 from config import HOST, PORT, RECONNECT_DELAY
 from packet_format import (CONFIG_OP_READ, CONFIG_OP_WRITE, CONFIG_TYPE,
@@ -216,7 +217,7 @@ def _run_session(sock, plot_in_q, plot_out_q, stop_event):
     #
     # maxlen bounds it: if replies stop coming (board wedged, cable out) this
     # drops the oldest instead of growing without limit until the reconnect.
-    local_states = [local_proc.new_state(), local_proc.new_state()]
+    local_states = [pipelines.new_state(), pipelines.new_state()]
     sent_inputs = collections.deque(maxlen=256)
 
     packets_sent = 0

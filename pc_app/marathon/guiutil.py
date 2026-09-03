@@ -2,8 +2,8 @@
 # SAT (sat_gui.py).
 #
 # Its own module because those two are otherwise independent: sat_gui must not
-# import plot/control_panel (that would drag net and local_proc, and with them
-# numba, into an offline tool that needs none of them). One tiny module both
+# import plot/control_panel (that would drag net and the live worker, and
+# with them numba, into a tool that needs none of it). One tiny module both
 # can import keeps the two windows opening at the same size.
 
 import tkinter as tk

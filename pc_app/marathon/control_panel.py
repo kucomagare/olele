@@ -50,7 +50,7 @@ import numpy as np
 
 import config
 import guiutil
-import local_proc
+import pipelines
 import net
 import packet_format
 import runctl
@@ -213,6 +213,23 @@ GUI_SECTIONS = (
     )),
 )
 
+# Which config names each Defaults button restores -- the same ownership map,
+# so a knob added to GUI_SECTIONS is reset by the panel that shows it.
+#
+# Except these: they are the RUN, not settings. Defaulting CH_MODE moves the
+# data source out from under a running session (local mode back to board,
+# with nothing answering, so the processed trace just stops); SEND_ENABLED is
+# the Pause button and AUTOSTART only means anything at launch. A reset must
+# not decide where the signal comes from or whether it is flowing.
+_RUN_CONTROLS = ("CH_MODE", "SEND_ENABLED", "AUTOSTART")
+_PLOT_BAR = "Plot bar"
+PLOT_SETTINGS = tuple(n for title, names in GUI_SECTIONS
+                      if title == _PLOT_BAR for n in names
+                      if n not in _RUN_CONTROLS)
+SIGNAL_SETTINGS = tuple(n for title, names in GUI_SECTIONS
+                        if title != _PLOT_BAR for n in names
+                        if n not in _RUN_CONTROLS)
+
 
 # (display name, config attr for "enabled", config attr for "level", beta,
 #  short description of that color's character for its tooltip)
@@ -262,6 +279,8 @@ class SignalControlPanel:
         self._commits = []
         # Editable input variables, for the pending-change marker.
         self._watched = []
+        # config -> widget readers, for the Defaults button.
+        self._reloads = []
 
         ttk.Label(self.frame, text="Signal", font=("", 10, "bold")).pack(anchor="w", pady=(0, 6))
 
@@ -293,7 +312,7 @@ class SignalControlPanel:
             mode_row = ttk.Frame(self.frame)
             mode_row.pack(fill="x", pady=(0, 2 if ch == 0 else 6))
             ttk.Label(mode_row, text=f"Ch{ch + 1}").pack(side="left", padx=(0, 6))
-            var = tk.StringVar(value=config.CH_MODE[ch])
+            var = self._cvar(tk.StringVar, lambda c=ch: config.CH_MODE[c])
             self._mode.append(var)
             self._commits.append(self._apply_mode)
             self._watch(var)
@@ -355,10 +374,15 @@ class SignalControlPanel:
         # Directly under the tabs, so it is visible whichever tab is open --
         # a change made on Basic and one made on Noise are applied by the
         # same press.
-        self._apply_button = ttk.Button(self.frame, text=_APPLY_CLEAN,
+        buttons = ttk.Frame(self.frame)
+        buttons.pack(side="bottom", fill="x", pady=(6, 0))
+        self._apply_button = ttk.Button(buttons, text=_APPLY_CLEAN,
                                         command=self.apply_all)
         apply_btn = self._apply_button
-        apply_btn.pack(side="bottom", fill="x", pady=(6, 0))
+        apply_btn.pack(side="left", fill="x", expand=True)
+        defaults_btn = ttk.Button(buttons, text="Defaults",
+                                  command=self.reset_defaults)
+        defaults_btn.pack(side="left", padx=(6, 0))
 
         notebook.pack(fill="both", expand=True)
 
@@ -375,6 +399,12 @@ class SignalControlPanel:
                  "and SAT act immediately -- they are actions, not "
                  "settings, and the Board tab keeps its own Apply because "
                  "that one writes hardware registers.")
+        _Tooltip(defaults_btn,
+                 "Put every field in every tab back to config.py's startup "
+                 "value, and apply it now -- no second press. Does NOT touch "
+                 "the run: Start/Stop, Pause and the Board/Local mode stay "
+                 "as they are, and the Board tab keeps its registers (they "
+                 "have their own Apply).")
 
         # Watch every control for edits, so the button can say there is
         # something waiting. Without this a ticked checkbox looks broken:
@@ -547,6 +577,15 @@ class SignalControlPanel:
         self._watch(var)
         return _add_entry(frame, row, label, var, self.apply_all, width, help_text)
 
+    def _cvar(self, cls, source):
+        """A config-backed Tk variable: seeded from source() now, and
+        re-seeded from it by reset_defaults(). Registering the reader here
+        rather than writing a second config->widget pass keeps the two from
+        drifting when a field is added."""
+        var = cls(value=source())
+        self._reloads.append(lambda: var.set(source()))
+        return var
+
     def _watch(self, *variables):
         """Track these as editable inputs, for the pending-change marker.
 
@@ -594,6 +633,24 @@ class SignalControlPanel:
         self._apply_button.config(text=_APPLY_CLEAN)
         self.poll_state()
 
+    def reset_defaults(self):
+        """Put every setting this panel owns back to config.py's value.
+
+        Applied on the press, not staged: "reset" that needs a second button
+        to take effect is not a reset. Left alone: the run controls
+        (_RUN_CONTROLS) and the Board tab, whose fields are hardware
+        registers with their own Apply.
+        """
+        config.restore_defaults(SIGNAL_SETTINGS)
+        for reload_var in self._reloads:
+            reload_var()
+        for ch in range(2):
+            self._sync_impl(ch)
+        self._dirty = False
+        self._apply_button.config(text=_APPLY_CLEAN)
+        self.poll_state()
+        print("[panel] signal settings reset to defaults")
+
     # Local tab: the in-process algorithm and its parameters. Deliberately
     # separate from the Board tab even though "iir" models the same filter
     # -- the Board tab WRITES HARDWARE REGISTERS and reads back what the
@@ -608,7 +665,7 @@ class SignalControlPanel:
         row += 1
 
         # Two independent pairs of dropdowns, one per channel. Both are built
-        # from local_proc.PIPELINES, so adding a pipeline there makes it
+        # from pipelines.PIPELINES, so adding a pipeline there makes it
         # appear here with no edit to this file.
         self._pipe = []
         self._impl = []
@@ -616,10 +673,10 @@ class SignalControlPanel:
         for ch in range(2):
             ttk.Label(frame, text=f"Ch{ch + 1} pipe").grid(
                 row=row, column=0, sticky="w", pady=2)
-            pipe_var = tk.StringVar(value=config.CH_PIPE[ch])
+            pipe_var = self._cvar(tk.StringVar, lambda c=ch: config.CH_PIPE[c])
             self._pipe.append(pipe_var)
             pipe_combo = ttk.Combobox(frame, textvariable=pipe_var,
-                                      values=sorted(local_proc.PIPELINES),
+                                      values=sorted(pipelines.PIPELINES),
                                       width=8, state="readonly")
             pipe_combo.grid(row=row, column=1, sticky="e", pady=2)
             # Retargets the implementation dropdown at once -- that is
@@ -637,12 +694,12 @@ class SignalControlPanel:
                      "filter the board actually runs, including its "
                      "truncation bias and dead zone.\n"
                      "pipe1...: your pipelines. Add them in "
-                     "local_proc.PIPELINES and they appear here.")
+                     "pipelines.PIPELINES and they appear here.")
             row += 1
 
             ttk.Label(frame, text=f"Ch{ch + 1} impl").grid(
                 row=row, column=0, sticky="w", pady=(0, 6))
-            impl_var = tk.StringVar(value=config.CH_IMPL[ch])
+            impl_var = self._cvar(tk.StringVar, lambda c=ch: config.CH_IMPL[c])
             self._impl.append(impl_var)
             impl_combo = ttk.Combobox(frame, textvariable=impl_var,
                                       width=8, state="readonly")
@@ -663,7 +720,7 @@ class SignalControlPanel:
                      "which is the reason both are kept.")
             row += 1
 
-        self._local_shift = tk.StringVar(value=str(config.LOCAL_SHIFT))
+        self._local_shift = self._cvar(tk.StringVar, lambda: str(config.LOCAL_SHIFT))
         row = self._entry(frame, row, "Shift", self._local_shift,
                          self._apply_local_shift,
                          help_text="alpha = 1/2**shift, used by the iir "
@@ -682,7 +739,7 @@ class SignalControlPanel:
                        "still sent (both share one frame), but the board's "
                        "answer for them is discarded and replaced by the "
                        "pipeline's. Changing pipe or impl resets that "
-                       "channel's filter state. See local_proc.py."
+                       "channel's filter state. See pipelines.py."
                   ).grid(row=row, column=0, columnspan=2, sticky="w")
 
     def _sync_impl(self, ch):
@@ -698,7 +755,7 @@ class SignalControlPanel:
         combo = self._impl_combo[ch]
         # The variable, not config: this runs before Apply, so config still
         # holds the previous pipeline and would offer its implementations.
-        choices = local_proc.implementations(self._pipe[ch].get())
+        choices = pipelines.implementations(self._pipe[ch].get())
         if choices:
             combo["values"] = choices
             combo["state"] = "readonly"
@@ -717,10 +774,10 @@ class SignalControlPanel:
         with whatever the previous pipeline's implementation was.
         """
         name = self._pipe[ch].get()
-        if name in local_proc.PIPELINES:
+        if name in pipelines.PIPELINES:
             config.CH_PIPE[ch] = name
         impl = self._impl[ch].get()
-        if impl in local_proc.implementations(config.CH_PIPE[ch]):
+        if impl in pipelines.implementations(config.CH_PIPE[ch]):
             config.CH_IMPL[ch] = impl
 
     def _apply_local_shift(self):
@@ -761,8 +818,8 @@ class SignalControlPanel:
         paused = "" if config.SEND_ENABLED else ", paused"
         if config.all_local():
             return (f"running: local, "
-                    f"ch1 {local_proc.label(config.CH_PIPE[0], config.CH_IMPL[0])}, "
-                    f"ch2 {local_proc.label(config.CH_PIPE[1], config.CH_IMPL[1])}"
+                    f"ch1 {pipelines.label(config.CH_PIPE[0], config.CH_IMPL[0])}, "
+                    f"ch2 {pipelines.label(config.CH_PIPE[1], config.CH_IMPL[1])}"
                     f"{paused}")
         # "connected" only means the RELAY took the connection. The relay
         # accepts and discards everything when its other peer is gone, so a
@@ -777,7 +834,7 @@ class SignalControlPanel:
         # ch2 not what the board sent" is exactly the question this line
         # exists to answer.
         local = ", ".join(
-            f"ch{i + 1} {local_proc.label(config.CH_PIPE[i], config.CH_IMPL[i])}"
+            f"ch{i + 1} {pipelines.label(config.CH_PIPE[i], config.CH_IMPL[i])}"
             for i in range(2) if config.CH_MODE[i] == "local")
         mixed = f", local: {local}" if local else ""
         return f"running: board, {net.link_state}{mixed}{paused}"
@@ -795,14 +852,15 @@ class SignalControlPanel:
             self._status_var.set(status)
 
     def _build_basic_tab(self, frame):
-        self._send_rate = tk.StringVar(value=str(config.SEND_RATE))
-        self._chunk_size = tk.StringVar(value=str(config.CHUNK_SIZE))
-        self._heart_rate = tk.StringVar(value=str(config.ECG_HEART_RATE))
-        self._ecg_sample_rate = tk.StringVar(value=str(config.ECG_SAMPLING_RATE))
-        self._amplitude = tk.StringVar(value=f"{config.ECG_AMPLITUDE * 100:g}")
-        self._receive_enabled = tk.BooleanVar(value=config.RECEIVE_ENABLED)
-        self._offset = tk.StringVar(value=f"{config.ECG_OFFSET * 100:g}")
-        self._ecg_enabled = tk.BooleanVar(value=config.ECG_ENABLED)
+        V, S, B = self._cvar, tk.StringVar, tk.BooleanVar
+        self._send_rate = V(S, lambda: str(config.SEND_RATE))
+        self._chunk_size = V(S, lambda: str(config.CHUNK_SIZE))
+        self._heart_rate = V(S, lambda: str(config.ECG_HEART_RATE))
+        self._ecg_sample_rate = V(S, lambda: str(config.ECG_SAMPLING_RATE))
+        self._amplitude = V(S, lambda: f"{config.ECG_AMPLITUDE * 100:g}")
+        self._receive_enabled = V(B, lambda: config.RECEIVE_ENABLED)
+        self._offset = V(S, lambda: f"{config.ECG_OFFSET * 100:g}")
+        self._ecg_enabled = V(B, lambda: config.ECG_ENABLED)
 
         row = 0
         row = self._entry(frame, row, "Send rate (pkt/s)", self._send_rate, self._apply_send_rate,
@@ -867,13 +925,14 @@ class SignalControlPanel:
     # Waveform tab: nk.ecg_simulate()'s ECGSYN-model parameters.
     # ------------------------------------------------------------------
     def _build_waveform_tab(self, frame):
-        self._method = tk.StringVar(value=config.ECG_METHOD)
-        self._heart_rate_std = tk.StringVar(value=f"{config.ECG_HEART_RATE_STD:g}")
-        self._lfhfratio = tk.StringVar(value=f"{config.ECG_LFHFRATIO:g}")
-        self._ti = tk.StringVar(value=_format_5tuple(config.ECG_TI))
-        self._ai = tk.StringVar(value=_format_5tuple(config.ECG_AI))
-        self._bi = tk.StringVar(value=_format_5tuple(config.ECG_BI))
-        self._random_seed = tk.StringVar(value=str(config.ECG_RANDOM_SEED))
+        V, S = self._cvar, tk.StringVar
+        self._method = V(S, lambda: config.ECG_METHOD)
+        self._heart_rate_std = V(S, lambda: f"{config.ECG_HEART_RATE_STD:g}")
+        self._lfhfratio = V(S, lambda: f"{config.ECG_LFHFRATIO:g}")
+        self._ti = V(S, lambda: _format_5tuple(config.ECG_TI))
+        self._ai = V(S, lambda: _format_5tuple(config.ECG_AI))
+        self._bi = V(S, lambda: _format_5tuple(config.ECG_BI))
+        self._random_seed = V(S, lambda: str(config.ECG_RANDOM_SEED))
 
         row = 0
         method_lbl = ttk.Label(frame, text="Method")
@@ -935,7 +994,7 @@ class SignalControlPanel:
     # nk.signal_noise()-based colored noise added on top.
     # ------------------------------------------------------------------
     def _build_noise_tab(self, frame):
-        self._ecg_noise = tk.StringVar(value=f"{config.ECG_NOISE:g}")
+        self._ecg_noise = self._cvar(tk.StringVar, lambda: f"{config.ECG_NOISE:g}")
 
         row = 0
         row = self._entry(frame, row, "Built-in noise", self._ecg_noise, self._apply_ecg_noise,
@@ -959,8 +1018,10 @@ class SignalControlPanel:
         # allowed one color active at a time.
         self._noise_vars = {}
         for name, enabled_attr, level_attr, beta, character in _NOISE_ROWS:
-            enabled_var = tk.BooleanVar(value=getattr(config, enabled_attr))
-            level_var = tk.StringVar(value=f"{getattr(config, level_attr) * 100:g}")
+            enabled_var = self._cvar(tk.BooleanVar,
+                                     lambda a=enabled_attr: getattr(config, a))
+            level_var = self._cvar(
+                tk.StringVar, lambda a=level_attr: f"{getattr(config, a) * 100:g}")
             self._noise_vars[enabled_attr] = (enabled_var, level_var)
 
             cb = ttk.Checkbutton(frame, text=name, variable=enabled_var)
@@ -1003,10 +1064,12 @@ class SignalControlPanel:
         # same way, unlike the deliberately-decorrelated colored noise).
         self._sine_vars = {}
         for name, enabled_attr, freq_attr, phase_attr, level_attr in _SINE_ROWS:
-            enabled_var = tk.BooleanVar(value=getattr(config, enabled_attr))
-            freq_var = tk.StringVar(value=f"{getattr(config, freq_attr):g}")
-            phase_var = tk.StringVar(value=f"{getattr(config, phase_attr):g}")
-            level_var = tk.StringVar(value=f"{getattr(config, level_attr) * 100:g}")
+            V = self._cvar
+            enabled_var = V(tk.BooleanVar, lambda a=enabled_attr: getattr(config, a))
+            freq_var = V(tk.StringVar, lambda a=freq_attr: f"{getattr(config, a):g}")
+            phase_var = V(tk.StringVar, lambda a=phase_attr: f"{getattr(config, a):g}")
+            level_var = V(tk.StringVar,
+                          lambda a=level_attr: f"{getattr(config, a) * 100:g}")
             self._sine_vars[enabled_attr] = (enabled_var, freq_var, phase_var, level_var)
 
             cb = ttk.Checkbutton(frame, text=f"{name} enabled", variable=enabled_var)
@@ -1300,13 +1363,15 @@ class PlotControlPanel:
         # Same deferred-commit model as SignalControlPanel -- see the comment
         # above that class.
         self._commits = []
+        self._reloads = []
 
-        self._plot_min = tk.StringVar(value=_fmt_limit(config.PLOT_MIN))
-        self._plot_max = tk.StringVar(value=_fmt_limit(config.PLOT_MAX))
-        self._plot_buffer = tk.StringVar(value=str(config.PLOT_BUFFER))
-        self._frame_rate = tk.StringVar(value=str(config.FRAME_RATE))
-        self._trigger_on = tk.BooleanVar(value=bool(config.PLOT_TRIGGER))
-        self._trigger_level = tk.StringVar(value=str(config.PLOT_TRIGGER_LEVEL))
+        V, S, B = self._cvar, tk.StringVar, tk.BooleanVar
+        self._plot_min = V(S, lambda: _fmt_limit(config.PLOT_MIN))
+        self._plot_max = V(S, lambda: _fmt_limit(config.PLOT_MAX))
+        self._plot_buffer = V(S, lambda: str(config.PLOT_BUFFER))
+        self._frame_rate = V(S, lambda: str(config.FRAME_RATE))
+        self._trigger_on = V(B, lambda: bool(config.PLOT_TRIGGER))
+        self._trigger_level = V(S, lambda: str(config.PLOT_TRIGGER_LEVEL))
 
         # Two groups, not one long grid row: the buttons are packed to the
         # RIGHT edge and the fields fill what is left. In one grid, a window
@@ -1340,9 +1405,9 @@ class PlotControlPanel:
         col = self._entry_h(fields, col, "Y max", self._plot_max,
                             self._apply_plot_ylim, width=11,
                             help_text=ylim_help)
-        col = self._entry_h(fields, col, "Buffer (smp)", self._plot_buffer,
+        col = self._entry_h(fields, col, "Buffer", self._plot_buffer,
                                      self._apply_plot_buffer)
-        col = self._entry_h(fields, col, "Frame rate (fps)", self._frame_rate,
+        col = self._entry_h(fields, col, "FPS", self._frame_rate,
                                      self._apply_frame_rate)
 
         # Scope trigger. Without it the window shows whatever phase happened
@@ -1353,7 +1418,7 @@ class PlotControlPanel:
                         variable=self._trigger_on).grid(
             row=0, column=col, sticky="w", padx=(0, 8))
         col += 1
-        col = self._entry_h(fields, col, "Level (0-1)", self._trigger_level,
+        col = self._entry_h(fields, col, "Level", self._trigger_level,
                                      self._apply_trigger)
 
         # Writes the on-screen window of all four traces to a CSV under
@@ -1389,6 +1454,12 @@ class PlotControlPanel:
                                         command=self.apply_all)
         apply_btn = self._apply_button
         apply_btn.pack(side="left", padx=(12, 0))
+        defaults_btn = ttk.Button(buttons, text="Defaults",
+                                  command=self.reset_defaults)
+        defaults_btn.pack(side="left", padx=(4, 0))
+        _Tooltip(defaults_btn,
+                 "Put the plot fields back to config.py's startup values and "
+                 "apply them now.")
         # Same pending-change marker as the signal panel.
         for var in (self._plot_min, self._plot_max, self._plot_buffer,
                     self._frame_rate, self._trigger_on, self._trigger_level):
@@ -1404,6 +1475,12 @@ class PlotControlPanel:
                  "window, on the newest logged buffer: spectra, peak "
                  "readout, and the board-vs-model comparison. A new click "
                  "opens another instance.")
+
+    def _cvar(self, cls, source):
+        """Config-backed variable -- see SignalControlPanel._cvar."""
+        var = cls(value=source())
+        self._reloads.append(lambda: var.set(source()))
+        return var
 
     def _entry_h(self, frame, col, label, var, on_commit, width=8,
                  help_text=None):
@@ -1445,6 +1522,17 @@ class PlotControlPanel:
             self._plot.invalidate_view()
         self._dirty = False
         self._apply_button.config(text=_APPLY_BAR_CLEAN)
+
+    def reset_defaults(self):
+        """Plot settings back to config.py's values, applied on the press."""
+        config.restore_defaults(PLOT_SETTINGS)
+        for reload_var in self._reloads:
+            reload_var()
+        if self._plot is not None:
+            self._plot.invalidate_view()
+        self._dirty = False
+        self._apply_button.config(text=_APPLY_BAR_CLEAN)
+        print("[plot] plot settings reset to defaults")
 
     def _open_sat(self):
         try:

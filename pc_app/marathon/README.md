@@ -14,9 +14,12 @@ control_panel.py       Tkinter panel packed beside the plot -- Start/Stop, mode,
                       live SEND_RATE, CHUNK_SIZE, heart rate, filter
 net.py                 owns the socket: connect, send/receive loop, auto-reconnect
 runctl.py              the Start/Stop gate, shared by the GUI and both workers
-local_proc.py          local processing mode: generate/process/plot in-process,
-                      no socket, no relay, no board. Integer algorithms meant
-                      to be translated to VHDL; "iir" models axi_tdm_filter.vhd
+pipelines.py           the processing functions themselves, and everything
+                      needed to add one. Integer algorithms meant to be
+                      translated to VHDL; "iir" models axi_tdm_filter.vhd
+local_proc.py          runs them: local processing mode (generate/process/plot
+                      in-process, no socket, no relay, no board), dispatch,
+                      filter state, worker thread
 spectrum.py            rfft -> dBFS magnitudes + peak finder (used by sat.py)
 sat.py                 SAT (Static Analysis Tool) -- OFFLINE analysis of a
                       logged buffer: spectra, tone attenuation, and the
@@ -39,9 +42,17 @@ widget inside the same Tk window `plot.py`'s `DualPlot` creates (see its
 `__init__`) — no second Tk root/mainloop. `SignalControlPanel` is the
 right-hand column: Start/Stop, the mode picker and a status line above five
 tabs — **Basic**, **Waveform**, **Noise**, **Board** (live metrics, the
-fabric's filter registers, UART verbosity) and **Local** (the in-process
-algorithm and its shift). `PlotControlPanel` is the bottom bar: view range,
-buffer, frame rate, trigger and Log buffer. Everything is live: it writes straight onto `config`'s
+fabric's filter registers, UART verbosity) and **Local** (each channel's
+pipeline and implementation). `PlotControlPanel` is the bottom bar: view range,
+buffer, frame rate, trigger and Log buffer.
+
+Fields are **batched**: typing or ticking changes only the widget, and
+**Apply** (or Enter in any field) commits the lot in one pass — a `●` on the
+button means something is waiting. **Defaults** puts every field that panel
+owns back to `config.py`'s startup value and applies it on the press — the
+run is left alone (Start/Stop, Pause and the Board/Local mode stay put). Both
+panels have their own pair; the Board tab keeps its own Apply because that
+one writes hardware registers. Applied values go straight onto `config`'s
 module attributes, and `net.py`/`signal_gen.py` read those live (`import
 config; config.SEND_RATE`, not a value frozen at import time), so a change
 takes effect within one send cycle. `SEND_RATE × CHUNK_SIZE` is the
@@ -93,9 +104,13 @@ it was RTL. The built-in `iir` is a bit-accurate model of
 `axi_tdm_filter.vhd` — it reproduces the documented −15-count steady-state
 bias at `SHIFT=4` and is an exact bypass at `SHIFT=0`.
 
-To add one: write a function taking `(ch1, ch2, state, params)` returning
-`(out1, out2)`, register it in `local_proc.ALGORITHMS`, and it appears in
-the **Local** tab's dropdown. Keep it integer.
+To add one, edit **`pipelines.py`** only: write `fn(x, state, params)` for
+one channel (wire dtype in and out) and add a line to `PIPELINES`. A design
+pipeline is registered as a `{"scipy": ..., "manual": ...}` pair — the float
+version says what the filter should do, the integer one what it will do as
+RTL — and it appears in both GUIs' dropdowns and in SAT with no other edit.
+`bypass` and `iir` are registered as bare functions: single fixed things
+with no implementation to choose.
 
 Both workers are always alive and each idles unless it owns the current
 mode, so switching is a live attribute write with no thread lifecycle to get
@@ -165,7 +180,7 @@ Two things it reports:
   located peaks would report a meaningless number. Inject a tone, read the
   delta, step the frequency, and you have the filter's response curve.
 - **The hardware against a model** (`--model iir`). Runs the bit-accurate
-  `local_proc` model on the recorded input and scores it against the
+  `pipelines` model on the recorded input and scores it against the
   recorded output — max/mean error in counts, the signed mean (which is the
   truncation bias), and correlation. This is the "did the hardware compute
   what I think it computed" check, and a file is the right place to ask it:

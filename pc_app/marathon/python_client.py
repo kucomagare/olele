@@ -50,13 +50,13 @@ def main():
         try:
             import numpy as np
             from signal_gen import generate_ecg_chunk
-            import local_proc
+            import pipelines
             generate_ecg_chunk(0)
             # One channel's worth is enough -- the numba compile is per
             # kernel, not per channel, and every pipeline that uses it goes
             # through the same one.
-            local_proc.iir(np.zeros(8, dtype=">u4"),
-                           local_proc.new_state(), {"shift": 4})
+            pipelines.iir(np.zeros(8, dtype=">u4"),
+                          pipelines.new_state(), {"shift": 4})
         except Exception as exc:                      # noqa: BLE001
             # Warming is an optimisation, never a requirement -- if it fails,
             # the worker just pays the cost itself the way it used to.

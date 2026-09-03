@@ -432,7 +432,7 @@ AUTOSTART = False
 # run -- and to work at all when no hardware is present. Its algorithms are
 # written the way fabric has to compute (integer, fixed width, explicit
 # wrapping, per-channel state), so what is seen here is what the RTL will
-# do; see local_proc.py's header for the rule and how to add one.
+# do; see pipelines.py's header for the rule and how to add one.
 #
 # Live-switchable from the panel, PER CHANNEL. Index 0 is ch1, index 1 is ch2.
 #
@@ -472,8 +472,8 @@ def all_local():
     return all(m == "local" for m in CH_MODE)
 
 
-# Which local_proc pipeline each channel runs, and in which implementation.
-# Both are keys into local_proc.PIPELINES, and the panel builds its dropdowns
+# Which pipeline each channel runs, and in which implementation.
+# Both are keys into pipelines.PIPELINES, and the panel builds its dropdowns
 # from that dict -- so adding a pipeline there needs no edit here beyond
 # choosing a different default.
 #
@@ -502,3 +502,27 @@ SEND_ENABLED = True
 RECEIVE_ENABLED = True
 
 RECONNECT_DELAY = 1.0  # seconds between reconnect attempts after a dropped/failed connection
+
+
+# --- Defaults ------------------------------------------------------------
+# Snapshot of every knob as written above, taken at import before anything
+# can edit one. This is what the panels' "Defaults" buttons restore, so the
+# defaults live in exactly one place: the value beside its own comment.
+# Lists are copied, or restoring would hand back the object the panel has
+# been mutating all along.
+_DEFAULTS = {name: (list(value) if isinstance(value, list) else value)
+             for name, value in list(globals().items())
+             if name.isupper() and not name.startswith("_")}
+
+
+def default_value(name):
+    value = _DEFAULTS[name]
+    return list(value) if isinstance(value, list) else value
+
+
+def restore_defaults(names):
+    """Put `names` back to their startup values. Returns those restored."""
+    restored = [n for n in names if n in _DEFAULTS]
+    for name in restored:
+        globals()[name] = default_value(name)
+    return restored
