@@ -15,6 +15,7 @@ PLOT_BUFFER = 2048
 # Read from the wire format, not hardcoded: marathon's 32-bit TDM slots
 # (sizif used 16) would show nothing against a stale 0..65535 window.
 import numpy as _np
+import spectrum as _spectrum
 from packet_format import CH1_DTYPE as _CH1_DTYPE
 _WIRE_MAX = int(_np.iinfo(_CH1_DTYPE).max)
 
@@ -122,7 +123,7 @@ SEND_RATE = 64
 # buffer needs both a whole number of frames and a multiple of 32 bytes;
 # with 32-bit slots, 8 frames satisfies both for any channel count. One
 # packet per DMA buffer, so this is the frames-per-packet count.
-CHUNK_SIZE = 8
+CHUNK_SIZE = 16
 
 # Mirrors MAX_SAMPLES in tcp_server_app.cpp / MAX_PAYLOAD_SAMPLES in
 # lwip_comm_client_raw.c -- the wire/firmware hard ceiling. Panel clamps to
@@ -232,31 +233,31 @@ ECG_NOISE_BROWN_CH2_LEVEL = 0.1
 # ECG peak-to-peak (same convention as noise _LEVEL above, so equal levels
 # = equal amplitudes on both channels). _PHASE in degrees.
 ECG_SINE1_CH1_ENABLED = False
-ECG_SINE1_CH1_FREQ = 50.0     # Hz -- EU/UK/most-of-world mains
+ECG_SINE1_CH1_FREQ = 0.02     # Hz -- EU/UK/most-of-world mains
 ECG_SINE1_CH1_PHASE = 0.0     # degrees
-ECG_SINE1_CH1_LEVEL = 0.1
+ECG_SINE1_CH1_LEVEL = 0.25
 ECG_SINE1_CH2_ENABLED = False
-ECG_SINE1_CH2_FREQ = 50.0
+ECG_SINE1_CH2_FREQ = 0.02
 ECG_SINE1_CH2_PHASE = 0.0
-ECG_SINE1_CH2_LEVEL = 0.1
+ECG_SINE1_CH2_LEVEL = 0.25
 
 ECG_SINE2_CH1_ENABLED = False
-ECG_SINE2_CH1_FREQ = 60.0     # Hz -- US/North America mains
+ECG_SINE2_CH1_FREQ = 30.0     # Hz -- US/North America mains
 ECG_SINE2_CH1_PHASE = 0.0
-ECG_SINE2_CH1_LEVEL = 0.1
+ECG_SINE2_CH1_LEVEL = 0.15
 ECG_SINE2_CH2_ENABLED = False
-ECG_SINE2_CH2_FREQ = 60.0
+ECG_SINE2_CH2_FREQ = 30.0
 ECG_SINE2_CH2_PHASE = 0.0
-ECG_SINE2_CH2_LEVEL = 0.1
+ECG_SINE2_CH2_LEVEL = 0.15
 
 ECG_SINE3_CH1_ENABLED = False
-ECG_SINE3_CH1_FREQ = 100.0    # Hz -- 2nd harmonic of 50, what a notch at the
+ECG_SINE3_CH1_FREQ = 50.0    # Hz -- 2nd harmonic of 50, what a notch at the
 ECG_SINE3_CH1_PHASE = 0.0     # fundamental alone leaves behind
-ECG_SINE3_CH1_LEVEL = 0.05
+ECG_SINE3_CH1_LEVEL = 0.20
 ECG_SINE3_CH2_ENABLED = False
-ECG_SINE3_CH2_FREQ = 100.0
+ECG_SINE3_CH2_FREQ = 50.0
 ECG_SINE3_CH2_PHASE = 0.0
-ECG_SINE3_CH2_LEVEL = 0.05
+ECG_SINE3_CH2_LEVEL = 0.20
 
 ECG_SINE4_CH1_ENABLED = False
 ECG_SINE4_CH1_FREQ = 150.0    # Hz -- 3rd harmonic, and pipe2's LP corner
@@ -375,10 +376,25 @@ SAT_LOG_DIR = "build/logs"          # relative to marathon/
 
 # --- capture view ---------------------------------------------------------
 SAT_FFT_SIZE = 0            # samples transformed; 0 = the whole capture
+# Samples between successive FFT windows; 0 = a single window (no sliding).
+# Called "hop", not "shift" -- SAT_SHIFT below is the board's fixed-point
+# bit-shift register, an unrelated setting that already owns that name.
+SAT_FFT_HOP = 0
+SAT_FFT_AVERAGE = True       # tick: Welch-average the per-window spectra
+                             # into one curve, instead of overlaying each
+# Magnitude window function. hann for ECG specifically: its sidelobes roll
+# off at -18 dB/octave (continuous derivative at the window edges), well
+# past Hamming's -6 dB/octave -- and the QRS complex is exactly the kind of
+# strong, broadband spike whose leakage would otherwise bury the much
+# weaker high-frequency content (EMG noise band, distant harmonics) sitting
+# far from it in the spectrum. Its main lobe is also narrower than
+# Blackman/flattop's, so it doesn't cost much resolution to get that.
+SAT_WINDOW = "hann"
+SAT_WINDOW_CHOICES = _spectrum.WINDOW_CHOICES
 SAT_FMAX = 0.0              # spectrum axis limit, Hz; 0 = Nyquist
-SAT_DB_MIN = -120.0         # bottom of the magnitude axis; both views
+SAT_DB_MIN = -180.0         # bottom of the magnitude axis; both views
 SAT_PEAK_FMIN = 1.0         # ignore bins below this when locating the peak
-SAT_PHASE = "out-in"        # phase column: off / out-in / raw
+SAT_PHASE = "off"        # phase column: off / out-in / raw
 SAT_PHASE_UNITS = "deg"     # deg / phase ms / group ms; both views
 
 # The reference-model comparison. None leaves a channel unscored, and a

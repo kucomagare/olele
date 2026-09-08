@@ -121,6 +121,9 @@ class SATWindow:
     # both carried their own copies the two could drift apart unnoticed.
     def __init__(self, log_dir, path=None,
                  fft_size=config.SAT_FFT_SIZE,
+                 fft_hop=config.SAT_FFT_HOP,
+                 fft_average=config.SAT_FFT_AVERAGE,
+                 fft_window=config.SAT_WINDOW,
                  fmax=config.SAT_FMAX,
                  db_min=config.SAT_DB_MIN,
                  peak_fmin=config.SAT_PEAK_FMIN,
@@ -171,6 +174,11 @@ class SATWindow:
             child.pack(**info)
 
         self._fft_size = tk.StringVar(value=_size_label(fft_size))
+        self._fft_hop = tk.StringVar(value=str(fft_hop))
+        self._fft_average = tk.BooleanVar(value=fft_average)
+        self._fft_window = tk.StringVar(
+            value=fft_window if fft_window in config.SAT_WINDOW_CHOICES
+            else config.SAT_WINDOW)
         self._fmax = tk.StringVar(value=f"{fmax:g}")
         self._db_min = tk.StringVar(value=f"{db_min:g}")
         self._peak_fmin = tk.StringVar(value=f"{peak_fmin:g}")
@@ -240,7 +248,8 @@ class SATWindow:
         # What Defaults restores -- the dump file isn't in here, it's what
         # you're looking at, not a setting.
         self._initial = {id(v): v.get() for v in
-                         (self._fft_size, self._fmax, self._db_min,
+                         (self._fft_size, self._fft_hop, self._fft_average,
+                          self._fft_window, self._fmax, self._db_min,
                           self._peak_fmin, self._phase, self._phase_units,
                           self._shift, self._settle,
                           self._view, self._resp_size, self._resp_points,
@@ -473,6 +482,48 @@ class SATWindow:
                  "interpolate between real bins and pull the apparent noise "
                  "floor down.")
         row = 1
+        row = self._entry(f, row, "Hop", self._fft_hop,
+                          "0 -- Size is one window, taken from the newest "
+                          "samples (as above). Above 0 -- instead of one "
+                          "window, step Size-sample windows across the "
+                          "*whole* capture starting at sample 0, moving "
+                          "this many samples each step, stopping once the "
+                          "next window would run past the end. E.g. a "
+                          "2048-sample capture with Size 1024 and Hop 512 "
+                          "gives windows at 0, 512, 1024. Ignored when "
+                          "Size is \"capture\" -- there is only one window "
+                          "to hop between. Called Hop, not Shift -- Shift "
+                          "(Model tab) is the board's bit-shift register, "
+                          "an unrelated setting.")
+        avg_box = ttk.Checkbutton(f, text="Average windows (Welch)",
+                                  variable=self._fft_average)
+        avg_box.grid(row=row, column=0, columnspan=2, sticky="w", pady=2)
+        _Tooltip(avg_box,
+                 "Only matters when Hop makes more than one window. Off: "
+                 "every window is drawn as its own line, newest most "
+                 "opaque -- watch the spectrum move across the capture. "
+                 "On: the windows are combined into one smoother curve by "
+                 "averaging power across them (Welch's method), trading "
+                 "the per-window detail for a less noisy estimate. Report "
+                 "numbers (peak, dB) follow whichever is showing.")
+        row += 1
+        ttk.Label(f, text="Window").grid(row=row, column=0, sticky="w", pady=2)
+        window_box = ttk.Combobox(f, textvariable=self._fft_window, width=8,
+                                  state="readonly",
+                                  values=list(config.SAT_WINDOW_CHOICES))
+        window_box.grid(row=row, column=1, sticky="e", pady=2)
+        _Tooltip(window_box,
+                 "The taper applied to each window before the FFT. hann is "
+                 "the default and a reasonable one for most signals. "
+                 "\"none\" is rectangular -- no taper -- which gives the "
+                 "narrowest peak but the worst leakage into neighbouring "
+                 "bins; the rest trade those two off differently (e.g. "
+                 "flattop reads amplitude most accurately at the cost of "
+                 "the widest peak). Every choice here is scipy.signal."
+                 "windows' zero-parameter functions -- kaiser, gaussian and "
+                 "a few others take an extra shape number and are left out "
+                 "rather than half-wired to one fixed value.")
+        row += 1
         row = self._entry(f, row, "F max (Hz)", self._fmax,
                           "Frequency axis limit for the spectra. 0 = Nyquist. "
                           "The response view has its own F min / F max, since "
@@ -905,7 +956,8 @@ class SATWindow:
 
     def reset_defaults(self):
         """Every analysis field back to its startup value, then redraw."""
-        for var in (self._fft_size, self._fmax, self._db_min, self._peak_fmin,
+        for var in (self._fft_size, self._fft_hop, self._fft_average,
+                    self._fft_window, self._fmax, self._db_min, self._peak_fmin,
                     self._phase, self._phase_units, self._shift, self._settle,
                     self._view, self._resp_size,
                     self._resp_points, self._resp_drive, self._resp_averages,
@@ -1016,6 +1068,9 @@ class SATWindow:
         if self.traces is None:
             return
         size = _size_value(self._fft_size.get())
+        fft_hop = max(0, self._number(self._fft_hop, 0, int))
+        fft_average = self._fft_average.get()
+        fft_window = self._fft_window.get()
         fmax = max(0.0, self._number(self._fmax, 0.0))
         db_min = min(-6.0, self._number(self._db_min, -120.0))
         peak_fmin = max(0.0, self._number(self._peak_fmin, 1.0))
@@ -1061,7 +1116,9 @@ class SATWindow:
             if f"{ch}_in" not in self.traces and f"{ch}_out" not in self.traces:
                 continue
             r, c = sat.analyse_channel(self.traces, ch, self.info["rate"],
-                                            full_scale, size, peak_fmin)
+                                            full_scale, size, peak_fmin,
+                                            hop=fft_hop, average=fft_average,
+                                            window=fft_window)
             results.append(r)
             curves[ch] = c
 
@@ -1208,9 +1265,21 @@ class SATWindow:
             ax_t.grid(alpha=0.3)
 
             for direction, color in (("in", "tab:blue"), ("out", "tab:red")):
-                if direction in curves_by_ch.get(ch, {}):
-                    f, db = curves_by_ch[ch][direction]
-                    ax_f.plot(f, db, color=color, lw=0.8, label=direction)
+                curve_list = curves_by_ch.get(ch, {}).get(direction)
+                if not curve_list:
+                    continue
+                n_curves = len(curve_list)
+                for i, (f, db) in enumerate(curve_list):
+                    # Older windows fade out, newest is fully opaque -- a
+                    # single window (the common case) is drawn solid, same
+                    # as before this had a Hop field at all.
+                    alpha = (1.0 if n_curves == 1
+                             else 0.25 + 0.75 * (i + 1) / n_curves)
+                    # One legend entry per direction, on the newest window
+                    # -- one per overlaid window would swamp it.
+                    label = direction if i == n_curves - 1 else None
+                    ax_f.plot(f, db, color=color, lw=0.8, alpha=alpha,
+                             label=label)
             ax_f.set_title(f"{ch} — spectrum")
             ax_f.set_xlabel("Frequency (Hz)")
             ax_f.set_ylabel("dBFS")

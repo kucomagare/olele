@@ -177,34 +177,60 @@ def wire_full_scale(traces, info=None):
     return 2.0 ** 32 - 1 if peak > 65535 else 65535.0
 
 
-def analyse_channel(traces, ch, rate, full_scale, size, peak_fmin):
+def analyse_channel(traces, ch, rate, full_scale, size, peak_fmin,
+                    hop=0, average=False, window="hann"):
     """Spectra of one channel's in/out, plus the peak comparison between
-    them. Returns (result dict, {label: (freqs, db)})."""
+    them. Returns (result dict, {label: [(freqs, db), ...]}).
+
+    curves[direction] is always a list -- one entry normally, or one per
+    sliding window when hop>0 and average is False (each window meant
+    to be drawn as its own overlaid line), so callers never need two
+    shapes. hop>0 with average=True collapses the windows back to a
+    single Welch-averaged entry.
+
+    `hop` on purpose, not "shift" -- that name is already the board's
+    fixed-point bit-shift register elsewhere in this app (see `shift`
+    param of compare_model/model_params).
+    """
     curves, result = {}, {"channel": ch}
-    win = {}
+    n_ref, n_windows = None, 1
     for direction in ("in", "out"):
         key = f"{ch}_{direction}"
         if key not in traces:
             continue
-        samples = traces[key][-size:] if size else traces[key]
-        win[direction] = samples
-        curves[direction] = spectrum.spectrum(samples, rate, full_scale)
+        samples = np.asarray(traces[key])
+        n_total = len(samples)
+        seg_len = size if 0 < size < n_total else n_total
+        if n_ref is None:
+            n_ref = seg_len
+        segs = spectrum.spectra(samples, rate, full_scale, size, hop, window)
+        n_windows = max(n_windows, len(segs))
+        if average and len(segs) > 1:
+            curves[direction] = [spectrum.average_spectrum(
+                [(f, db) for _, f, db in segs])]
+        else:
+            curves[direction] = [(f, db) for _, f, db in segs]
     if "in" not in curves and "out" not in curves:
         return None, curves
 
-    result["n"] = len(next(iter(win.values())))
-    result["resolution"] = rate / result["n"]
+    result["n"] = n_ref
+    result["resolution"] = rate / n_ref
+    result["n_windows"] = n_windows
+    result["averaged"] = bool(average and n_windows > 1)
 
     # Locate on the input when present, read both there -- a working filter
     # moves the output peak, so independently-located peaks would compare
-    # two different frequencies.
+    # two different frequencies. Uses the newest window (last in the list)
+    # -- the same "most recent data" bias a single tail-anchored window
+    # already had.
     ref = "in" if "in" in curves else "out"
-    f, db = curves[ref]
+    f, db = curves[ref][-1]
     i = spectrum.peak(f, db, peak_fmin)
     if i is None:
         return result, curves
     result["peak_hz"] = float(f[i])
-    for direction, (_f, _db) in curves.items():
+    for direction, curve_list in curves.items():
+        _f, _db = curve_list[-1]
         if i < _db.size:
             result[f"{direction}_dbfs"] = float(_db[i])
     if "in_dbfs" in result and "out_dbfs" in result:
@@ -929,6 +955,9 @@ def format_report(info, results, models, responses=(), gains=(), phases=()):
             continue
         line = (f"    {r['channel']:8} N={r['n']:<6} {r['resolution']:.2f} Hz/bin"
                 f"   peak {r['peak_hz']:8.2f} Hz")
+        if r.get("n_windows", 1) > 1:
+            mode = "avg" if r.get("averaged") else "overlaid"
+            line += f"   windows={r['n_windows']} ({mode})"
         if "in_dbfs" in r:
             line += f"   in {r['in_dbfs']:7.2f}"
         if "out_dbfs" in r:
@@ -1043,6 +1072,20 @@ def main(argv=None):
     ap.add_argument("--fft-size", type=int, default=config.SAT_FFT_SIZE,
                     help="samples to transform, from the newest end "
                          "(0 = the whole capture). Truncates, never zero-pads")
+    ap.add_argument("--fft-hop", type=int, default=config.SAT_FFT_HOP,
+                    help="0 = --fft-size is a single window from the "
+                         "newest samples. Above 0, step --fft-size windows "
+                         "across the whole capture starting at sample 0, "
+                         "hopping this many samples each step. Not "
+                         "--shift, which is the board's bit-shift register")
+    ap.add_argument("--fft-average", action=argparse.BooleanOptionalAction,
+                    default=config.SAT_FFT_AVERAGE,
+                    help="with --fft-hop, Welch-average the per-window "
+                         "spectra into one curve instead of overlaying each "
+                         "(default: %(default)s; --no-fft-average to overlay)")
+    ap.add_argument("--window", default=config.SAT_WINDOW,
+                    choices=config.SAT_WINDOW_CHOICES,
+                    help="magnitude window function (default: %(default)s)")
     ap.add_argument("--fmax", type=float, default=config.SAT_FMAX,
                     help="frequency axis limit, Hz (0 = Nyquist)")
     ap.add_argument("--db-min", type=float, default=config.SAT_DB_MIN,
@@ -1184,6 +1227,8 @@ def main(argv=None):
         import sat_gui
         sat_gui.SATWindow(
             log_dir=Path(args.log_dir), path=path, fft_size=args.fft_size,
+            fft_hop=args.fft_hop, fft_average=args.fft_average,
+            fft_window=args.window,
             fmax=args.fmax, db_min=args.db_min, peak_fmin=args.peak_fmin,
             phase=args.phase, phase_units=args.phase_units,
             model=args.model_ch1 or args.model,
@@ -1212,7 +1257,9 @@ def main(argv=None):
         if f"{ch}_in" not in traces and f"{ch}_out" not in traces:
             continue
         r, curves = analyse_channel(traces, ch, info["rate"], full_scale,
-                                     args.fft_size, args.peak_fmin)
+                                     args.fft_size, args.peak_fmin,
+                                     hop=args.fft_hop, average=args.fft_average,
+                                     window=args.window)
         results.append(r)
         curves_by_ch[ch] = curves
 
