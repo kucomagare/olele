@@ -88,10 +88,16 @@ alias proj="cd \"\$REPO_PATH\" && \"\$REPO_PATH/proj\""
 alias build="cd \"\$REPO_PATH\" && \"\$REPO_PATH/proj\" build"
 alias compile="cd \"\$REPO_PATH\" && \"\$REPO_PATH/proj\" compile"
 alias run="cd \"\$REPO_PATH\" && \"\$REPO_PATH/proj\" run"
+# run_gen: Python client ONLY -- no C++ relay, no board -- CH_MODE
+# defaulted to "local" (see config.py's CH_MODE_DEFAULT) -- straight into
+# board-free filter design/static analysis, no per-launch mode switch.
+alias run_gen="cd \"\$REPO_PATH\" && \"\$REPO_PATH/proj\" gen"
+# run_sat: the SAT (buffer-analysis) GUI -- reads dumps, no board/relay.
+alias run_sat="cd \"\$REPO_PATH\" && \"\$REPO_PATH/proj\" sat"
 alias stop="cd \"\$REPO_PATH\" && \"\$REPO_PATH/proj\" stop"
 alias clean="cd \"\$REPO_PATH\" && \"\$REPO_PATH/proj\" clean"
 
 echo "bootenv: REPO_PATH=$REPO_PATH"
 echo "bootenv: SYSTEM_CMAKE=$SYSTEM_CMAKE"
 echo "bootenv: VARIANT=$VARIANT  (override: export VARIANT=<project>)"
-echo "bootenv: aliases: repo, cdvivado, cdvitis, cdpcapp, bootenv, proj, build, compile, run, stop, clean"
+echo "bootenv: aliases: repo, cdvivado, cdvitis, cdpcapp, bootenv, proj, build, compile, run, run_gen, run_sat, stop, clean"

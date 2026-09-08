@@ -302,7 +302,15 @@ AUTOSTART = False
 # Thread ownership follows from this: any channel "board" -> net.tcp_thread
 # owns the run (local channels done inline, same plot tuple); all "local"
 # -> local_proc.local_thread owns it, no socket at all.
-CH_MODE = ["board", "board"]
+#
+# CH_MODE_DEFAULT env var flips the startup default to local without
+# touching this line -- proj's "gen" verb sets it so `run_gen` opens
+# straight into board-free filter design/static analysis, while `run`
+# (board flashing) leaves it unset and gets the normal "board" default.
+# Still live-switchable per channel from the GUI either way.
+import os as _os
+CH_MODE = (["local", "local"] if _os.environ.get("CH_MODE_DEFAULT") == "local"
+           else ["board", "board"])
 
 
 def any_board():
@@ -396,6 +404,12 @@ SAT_DB_MIN = -180.0         # bottom of the magnitude axis; both views
 SAT_PEAK_FMIN = 1.0         # ignore bins below this when locating the peak
 SAT_PHASE = "off"        # phase column: off / out-in / raw
 SAT_PHASE_UNITS = "deg"     # deg / phase ms / group ms; both views
+# Bins more than this many dB below the strongest bin (in EITHER trace) are
+# left out of the phase column -- "the phase of noise is noise". A GUI
+# field, separate from SAT_CAPTURE_GATE_DB below (that one gates the
+# response view's gain overlay, an unrelated feature with its own reasons
+# to want a different threshold).
+SAT_PHASE_GATE_DB = -60.0
 
 # The reference-model comparison. None leaves a channel unscored, and a
 # None shift takes whatever the board's register held, from the sidecar.
@@ -426,7 +440,7 @@ SAT_OVERLAY_CH = "both"         # ch1 / ch2 / both
 
 # --- what the dropdowns offer ---------------------------------------------
 SAT_VIEW_CHOICES = ("capture", "response")
-SAT_FFT_SIZE_CHOICES = (0, 128, 256, 512, 1024, 2048, 4096, 8192)
+SAT_FFT_SIZE_CHOICES = (0, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768)
 SAT_PHASE_CHOICES = ("off", "out-in", "raw")
 SAT_PHASE_UNIT_CHOICES = ("deg", "phase ms", "group ms")
 SAT_OVERLAY_CHOICES = ("none", "gain", "spectrum", "both")

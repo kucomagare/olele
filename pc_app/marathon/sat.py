@@ -1109,6 +1109,10 @@ def main(argv=None):
                          "around it comes out, which is the delay of the "
                          "waveform's shape and the one that matters for an "
                          "ECG. The report always prints the group delay")
+    ap.add_argument("--phase-gate", type=float, default=config.SAT_PHASE_GATE_DB,
+                    help="bins more than this many dB below the strongest "
+                         "bin, in either trace, are left out of the phase "
+                         "column (default: %(default)s)")
     ap.add_argument("--model", choices=model_choices(),
                     help="also run this pipeline on the recorded "
                          "input and score it against the recorded output. "
@@ -1231,6 +1235,7 @@ def main(argv=None):
             fft_window=args.window,
             fmax=args.fmax, db_min=args.db_min, peak_fmin=args.peak_fmin,
             phase=args.phase, phase_units=args.phase_units,
+            phase_gate_db=args.phase_gate,
             model=args.model_ch1 or args.model,
             model_ch2=args.model_ch2 or args.model,
             shift=args.shift, settle=args.settle,
@@ -1311,7 +1316,7 @@ def main(argv=None):
     phases = []
     if args.phase != "off":
         phases = [phase_spectrum(traces, ch, info["rate"], args.phase,
-                                 args.fft_size)
+                                 args.fft_size, gate_db=args.phase_gate)
                   for ch in ("ch1", "ch2")]
 
     print_report(info, results, models, responses, gains, phases)

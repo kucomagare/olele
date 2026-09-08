@@ -12,6 +12,7 @@ from tkinter import filedialog, messagebox, ttk
 import matplotlib
 matplotlib.use("TkAgg")
 import matplotlib.pyplot as plt
+from matplotlib.lines import Line2D
 from matplotlib.ticker import MultipleLocator, ScalarFormatter
 import numpy as np
 
@@ -133,6 +134,7 @@ class SATWindow:
                  settle=config.SAT_SETTLE,
                  phase=config.SAT_PHASE,
                  phase_units=config.SAT_PHASE_UNITS,
+                 phase_gate_db=config.SAT_PHASE_GATE_DB,
                  view=config.SAT_VIEW,
                  curves=config.SAT_CURVES,
                  response_size=config.SAT_RESPONSE_SIZE,
@@ -189,6 +191,7 @@ class SATWindow:
         self._phase_units = tk.StringVar(
             value=phase_units if phase_units in config.SAT_PHASE_UNIT_CHOICES
             else config.SAT_PHASE_UNITS)
+        self._phase_gate = tk.StringVar(value=f"{phase_gate_db:g}")
         # Per channel: a capture's two channels may have run different
         # pipelines, so a single model could only ever be right for one.
         pipe0, impl0 = _split_model(model)
@@ -251,7 +254,7 @@ class SATWindow:
                          (self._fft_size, self._fft_hop, self._fft_average,
                           self._fft_window, self._fmax, self._db_min,
                           self._peak_fmin, self._phase, self._phase_units,
-                          self._shift, self._settle,
+                          self._phase_gate, self._shift, self._settle,
                           self._view, self._resp_size, self._resp_points,
                           self._resp_drive, self._resp_averages,
                           self._resp_fmin, self._resp_fmax, self._resp_floor,
@@ -562,8 +565,9 @@ class SATWindow:
                  "never in the values.\n\n"
                  "off — hide the column and give the width back to the time "
                  "and magnitude panels.\n\n"
-                 "Bins where the input is more than 60 dB below its peak are "
-                 "left out either way: the phase of noise is noise.")
+                 "Bins where either trace is more than Phase gate (below) dB "
+                 "below its own peak are left out either way: the phase of "
+                 "noise is noise.")
         row += 1
 
         ttk.Label(f, text="Phase units").grid(row=row, column=0, sticky="w",
@@ -588,6 +592,15 @@ class SATWindow:
                  "IIR chain does and a linear-phase FIR does not. Taken from "
                  "ratios of adjacent bins, so it needs no unwrapping and is "
                  "blank across a gap rather than wrong.")
+        row += 1
+
+        row = self._entry(f, row, "Phase gate (dB)", self._phase_gate,
+                          "How far below its own peak a bin can sit, in "
+                          "EITHER trace, before its phase is left out. More "
+                          "negative (e.g. -80) keeps more of the band, "
+                          "including bins that are mostly noise; less "
+                          "negative (e.g. -40) shows only the bins you can "
+                          "trust. -60 is a reasonable starting point.")
         return f
 
     def _build_model_tab(self):
@@ -958,7 +971,8 @@ class SATWindow:
         """Every analysis field back to its startup value, then redraw."""
         for var in (self._fft_size, self._fft_hop, self._fft_average,
                     self._fft_window, self._fmax, self._db_min, self._peak_fmin,
-                    self._phase, self._phase_units, self._shift, self._settle,
+                    self._phase, self._phase_units, self._phase_gate,
+                    self._shift, self._settle,
                     self._view, self._resp_size,
                     self._resp_points, self._resp_drive, self._resp_averages,
                     self._resp_fmin, self._resp_fmax, self._resp_floor,
@@ -1133,10 +1147,11 @@ class SATWindow:
                                             self.info.get("meta")))
 
         mode = self._phase.get()
+        phase_gate_db = self._number(self._phase_gate, config.SAT_PHASE_GATE_DB)
         phases = []
         if mode != "off":
             phases = [sat.phase_spectrum(self.traces, ch, self.info["rate"],
-                                         mode, size)
+                                         mode, size, gate_db=phase_gate_db)
                       for ch in ("ch1", "ch2")]
 
         self._say(sat.format_report(self.info, results, models,
@@ -1295,16 +1310,40 @@ class SATWindow:
             # Points, not a line: the gate leaves gaps wherever the input
             # had nothing to say, and joining across one would draw a
             # confident segment through the part of the band the capture
-            # says least about. Small and semi-transparent because in raw
-            # mode there are thousands of them.
-            colors = {"in": "tab:blue", "out": "tab:red", "out − in": "tab:purple"}
+            # says least about.
+            #
+            # Color AND size both carry the bin's own magnitude (one
+            # sequential colormap per curve, so hue still says which curve
+            # -- see color-formula.md: sequential = one hue, light->dark).
+            # Constant-color dots gave every surviving bin equal visual
+            # weight, so a barely-above-gate bin looked as loud as the
+            # strongest harmonic; a weak dB spread within one curve (e.g. a
+            # single tone plus its noise floor) still separates visibly
+            # because each curve is normalised to its OWN min/max, not a
+            # shared scale -- this is for "which bins matter" at a glance,
+            # not for reading an exact dB off the color.
+            cmaps = {"in": "Blues", "out": "Reds", "out − in": "Purples"}
             units = self._phase_units.get()
+            lag = max(1, int(p.get("group_lag", 1)))
             ylabel = "Phase (deg)"
+            legend_handles = []
             for label, deg, h in p["curves"]:
-                x, y, ylabel = sat.phase_display(p["freqs"], deg, h, units,
-                                                 p.get("group_lag", 1))
-                ax_p.plot(x, y, ".", ms=1.6, alpha=0.55,
-                          color=colors.get(label, "tab:purple"), label=label)
+                x, y, ylabel = sat.phase_display(p["freqs"], deg, h, units, lag)
+                if units == "group ms" and len(p["freqs"]) > lag:
+                    mag = np.sqrt(np.abs(h[:-lag]) * np.abs(h[lag:]))
+                else:
+                    mag = np.abs(h)
+                mag_db = 20.0 * np.log10(np.maximum(mag, 1e-30))
+                lo, hi = mag_db.min(), mag_db.max()
+                norm = (mag_db - lo) / max(hi - lo, 1e-9)
+                cmap = plt.get_cmap(cmaps.get(label, "Purples"))
+                ax_p.scatter(x, y, s=6.0 + 34.0 * norm, c=cmap(0.3 + 0.6 * norm),
+                            edgecolors="none", alpha=0.85)
+                legend_handles.append(Line2D(
+                    [], [], marker="o", linestyle="none", color=cmap(0.75),
+                    label=label))
+            if legend_handles:
+                ax_p.legend(handles=legend_handles, fontsize=8)
             ax_p.set_title(f"{ch} — phase ({p['mode']})")
             ax_p.set_xlabel("Frequency (Hz)")
             ax_p.set_ylabel(ylabel)
@@ -1322,8 +1361,6 @@ class SATWindow:
                 ax_p.yaxis.set_major_locator(MultipleLocator(90))
             ax_p.axhline(0.0, color="0.5", lw=0.6)
             _pad_delay_axis(ax_p, units)
-            # Markers this small vanish in a legend, so give it big ones.
-            ax_p.legend(fontsize=8, markerscale=6, handletextpad=0.4)
             ax_p.grid(alpha=0.3)
 
         self.fig.tight_layout()

@@ -53,6 +53,10 @@ Verbs:
   run        [--bit <path>] [--no-pc] [--no-board]
              Starts the PC app and flashes/runs the firmware over JTAG
              (which opens a PuTTY serial console).
+  gen        Python client ONLY -- no C++ relay, no board -- CH_MODE
+             defaulted to "local". Opens straight into board-free filter
+             design/static analysis, no per-launch mode switch in the GUI.
+  sat        Opens the SAT (buffer-analysis) GUI for this variant.
   stop       Stops the PC app and that PuTTY console. The board's firmware
              keeps running until reflashed or power-cycled.
   clean      [--what vivado|vitis|pc]
@@ -372,6 +376,50 @@ verb_pc() {
     exec "$REPO_PATH/pc_app/$VARIANT/system.sh" "$@"
 }
 
+# Python client ONLY -- no C++ relay, no board. system.sh's restart-client
+# subcommand is the one that never touches the server (stops the client if
+# running, then starts it; a no-op stop when nothing was running), so this
+# is the exact "pure Python" primitive local mode actually wants: with
+# CH_MODE fully local, net.py never opens a socket, so the relay would just
+# be dead weight, not "harmless idle" as a first draft of this comment
+# claimed -- there is nothing for it to do here.
+#
+# CH_MODE_DEFAULT=local (see config.py) makes the session start already in
+# local mode instead of a manual switch every launch. board mode is still
+# one click away in the GUI; this only changes the starting point.
+verb_gen() {
+    if [[ $# -gt 0 ]]; then
+        echo "gen: takes no options (got '$1')" >&2
+        exit 1
+    fi
+    resolve_variant
+    check_tree
+    echo "=== variant: $VARIANT (local processing mode, Python client only) ==="
+    CH_MODE_DEFAULT=local exec "$REPO_PATH/pc_app/$VARIANT/system.sh" restart-client
+}
+
+# The SAT buffer-analysis GUI: reads dumps from pc_app/$VARIANT/build/logs,
+# no board or relay involved. Needs the venv `pc` (or `build`) already set
+# up. exec'd like `pc`, so it replaces this shell rather than backgrounding
+# -- Ctrl+C in that terminal cleanly kills the analysis window.
+verb_sat() {
+    if [[ $# -gt 0 ]]; then
+        echo "sat: takes no options (got '$1')" >&2
+        exit 1
+    fi
+    resolve_variant
+    check_tree
+    local venv_python="$REPO_PATH/pc_app/$VARIANT/build/venv/bin/python3"
+    if [[ ! -x "$venv_python" ]]; then
+        echo "venv not found at pc_app/$VARIANT/build/venv -- run ./proj build first" >&2
+        exit 1
+    fi
+    echo "=== variant: $VARIANT ==="
+    echo "=== SAT: opening buffer-analysis GUI ==="
+    cd "$REPO_PATH/pc_app/$VARIANT"
+    exec "$venv_python" sat.py
+}
+
 # Host NIC/route tuning. Variant-independent -- it acts on the route to the
 # board, which is the same whichever variant is loaded.
 verb_net() {
@@ -408,6 +456,8 @@ case "$VERB" in
     build)   verb_build   "$@" ;;
     compile) verb_compile "$@" ;;
     run)     verb_run     "$@" ;;
+    gen)     verb_gen     "$@" ;;
+    sat)     verb_sat     "$@" ;;
     stop)    verb_stop    "$@" ;;
     clean)   verb_clean   "$@" ;;
     pc)      verb_pc      "$@" ;;
