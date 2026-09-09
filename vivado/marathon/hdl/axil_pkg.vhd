@@ -67,6 +67,22 @@ package axil_pkg is
         rvalid  : std_logic;
     end record;
 
+    -- AXI4-Stream, same split. Only the fields this design uses -- tdata,
+    -- tvalid, tlast, tready. Widen here if a tkeep/tuser ever appears.
+    type t_axis_m2s is record
+        tdata  : t_axil_data;
+        tvalid : std_logic;
+        tlast  : std_logic;
+    end record;
+
+    type t_axis_s2m is record
+        tready : std_logic;
+    end record;
+
+    constant AXIS_M2S_IDLE : t_axis_m2s := (
+        tdata => (others => '0'), tvalid => '0', tlast => '0');
+    constant AXIS_S2M_IDLE : t_axis_s2m := (tready => '0');
+
     -- Unconstrained arrays of a constrained record: also VHDL-93 legal as a
     -- port type, the actual supplies the range. Lets one demux serve any N.
     type t_axil_m2s_array is array (natural range <>) of t_axil_m2s;

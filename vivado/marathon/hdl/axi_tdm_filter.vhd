@@ -58,40 +58,20 @@ entity axi_tdm_filter is
         C_S00_AXI_ADDR_WIDTH  : integer := 4
     );
     port (
+        aclk        : in  std_logic;
+        aresetn     : in  std_logic;
+
         -- AXI4-Lite slave: control/status only, no sample data
-        aclk            : in  std_logic;
-        aresetn         : in  std_logic;
-        s00_axi_awaddr  : in  std_logic_vector(C_S00_AXI_ADDR_WIDTH-1 downto 0);
-        s00_axi_awprot  : in  std_logic_vector(2 downto 0);
-        s00_axi_awvalid : in  std_logic;
-        s00_axi_awready : out std_logic;
-        s00_axi_wdata   : in  std_logic_vector(C_S00_AXI_DATA_WIDTH-1 downto 0);
-        s00_axi_wstrb   : in  std_logic_vector((C_S00_AXI_DATA_WIDTH/8)-1 downto 0);
-        s00_axi_wvalid  : in  std_logic;
-        s00_axi_wready  : out std_logic;
-        s00_axi_bresp   : out std_logic_vector(1 downto 0);
-        s00_axi_bvalid  : out std_logic;
-        s00_axi_bready  : in  std_logic;
-        s00_axi_araddr  : in  std_logic_vector(C_S00_AXI_ADDR_WIDTH-1 downto 0);
-        s00_axi_arprot  : in  std_logic_vector(2 downto 0);
-        s00_axi_arvalid : in  std_logic;
-        s00_axi_arready : out std_logic;
-        s00_axi_rdata   : out std_logic_vector(C_S00_AXI_DATA_WIDTH-1 downto 0);
-        s00_axi_rresp   : out std_logic_vector(1 downto 0);
-        s00_axi_rvalid  : out std_logic;
-        s00_axi_rready  : in  std_logic;
+        s_m2s       : in  t_axil_m2s;
+        s_s2m       : out t_axil_s2m;
 
         -- AXI4-Stream slave: samples in, from the DMA's MM2S channel
-        s_axis_tdata    : in  std_logic_vector(31 downto 0);
-        s_axis_tvalid   : in  std_logic;
-        s_axis_tready   : out std_logic;
-        s_axis_tlast    : in  std_logic;
+        s_axis_m2s  : in  t_axis_m2s;
+        s_axis_s2m  : out t_axis_s2m;
 
         -- AXI4-Stream master: samples out, to the DMA's S2MM channel
-        m_axis_tdata    : out std_logic_vector(31 downto 0);
-        m_axis_tvalid   : out std_logic;
-        m_axis_tready   : in  std_logic;
-        m_axis_tlast    : out std_logic
+        m_axis_m2s  : out t_axis_m2s;
+        m_axis_s2m  : in  t_axis_s2m
     );
 end axi_tdm_filter;
 
@@ -128,9 +108,6 @@ architecture rtl of axi_tdm_filter is
         return x(7 downto 0) & x(15 downto 8) & x(23 downto 16) & x(31 downto 24);
     end function;
 
-    signal s_m2s : t_axil_m2s;
-    signal s_s2m : t_axil_s2m;
-
     signal cfg_reg0 : std_logic_vector(C_S00_AXI_DATA_WIDTH-1 downto 0);
     signal cfg_reg1 : std_logic_vector(C_S00_AXI_DATA_WIDTH-1 downto 0);
     signal cfg_reg2 : std_logic_vector(C_S00_AXI_DATA_WIDTH-1 downto 0);
@@ -165,31 +142,6 @@ architecture rtl of axi_tdm_filter is
 
 begin
 
-    -- axi_tdm_filter is still instantiated directly in the block design, so its
-    -- own entity has to stay flat -- Vivado infers interfaces from port names.
-    -- Packed here so my_axi sees the same record every other module uses. This
-    -- block disappears if the module ever moves inside user_top.
-    s_m2s.awaddr  <= std_logic_vector(resize(unsigned(s00_axi_awaddr), AXIL_ADDR_W));
-    s_m2s.awprot  <= s00_axi_awprot;
-    s_m2s.awvalid <= s00_axi_awvalid;
-    s_m2s.wdata   <= s00_axi_wdata;
-    s_m2s.wstrb   <= s00_axi_wstrb;
-    s_m2s.wvalid  <= s00_axi_wvalid;
-    s_m2s.bready  <= s00_axi_bready;
-    s_m2s.araddr  <= std_logic_vector(resize(unsigned(s00_axi_araddr), AXIL_ADDR_W));
-    s_m2s.arprot  <= s00_axi_arprot;
-    s_m2s.arvalid <= s00_axi_arvalid;
-    s_m2s.rready  <= s00_axi_rready;
-
-    s00_axi_awready <= s_s2m.awready;
-    s00_axi_wready  <= s_s2m.wready;
-    s00_axi_bresp   <= s_s2m.bresp;
-    s00_axi_bvalid  <= s_s2m.bvalid;
-    s00_axi_arready <= s_s2m.arready;
-    s00_axi_rdata   <= s_s2m.rdata;
-    s00_axi_rresp   <= s_s2m.rresp;
-    s00_axi_rvalid  <= s_s2m.rvalid;
-
     my_axi_inst : my_axi
         generic map (
             C_S_AXI_ADDR_WIDTH => C_S00_AXI_ADDR_WIDTH
@@ -222,22 +174,22 @@ begin
     status(15 downto 8)  <= std_logic_vector(to_unsigned(n_channels, 8));
     status(20 downto 16) <= std_logic_vector(to_unsigned(shift_amt, 5));
     status(23 downto 21) <= (others => '0');
-    status(24)           <= s_axis_tvalid;
-    status(25)           <= m_axis_tready;
+    status(24)           <= s_axis_m2s.tvalid;
+    status(25)           <= m_axis_s2m.tready;
     status(31 downto 26) <= (others => '0');
 
     -- ---------------- stream handshake ----------------
     -- Straight pass-through: this block never stalls of its own accord, so
     -- backpressure from S2MM propagates directly back to MM2S.
-    s_axis_tready <= m_axis_tready;
-    m_axis_tvalid <= s_axis_tvalid;
-    m_axis_tlast  <= s_axis_tlast;
+    s_axis_s2m.tready <= m_axis_s2m.tready;
+    m_axis_m2s.tvalid <= s_axis_m2s.tvalid;
+    m_axis_m2s.tlast  <= s_axis_m2s.tlast;
 
-    beat       <= s_axis_tvalid and m_axis_tready;
+    beat       <= s_axis_m2s.tvalid and m_axis_s2m.tready;
     is_ts_slot <= '1' when slot_idx = 0 else '0';
 
     -- ---------------- datapath ----------------
-    x_native <= bswap32(s_axis_tdata) when swap_en = '1' else s_axis_tdata;
+    x_native <= bswap32(s_axis_m2s.tdata) when swap_en = '1' else s_axis_m2s.tdata;
 
     -- Slot 0 has no state entry; index 0 is a harmless dummy read.
     y_prev <= state(slot_idx - 1) when slot_idx > 0 else (others => '0');
@@ -246,12 +198,12 @@ begin
     -- Timestamp passes through byte-for-byte (swapping twice would be a
     -- no-op anyway). Clear forces passthrough so the filter's effect can be
     -- switched out without disturbing the stream.
-    result <= s_axis_tdata
+    result <= s_axis_m2s.tdata
                   when (is_ts_slot = '1' or clear_state = '1')
               else bswap32(std_logic_vector(y_new)) when swap_en = '1'
               else std_logic_vector(y_new);
 
-    m_axis_tdata <= result;
+    m_axis_m2s.tdata <= result;
 
     -- ---------------- sequential state ----------------
     process (aclk)
@@ -272,7 +224,7 @@ begin
                 -- Slot counter. tlast resynchronises to slot 0 so a buffer
                 -- boundary can never leave the counter mid-frame; the
                 -- n_channels wrap does the same at every frame boundary.
-                if s_axis_tlast = '1' or slot_idx >= n_channels then
+                if s_axis_m2s.tlast = '1' or slot_idx >= n_channels then
                     slot_idx <= 0;
                 else
                     slot_idx <= slot_idx + 1;
