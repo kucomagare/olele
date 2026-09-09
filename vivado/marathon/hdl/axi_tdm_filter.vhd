@@ -45,6 +45,9 @@ library IEEE;
 use IEEE.STD_LOGIC_1164.ALL;
 use IEEE.NUMERIC_STD.ALL;
 
+library work;
+use work.axil_pkg.all;
+
 entity axi_tdm_filter is
     generic (
         -- Depth of the per-channel state RAM. Sized well past what is used
@@ -98,39 +101,21 @@ architecture rtl of axi_tdm_filter is
     -- ride their filter output on the same hook).
     component my_axi is
         generic (
-            C_S_AXI_DATA_WIDTH : integer := 32;
             C_S_AXI_ADDR_WIDTH : integer := 4
         );
         port (
             axi_slv_reg_rden : out std_logic;
             axi_slv_reg_wren : out std_logic;
-            axi_reg_data_out : out std_logic_vector(C_S_AXI_DATA_WIDTH-1 downto 0);
-            axi_slv_reg0     : out std_logic_vector(C_S_AXI_DATA_WIDTH-1 downto 0);
-            axi_slv_reg1     : out std_logic_vector(C_S_AXI_DATA_WIDTH-1 downto 0);
-            axi_slv_reg2     : out std_logic_vector(C_S_AXI_DATA_WIDTH-1 downto 0);
-            axi_slv_reg3     : out std_logic_vector(C_S_AXI_DATA_WIDTH-1 downto 0);
-            fir_result       : in  std_logic_vector(C_S_AXI_DATA_WIDTH-1 downto 0);
-            S_AXI_ACLK       : in  std_logic;
-            S_AXI_ARESETN    : in  std_logic;
-            S_AXI_AWADDR     : in  std_logic_vector(C_S_AXI_ADDR_WIDTH-1 downto 0);
-            S_AXI_AWPROT     : in  std_logic_vector(2 downto 0);
-            S_AXI_AWVALID    : in  std_logic;
-            S_AXI_AWREADY    : out std_logic;
-            S_AXI_WDATA      : in  std_logic_vector(C_S_AXI_DATA_WIDTH-1 downto 0);
-            S_AXI_WSTRB      : in  std_logic_vector((C_S_AXI_DATA_WIDTH/8)-1 downto 0);
-            S_AXI_WVALID     : in  std_logic;
-            S_AXI_WREADY     : out std_logic;
-            S_AXI_BRESP      : out std_logic_vector(1 downto 0);
-            S_AXI_BVALID     : out std_logic;
-            S_AXI_BREADY     : in  std_logic;
-            S_AXI_ARADDR     : in  std_logic_vector(C_S_AXI_ADDR_WIDTH-1 downto 0);
-            S_AXI_ARPROT     : in  std_logic_vector(2 downto 0);
-            S_AXI_ARVALID    : in  std_logic;
-            S_AXI_ARREADY    : out std_logic;
-            S_AXI_RDATA      : out std_logic_vector(C_S_AXI_DATA_WIDTH-1 downto 0);
-            S_AXI_RRESP      : out std_logic_vector(1 downto 0);
-            S_AXI_RVALID     : out std_logic;
-            S_AXI_RREADY     : in  std_logic
+            axi_reg_data_out : out std_logic_vector(AXIL_DATA_W-1 downto 0);
+            axi_slv_reg0     : out std_logic_vector(AXIL_DATA_W-1 downto 0);
+            axi_slv_reg1     : out std_logic_vector(AXIL_DATA_W-1 downto 0);
+            axi_slv_reg2     : out std_logic_vector(AXIL_DATA_W-1 downto 0);
+            axi_slv_reg3     : out std_logic_vector(AXIL_DATA_W-1 downto 0);
+            fir_result       : in  std_logic_vector(AXIL_DATA_W-1 downto 0);
+            aclk             : in  std_logic;
+            aresetn          : in  std_logic;
+            s_m2s            : in  t_axil_m2s;
+            s_s2m            : out t_axil_s2m
         );
     end component;
 
@@ -142,6 +127,9 @@ architecture rtl of axi_tdm_filter is
     begin
         return x(7 downto 0) & x(15 downto 8) & x(23 downto 16) & x(31 downto 24);
     end function;
+
+    signal s_m2s : t_axil_m2s;
+    signal s_s2m : t_axil_s2m;
 
     signal cfg_reg0 : std_logic_vector(C_S00_AXI_DATA_WIDTH-1 downto 0);
     signal cfg_reg1 : std_logic_vector(C_S00_AXI_DATA_WIDTH-1 downto 0);
@@ -177,9 +165,33 @@ architecture rtl of axi_tdm_filter is
 
 begin
 
+    -- axi_tdm_filter is still instantiated directly in the block design, so its
+    -- own entity has to stay flat -- Vivado infers interfaces from port names.
+    -- Packed here so my_axi sees the same record every other module uses. This
+    -- block disappears if the module ever moves inside user_top.
+    s_m2s.awaddr  <= std_logic_vector(resize(unsigned(s00_axi_awaddr), AXIL_ADDR_W));
+    s_m2s.awprot  <= s00_axi_awprot;
+    s_m2s.awvalid <= s00_axi_awvalid;
+    s_m2s.wdata   <= s00_axi_wdata;
+    s_m2s.wstrb   <= s00_axi_wstrb;
+    s_m2s.wvalid  <= s00_axi_wvalid;
+    s_m2s.bready  <= s00_axi_bready;
+    s_m2s.araddr  <= std_logic_vector(resize(unsigned(s00_axi_araddr), AXIL_ADDR_W));
+    s_m2s.arprot  <= s00_axi_arprot;
+    s_m2s.arvalid <= s00_axi_arvalid;
+    s_m2s.rready  <= s00_axi_rready;
+
+    s00_axi_awready <= s_s2m.awready;
+    s00_axi_wready  <= s_s2m.wready;
+    s00_axi_bresp   <= s_s2m.bresp;
+    s00_axi_bvalid  <= s_s2m.bvalid;
+    s00_axi_arready <= s_s2m.arready;
+    s00_axi_rdata   <= s_s2m.rdata;
+    s00_axi_rresp   <= s_s2m.rresp;
+    s00_axi_rvalid  <= s_s2m.rvalid;
+
     my_axi_inst : my_axi
         generic map (
-            C_S_AXI_DATA_WIDTH => C_S00_AXI_DATA_WIDTH,
             C_S_AXI_ADDR_WIDTH => C_S00_AXI_ADDR_WIDTH
         )
         port map (
@@ -191,27 +203,10 @@ begin
             axi_slv_reg2     => cfg_reg2,
             axi_slv_reg3     => open,
             fir_result       => status,
-            S_AXI_ACLK       => aclk,
-            S_AXI_ARESETN    => aresetn,
-            S_AXI_AWADDR     => s00_axi_awaddr,
-            S_AXI_AWPROT     => s00_axi_awprot,
-            S_AXI_AWVALID    => s00_axi_awvalid,
-            S_AXI_AWREADY    => s00_axi_awready,
-            S_AXI_WDATA      => s00_axi_wdata,
-            S_AXI_WSTRB      => s00_axi_wstrb,
-            S_AXI_WVALID     => s00_axi_wvalid,
-            S_AXI_WREADY     => s00_axi_wready,
-            S_AXI_BRESP      => s00_axi_bresp,
-            S_AXI_BVALID     => s00_axi_bvalid,
-            S_AXI_BREADY     => s00_axi_bready,
-            S_AXI_ARADDR     => s00_axi_araddr,
-            S_AXI_ARPROT     => s00_axi_arprot,
-            S_AXI_ARVALID    => s00_axi_arvalid,
-            S_AXI_ARREADY    => s00_axi_arready,
-            S_AXI_RDATA      => s00_axi_rdata,
-            S_AXI_RRESP      => s00_axi_rresp,
-            S_AXI_RVALID     => s00_axi_rvalid,
-            S_AXI_RREADY     => s00_axi_rready
+            aclk             => aclk,
+            aresetn          => aresetn,
+            s_m2s            => s_m2s,
+            s_s2m            => s_s2m
         );
 
     -- ---------------- control register decode ----------------

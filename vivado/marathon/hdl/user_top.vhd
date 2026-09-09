@@ -18,15 +18,34 @@
 --     for the future consolidated bus (one slave + address decode in here),
 --     which is what stops the port count growing with the module count.
 --
--- Currently hosts:
+-- The entity is flat because Vivado's module-reference resolver cannot see an
+-- entity that has a record port -- verified, not assumed: an otherwise
+-- identical entity resolves with flat ports and fails with "Unable to resolve
+-- module-source" with record ports. It is packed into axil_pkg records on the
+-- first lines of the architecture; everything below works on records.
+--
+-- Hosts:
 --   fpga_top             LED PWM blink, bring-up sanity check, no bus
---   axi_processing_ch1   ch1 filter chain, AXI-Lite on s01_axi @ 0x40001000
---   axi_processing_ch2   ch2 filter chain, AXI-Lite on s02_axi @ 0x40002000
+--   axi_processing_ch1   ch1 filter chain, s01_axi @ 0x40001000
+--   axi_processing_ch2   ch2 filter chain, s02_axi @ 0x40002000
+--
+-- Two windows because each channel still owns a my_axi. The central register
+-- file collapses both into one slave on one window; until then there is
+-- nothing to route and no reason for routing logic.
+--
+-- ADDRESS MAP: one segment, 8K at 0x40001000, addr[12] selects the channel.
+-- Sized and placed so both channels keep the addresses they had as separate BD
+-- cells -- ch1 0x40001000, ch2 0x40002000 -- which is why this restructuring
+-- needs no firmware change at all. Step 4 widens the same window to 16K at
+-- 0x40000000 to absorb axi_tdm_filter without moving anything either.
 ----------------------------------------------------------------------------------
 
 library IEEE;
 use IEEE.STD_LOGIC_1164.ALL;
 use IEEE.NUMERIC_STD.ALL;
+
+library work;
+use work.axil_pkg.all;
 
 entity user_top is
     generic (
@@ -35,8 +54,6 @@ entity user_top is
         -- independently settable at the BD cell.
         CH1_SHIFT         : integer := 4;
         CH2_SHIFT         : integer := 4;
-        -- Shared by every AXI-Lite slave below -- they are all 32/4. Splitting
-        -- these per-bus only duplicates constants; step 3 collapses the buses.
         C_AXI_DATA_WIDTH  : integer := 32;
         C_AXI_ADDR_WIDTH  : integer := 4
     );
@@ -114,27 +131,10 @@ architecture rtl of user_top is
             C_S00_AXI_ADDR_WIDTH  : integer := 4
         );
         port (
-            s00_axi_aclk    : in  std_logic;
-            s00_axi_aresetn : in  std_logic;
-            s00_axi_awaddr  : in  std_logic_vector(C_S00_AXI_ADDR_WIDTH-1 downto 0);
-            s00_axi_awprot  : in  std_logic_vector(2 downto 0);
-            s00_axi_awvalid : in  std_logic;
-            s00_axi_awready : out std_logic;
-            s00_axi_wdata   : in  std_logic_vector(C_S00_AXI_DATA_WIDTH-1 downto 0);
-            s00_axi_wstrb   : in  std_logic_vector((C_S00_AXI_DATA_WIDTH/8)-1 downto 0);
-            s00_axi_wvalid  : in  std_logic;
-            s00_axi_wready  : out std_logic;
-            s00_axi_bresp   : out std_logic_vector(1 downto 0);
-            s00_axi_bvalid  : out std_logic;
-            s00_axi_bready  : in  std_logic;
-            s00_axi_araddr  : in  std_logic_vector(C_S00_AXI_ADDR_WIDTH-1 downto 0);
-            s00_axi_arprot  : in  std_logic_vector(2 downto 0);
-            s00_axi_arvalid : in  std_logic;
-            s00_axi_arready : out std_logic;
-            s00_axi_rdata   : out std_logic_vector(C_S00_AXI_DATA_WIDTH-1 downto 0);
-            s00_axi_rresp   : out std_logic_vector(1 downto 0);
-            s00_axi_rvalid  : out std_logic;
-            s00_axi_rready  : in  std_logic
+            aclk    : in  std_logic;
+            aresetn : in  std_logic;
+            s_m2s   : in  t_axil_m2s;
+            s_s2m   : out t_axil_s2m
         );
     end component;
 
@@ -145,31 +145,67 @@ architecture rtl of user_top is
             C_S00_AXI_ADDR_WIDTH  : integer := 4
         );
         port (
-            s00_axi_aclk    : in  std_logic;
-            s00_axi_aresetn : in  std_logic;
-            s00_axi_awaddr  : in  std_logic_vector(C_S00_AXI_ADDR_WIDTH-1 downto 0);
-            s00_axi_awprot  : in  std_logic_vector(2 downto 0);
-            s00_axi_awvalid : in  std_logic;
-            s00_axi_awready : out std_logic;
-            s00_axi_wdata   : in  std_logic_vector(C_S00_AXI_DATA_WIDTH-1 downto 0);
-            s00_axi_wstrb   : in  std_logic_vector((C_S00_AXI_DATA_WIDTH/8)-1 downto 0);
-            s00_axi_wvalid  : in  std_logic;
-            s00_axi_wready  : out std_logic;
-            s00_axi_bresp   : out std_logic_vector(1 downto 0);
-            s00_axi_bvalid  : out std_logic;
-            s00_axi_bready  : in  std_logic;
-            s00_axi_araddr  : in  std_logic_vector(C_S00_AXI_ADDR_WIDTH-1 downto 0);
-            s00_axi_arprot  : in  std_logic_vector(2 downto 0);
-            s00_axi_arvalid : in  std_logic;
-            s00_axi_arready : out std_logic;
-            s00_axi_rdata   : out std_logic_vector(C_S00_AXI_DATA_WIDTH-1 downto 0);
-            s00_axi_rresp   : out std_logic_vector(1 downto 0);
-            s00_axi_rvalid  : out std_logic;
-            s00_axi_rready  : in  std_logic
+            aclk    : in  std_logic;
+            aresetn : in  std_logic;
+            s_m2s   : in  t_axil_m2s;
+            s_s2m   : out t_axil_s2m
         );
     end component;
 
+    signal ch1_m2s, ch2_m2s : t_axil_m2s;
+    signal ch1_s2m, ch2_s2m : t_axil_s2m;
+
 begin
+
+    ------------------------------------------------------------------------
+    -- Flat -> record, once per window. The only place in the design the bus
+    -- appears as loose signals: Vivado infers BD interfaces from port names,
+    -- so this entity cannot take a record (verified -- an otherwise identical
+    -- entity fails to resolve as a module reference with record ports).
+    ------------------------------------------------------------------------
+    ch1_m2s.awaddr  <= std_logic_vector(resize(unsigned(s01_axi_awaddr), AXIL_ADDR_W));
+    ch1_m2s.awprot  <= s01_axi_awprot;
+    ch1_m2s.awvalid <= s01_axi_awvalid;
+    ch1_m2s.wdata   <= s01_axi_wdata;
+    ch1_m2s.wstrb   <= s01_axi_wstrb;
+    ch1_m2s.wvalid  <= s01_axi_wvalid;
+    ch1_m2s.bready  <= s01_axi_bready;
+    ch1_m2s.araddr  <= std_logic_vector(resize(unsigned(s01_axi_araddr), AXIL_ADDR_W));
+    ch1_m2s.arprot  <= s01_axi_arprot;
+    ch1_m2s.arvalid <= s01_axi_arvalid;
+    ch1_m2s.rready  <= s01_axi_rready;
+
+    s01_axi_awready <= ch1_s2m.awready;
+    s01_axi_wready  <= ch1_s2m.wready;
+    s01_axi_bresp   <= ch1_s2m.bresp;
+    s01_axi_bvalid  <= ch1_s2m.bvalid;
+    s01_axi_arready <= ch1_s2m.arready;
+    s01_axi_rdata   <= ch1_s2m.rdata;
+    s01_axi_rresp   <= ch1_s2m.rresp;
+    s01_axi_rvalid  <= ch1_s2m.rvalid;
+
+    ch2_m2s.awaddr  <= std_logic_vector(resize(unsigned(s02_axi_awaddr), AXIL_ADDR_W));
+    ch2_m2s.awprot  <= s02_axi_awprot;
+    ch2_m2s.awvalid <= s02_axi_awvalid;
+    ch2_m2s.wdata   <= s02_axi_wdata;
+    ch2_m2s.wstrb   <= s02_axi_wstrb;
+    ch2_m2s.wvalid  <= s02_axi_wvalid;
+    ch2_m2s.bready  <= s02_axi_bready;
+    ch2_m2s.araddr  <= std_logic_vector(resize(unsigned(s02_axi_araddr), AXIL_ADDR_W));
+    ch2_m2s.arprot  <= s02_axi_arprot;
+    ch2_m2s.arvalid <= s02_axi_arvalid;
+    ch2_m2s.rready  <= s02_axi_rready;
+
+    s02_axi_awready <= ch2_s2m.awready;
+    s02_axi_wready  <= ch2_s2m.wready;
+    s02_axi_bresp   <= ch2_s2m.bresp;
+    s02_axi_bvalid  <= ch2_s2m.bvalid;
+    s02_axi_arready <= ch2_s2m.arready;
+    s02_axi_rdata   <= ch2_s2m.rdata;
+    s02_axi_rresp   <= ch2_s2m.rresp;
+    s02_axi_rvalid  <= ch2_s2m.rvalid;
+
+    ------------------------------------------------------------------------
 
     fpga_top_led : fpga_top
         port map (
@@ -180,66 +216,30 @@ begin
             led_pl_r => led_pl_r
         );
 
-    -- s01_axi at this boundary maps straight onto the submodule's s00_axi.
-    -- The submodule keeps its own naming; only the BD-facing name is renumbered.
     ch1 : axi_processing_ch1
         generic map (
             SHIFT                 => CH1_SHIFT,
-            C_S00_AXI_DATA_WIDTH  => C_AXI_DATA_WIDTH,
+            C_S00_AXI_DATA_WIDTH  => AXIL_DATA_W,
             C_S00_AXI_ADDR_WIDTH  => C_AXI_ADDR_WIDTH
         )
         port map (
-            s00_axi_aclk    => aclk,
-            s00_axi_aresetn => aresetn,
-            s00_axi_awaddr  => s01_axi_awaddr,
-            s00_axi_awprot  => s01_axi_awprot,
-            s00_axi_awvalid => s01_axi_awvalid,
-            s00_axi_awready => s01_axi_awready,
-            s00_axi_wdata   => s01_axi_wdata,
-            s00_axi_wstrb   => s01_axi_wstrb,
-            s00_axi_wvalid  => s01_axi_wvalid,
-            s00_axi_wready  => s01_axi_wready,
-            s00_axi_bresp   => s01_axi_bresp,
-            s00_axi_bvalid  => s01_axi_bvalid,
-            s00_axi_bready  => s01_axi_bready,
-            s00_axi_araddr  => s01_axi_araddr,
-            s00_axi_arprot  => s01_axi_arprot,
-            s00_axi_arvalid => s01_axi_arvalid,
-            s00_axi_arready => s01_axi_arready,
-            s00_axi_rdata   => s01_axi_rdata,
-            s00_axi_rresp   => s01_axi_rresp,
-            s00_axi_rvalid  => s01_axi_rvalid,
-            s00_axi_rready  => s01_axi_rready
+            aclk    => aclk,
+            aresetn => aresetn,
+            s_m2s   => ch1_m2s,
+            s_s2m   => ch1_s2m
         );
 
     ch2 : axi_processing_ch2
         generic map (
             SHIFT                 => CH2_SHIFT,
-            C_S00_AXI_DATA_WIDTH  => C_AXI_DATA_WIDTH,
+            C_S00_AXI_DATA_WIDTH  => AXIL_DATA_W,
             C_S00_AXI_ADDR_WIDTH  => C_AXI_ADDR_WIDTH
         )
         port map (
-            s00_axi_aclk    => aclk,
-            s00_axi_aresetn => aresetn,
-            s00_axi_awaddr  => s02_axi_awaddr,
-            s00_axi_awprot  => s02_axi_awprot,
-            s00_axi_awvalid => s02_axi_awvalid,
-            s00_axi_awready => s02_axi_awready,
-            s00_axi_wdata   => s02_axi_wdata,
-            s00_axi_wstrb   => s02_axi_wstrb,
-            s00_axi_wvalid  => s02_axi_wvalid,
-            s00_axi_wready  => s02_axi_wready,
-            s00_axi_bresp   => s02_axi_bresp,
-            s00_axi_bvalid  => s02_axi_bvalid,
-            s00_axi_bready  => s02_axi_bready,
-            s00_axi_araddr  => s02_axi_araddr,
-            s00_axi_arprot  => s02_axi_arprot,
-            s00_axi_arvalid => s02_axi_arvalid,
-            s00_axi_arready => s02_axi_arready,
-            s00_axi_rdata   => s02_axi_rdata,
-            s00_axi_rresp   => s02_axi_rresp,
-            s00_axi_rvalid  => s02_axi_rvalid,
-            s00_axi_rready  => s02_axi_rready
+            aclk    => aclk,
+            aresetn => aresetn,
+            s_m2s   => ch2_m2s,
+            s_s2m   => ch2_s2m
         );
 
 end rtl;

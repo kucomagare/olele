@@ -23,8 +23,9 @@
 # 2. The following source(s) files that were local or imported into the original project.
 #    (Please see the '$orig_proj_dir' and '$origin_dir' variable setting below at the start of the script)
 #
+#    "$origin_dir/hdl/axil_pkg.vhd"
 #    "$origin_dir/hdl/fpga_top.v"
-#    "$origin_dir/hdl/my_axi.v"
+#    "$origin_dir/hdl/my_axi.vhd"
 #    "$origin_dir/hdl/axi_processing_ch1.vhd"
 #    "$origin_dir/hdl/axi_processing_ch2.vhd"
 #    "$origin_dir/hdl/axi_tdm_filter.vhd"
@@ -41,8 +42,9 @@ proc checkRequiredFiles { origin_dir} {
   set status true
   set files [list \
  "[file normalize "$origin_dir/hdl/user_top.vhd"]"\
+ "[file normalize "$origin_dir/hdl/axil_pkg.vhd"]"\
  "[file normalize "$origin_dir/hdl/fpga_top.v"]"\
- "[file normalize "$origin_dir/hdl/my_axi.v"]"\
+ "[file normalize "$origin_dir/hdl/my_axi.vhd"]"\
  "[file normalize "$origin_dir/hdl/axi_processing_ch1.vhd"]"\
  "[file normalize "$origin_dir/hdl/axi_processing_ch2.vhd"]"\
  "[file normalize "$origin_dir/hdl/axi_tdm_filter.vhd"]"\
@@ -185,8 +187,9 @@ set obj [get_filesets sources_1]
 # clean rebuild. Do not switch this back to import_files.
 set files [list \
  [file normalize "${origin_dir}/hdl/fpga_top.v" ]\
+ [file normalize "${origin_dir}/hdl/axil_pkg.vhd" ]\
  [file normalize "${origin_dir}/hdl/user_top.vhd" ]\
- [file normalize "${origin_dir}/hdl/my_axi.v" ]\
+ [file normalize "${origin_dir}/hdl/my_axi.vhd" ]\
  [file normalize "${origin_dir}/hdl/axi_processing_ch1.vhd" ]\
  [file normalize "${origin_dir}/hdl/axi_processing_ch2.vhd" ]\
  [file normalize "${origin_dir}/hdl/axi_tdm_filter.vhd" ]\
@@ -252,8 +255,8 @@ set obj [get_filesets utils_1]
 if { [get_files [list fpga_top.v]] == "" } {
   add_files -quiet -norecurse -fileset sources_1 $origin_dir/hdl/fpga_top.v
 }
-if { [get_files [list my_axi.v]] == "" } {
-  add_files -quiet -norecurse -fileset sources_1 $origin_dir/hdl/my_axi.v
+if { [get_files [list my_axi.vhd]] == "" } {
+  add_files -quiet -norecurse -fileset sources_1 $origin_dir/hdl/my_axi.vhd
 }
 if { [get_files [list axi_processing_ch1.vhd]] == "" } {
   add_files -quiet -norecurse -fileset sources_1 $origin_dir/hdl/axi_processing_ch1.vhd
@@ -263,6 +266,9 @@ if { [get_files [list axi_processing_ch2.vhd]] == "" } {
 }
 if { [get_files [list axi_tdm_filter.vhd]] == "" } {
   add_files -quiet -norecurse -fileset sources_1 $origin_dir/hdl/axi_tdm_filter.vhd
+}
+if { [get_files [list axil_pkg.vhd]] == "" } {
+  add_files -quiet -norecurse -fileset sources_1 $origin_dir/hdl/axil_pkg.vhd
 }
 if { [get_files [list user_top.vhd]] == "" } {
   add_files -quiet -norecurse -fileset sources_1 $origin_dir/hdl/user_top.vhd
