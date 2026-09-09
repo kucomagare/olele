@@ -1,44 +1,147 @@
-# Block design definition for CoraZ7_Eth -- proc cr_bd_CoraZ7_Eth, sourced
-# by cora_z7.tcl. Kept in its own file (split out of cora_z7.tcl) so that
-# after changing the block design in the Vivado GUI, re-syncing tracked
-# source is a straight overwrite: File -> Export -> Export Block Design...
-# and point it at this exact path. No manual merging into cora_z7.tcl.
+
+################################################################
+# This is a generated script based on design: CoraZ7_Eth
 #
-# Wrapper regeneration (make_wrapper/add_files for CoraZ7_Eth_wrapper.v)
-# and the call site (cr_bd_CoraZ7_Eth "") live in cora_z7.tcl, not here --
-# they run automatically after this proc, so exporting just this file is
-# enough for changes made within the block design canvas. RTL logic
-# changes inside fpga_top.v/my_axi.v/axi_processing_ch*.vhd still need edits
-# under hdl/, this file only covers how those modules are wired in.
-# Proc to create BD CoraZ7_Eth
-proc cr_bd_CoraZ7_Eth { parentCell } {
-# The design that will be created by this Tcl proc contains the following 
+# Though there are limitations about the generated script,
+# the main purpose of this utility is to make learning
+# IP Integrator Tcl commands easier.
+################################################################
+
+namespace eval _tcl {
+proc get_script_folder {} {
+   set script_path [file normalize [info script]]
+   set script_folder [file dirname $script_path]
+   return $script_folder
+}
+}
+variable script_folder
+set script_folder [_tcl::get_script_folder]
+
+################################################################
+# Check if script is running in correct Vivado version.
+################################################################
+set scripts_vivado_version 2023.2
+set current_vivado_version [version -short]
+
+if { [string first $scripts_vivado_version $current_vivado_version] == -1 } {
+   puts ""
+   if { [string compare $scripts_vivado_version $current_vivado_version] > 0 } {
+      catch {common::send_gid_msg -ssname BD::TCL -id 2042 -severity "ERROR" " This script was generated using Vivado <$scripts_vivado_version> and is being run in <$current_vivado_version> of Vivado. Sourcing the script failed since it was created with a future version of Vivado."}
+
+   } else {
+     catch {common::send_gid_msg -ssname BD::TCL -id 2041 -severity "ERROR" "This script was generated using Vivado <$scripts_vivado_version> and is being run in <$current_vivado_version> of Vivado. Please run the script in Vivado <$scripts_vivado_version> then open the design in Vivado <$current_vivado_version>. Upgrade the design by running \"Tools => Report => Report IP Status...\", then run write_bd_tcl to create an updated script."}
+
+   }
+
+   return 1
+}
+
+################################################################
+# START
+################################################################
+
+# To test this script, run the following commands from Vivado Tcl console:
+# source CoraZ7_Eth_script.tcl
+
+
+# The design that will be created by this Tcl script contains the following 
 # module references:
-# fpga_top, axi_processing_ch1, axi_processing_ch2, axi_tdm_filter
+# axi_processing_ch1, axi_processing_ch2, axi_tdm_filter, user_top
+
+# Please add the sources of those modules before sourcing this Tcl script.
+
+# If there is no project opened, this script will create a
+# project, but make sure you do not have an existing project
+# <./myproj/project_1.xpr> in the current working folder.
+
+set list_projs [get_projects -quiet]
+if { $list_projs eq "" } {
+   create_project project_1 myproj -part xc7z010clg400-1
+}
 
 
+# CHANGE DESIGN NAME HERE
+variable design_name
+set design_name CoraZ7_Eth
 
-  # CHANGE DESIGN NAME HERE
-  set design_name CoraZ7_Eth
+# If you do not already have an existing IP Integrator design open,
+# you can create a design using the following command:
+#    create_bd_design $design_name
 
-  common::send_gid_msg -ssname BD::TCL -id 2010 -severity "INFO" "Currently there is no design <$design_name> in project, so creating one..."
+# Creating design if needed
+set errMsg ""
+set nRet 0
 
-  create_bd_design $design_name
+set cur_design [current_bd_design -quiet]
+set list_cells [get_bd_cells -quiet]
 
-  set bCheckIPsPassed 1
-  ##################################################################
-  # CHECK IPs
-  ##################################################################
-  set bCheckIPs 1
-  if { $bCheckIPs == 1 } {
-     set list_check_ips "\ 
-  xilinx.com:ip:processing_system7:5.5\
-  xilinx.com:ip:axi_gpio:2.0\
-  xilinx.com:ip:proc_sys_reset:5.0\
-  xilinx.com:ip:axi_interconnect:2.1\
-  xilinx.com:ip:axi_dma:7.1\
-  xilinx.com:ip:xlconcat:2.1\
-  "
+if { ${design_name} eq "" } {
+   # USE CASES:
+   #    1) Design_name not set
+
+   set errMsg "Please set the variable <design_name> to a non-empty value."
+   set nRet 1
+
+} elseif { ${cur_design} ne "" && ${list_cells} eq "" } {
+   # USE CASES:
+   #    2): Current design opened AND is empty AND names same.
+   #    3): Current design opened AND is empty AND names diff; design_name NOT in project.
+   #    4): Current design opened AND is empty AND names diff; design_name exists in project.
+
+   if { $cur_design ne $design_name } {
+      common::send_gid_msg -ssname BD::TCL -id 2001 -severity "INFO" "Changing value of <design_name> from <$design_name> to <$cur_design> since current design is empty."
+      set design_name [get_property NAME $cur_design]
+   }
+   common::send_gid_msg -ssname BD::TCL -id 2002 -severity "INFO" "Constructing design in IPI design <$cur_design>..."
+
+} elseif { ${cur_design} ne "" && $list_cells ne "" && $cur_design eq $design_name } {
+   # USE CASES:
+   #    5) Current design opened AND has components AND same names.
+
+   set errMsg "Design <$design_name> already exists in your project, please set the variable <design_name> to another value."
+   set nRet 1
+} elseif { [get_files -quiet ${design_name}.bd] ne "" } {
+   # USE CASES: 
+   #    6) Current opened design, has components, but diff names, design_name exists in project.
+   #    7) No opened design, design_name exists in project.
+
+   set errMsg "Design <$design_name> already exists in your project, please set the variable <design_name> to another value."
+   set nRet 2
+
+} else {
+   # USE CASES:
+   #    8) No opened design, design_name not in project.
+   #    9) Current opened design, has components, but diff names, design_name not in project.
+
+   common::send_gid_msg -ssname BD::TCL -id 2003 -severity "INFO" "Currently there is no design <$design_name> in project, so creating one..."
+
+   create_bd_design $design_name
+
+   common::send_gid_msg -ssname BD::TCL -id 2004 -severity "INFO" "Making design <$design_name> as current_bd_design."
+   current_bd_design $design_name
+
+}
+
+common::send_gid_msg -ssname BD::TCL -id 2005 -severity "INFO" "Currently the variable <design_name> is equal to \"$design_name\"."
+
+if { $nRet != 0 } {
+   catch {common::send_gid_msg -ssname BD::TCL -id 2006 -severity "ERROR" $errMsg}
+   return $nRet
+}
+
+set bCheckIPsPassed 1
+##################################################################
+# CHECK IPs
+##################################################################
+set bCheckIPs 1
+if { $bCheckIPs == 1 } {
+   set list_check_ips "\ 
+xilinx.com:ip:processing_system7:5.5\
+xilinx.com:ip:axi_gpio:2.0\
+xilinx.com:ip:axi_dma:7.1\
+xilinx.com:ip:xlconcat:2.1\
+xilinx.com:ip:proc_sys_reset:5.0\
+"
 
    set list_ips_missing ""
    common::send_gid_msg -ssname BD::TCL -id 2011 -severity "INFO" "Checking if the following IPs exist in the project's IP catalog: $list_check_ips ."
@@ -55,19 +158,19 @@ proc cr_bd_CoraZ7_Eth { parentCell } {
       set bCheckIPsPassed 0
    }
 
-  }
+}
 
-  ##################################################################
-  # CHECK Modules
-  ##################################################################
-  set bCheckModules 1
-  if { $bCheckModules == 1 } {
-     set list_check_mods "\ 
-  fpga_top\
-  axi_processing_ch1\
-  axi_processing_ch2\
-  axi_tdm_filter\
-  "
+##################################################################
+# CHECK Modules
+##################################################################
+set bCheckModules 1
+if { $bCheckModules == 1 } {
+   set list_check_mods "\ 
+axi_processing_ch1\
+axi_processing_ch2\
+axi_tdm_filter\
+user_top\
+"
 
    set list_mods_missing ""
    common::send_gid_msg -ssname BD::TCL -id 2020 -severity "INFO" "Checking if the following modules exist in the project's sources: $list_check_mods ."
@@ -85,12 +188,23 @@ proc cr_bd_CoraZ7_Eth { parentCell } {
    }
 }
 
-  if { $bCheckIPsPassed != 1 } {
-    common::send_gid_msg -ssname BD::TCL -id 2023 -severity "WARNING" "Will not continue with creation of design due to the error(s) above."
-    return 3
-  }
+if { $bCheckIPsPassed != 1 } {
+  common::send_gid_msg -ssname BD::TCL -id 2023 -severity "WARNING" "Will not continue with creation of design due to the error(s) above."
+  return 3
+}
+
+##################################################################
+# DESIGN PROCs
+##################################################################
+
+
+
+# Procedure to create entire design; Provide argument to make
+# procedure reusable. If parentCell is "", will use root.
+proc create_root_design { parentCell } {
 
   variable script_folder
+  variable design_name
 
   if { $parentCell eq "" } {
      set parentCell [get_bd_cells /]
@@ -746,18 +860,7 @@ proc cr_bd_CoraZ7_Eth { parentCell } {
   ] $axi_gpio_leds
 
 
-  # Create instance: fpga_top_0, and set properties
-  set block_name fpga_top
-  set block_cell_name fpga_top_0
-  if { [catch {set fpga_top_0 [create_bd_cell -type module -reference $block_name $block_cell_name] } errmsg] } {
-     catch {common::send_gid_msg -ssname BD::TCL -id 2095 -severity "ERROR" "Unable to add referenced block <$block_name>. Please add the files for ${block_name}'s definition into the project."}
-     return 1
-   } elseif { $fpga_top_0 eq "" } {
-     catch {common::send_gid_msg -ssname BD::TCL -id 2096 -severity "ERROR" "Unable to referenced block <$block_name>. Please add the files for ${block_name}'s definition into the project."}
-     return 1
-   }
-  
-  # Create instance: axi_processing_ch1_0 (ch1 processing chain), and set properties
+  # Create instance: axi_processing_ch1_0, and set properties
   set block_name axi_processing_ch1
   set block_cell_name axi_processing_ch1_0
   if { [catch {set axi_processing_ch1_0 [create_bd_cell -type module -reference $block_name $block_cell_name] } errmsg] } {
@@ -767,8 +870,8 @@ proc cr_bd_CoraZ7_Eth { parentCell } {
      catch {common::send_gid_msg -ssname BD::TCL -id 2096 -severity "ERROR" "Unable to referenced block <$block_name>. Please add the files for ${block_name}'s definition into the project."}
      return 1
    }
-
-  # Create instance: axi_processing_ch2_0 (ch2 processing chain), and set properties
+  
+  # Create instance: axi_processing_ch2_0, and set properties
   set block_name axi_processing_ch2
   set block_cell_name axi_processing_ch2_0
   if { [catch {set axi_processing_ch2_0 [create_bd_cell -type module -reference $block_name $block_cell_name] } errmsg] } {
@@ -778,10 +881,8 @@ proc cr_bd_CoraZ7_Eth { parentCell } {
      catch {common::send_gid_msg -ssname BD::TCL -id 2096 -severity "ERROR" "Unable to referenced block <$block_name>. Please add the files for ${block_name}'s definition into the project."}
      return 1
    }
-
-  # Create instance: axi_tdm_filter_0 (TDM streaming filter), and set
-  # properties. Replaces sizif's per-channel AXI-Lite filters: one shared
-  # datapath, per-channel state in RAM, channel count set by register.
+  
+  # Create instance: axi_tdm_filter_0, and set properties
   set block_name axi_tdm_filter
   set block_cell_name axi_tdm_filter_0
   if { [catch {set axi_tdm_filter_0 [create_bd_cell -type module -reference $block_name $block_cell_name] } errmsg] } {
@@ -791,77 +892,61 @@ proc cr_bd_CoraZ7_Eth { parentCell } {
      catch {common::send_gid_msg -ssname BD::TCL -id 2096 -severity "ERROR" "Unable to referenced block <$block_name>. Please add the files for ${block_name}'s definition into the project."}
      return 1
    }
-
-  # Vivado infers the s_axis/m_axis interfaces from the port naming, but for
-  # a module reference (as opposed to packaged IP) it has no way to know
-  # which clock drives them, so it assumes a default 100 MHz and validation
-  # fails with a FREQ_HZ mismatch against the DMA's 50 MHz streams. Naming
-  # the associated interfaces on the clock pin lets the real frequency
-  # propagate from the clock net.
-  set_property CONFIG.ASSOCIATED_BUSIF {s00_axi:s_axis:m_axis} [get_bd_pins axi_tdm_filter_0/s00_axi_aclk]
-
-  # Create instance: axi_dma_0, and set properties.
-  #
-  # Scatter-gather is DISABLED on purpose. It is a build-time parameter, not
-  # a runtime mode, so turning it on later costs one bitstream rebuild --
-  # but simple mode is far easier to bring up, and the first debugging
-  # session is better spent on cache coherence and tlast than on descriptor
-  # chains. Simple mode allows one outstanding transfer per channel, so
-  # ping-pong buffering overlaps CPU work with DMA work rather than
-  # queueing transfers; there is a small gap between them.
-  #
-  # Memory-map side is 64-bit to match the HP port even though the stream
-  # side is 32-bit (one TDM slot per beat) -- choosing it now avoids a
-  # rebuild later. The DMA does the width conversion.
+  
+  # Create instance: axi_dma_0, and set properties
   set axi_dma_0 [ create_bd_cell -type ip -vlnv xilinx.com:ip:axi_dma:7.1 axi_dma_0 ]
   set_property -dict [list \
-    CONFIG.c_include_sg {0} \
-    CONFIG.c_sg_include_stscntrl_strm {0} \
     CONFIG.c_include_mm2s {1} \
-    CONFIG.c_include_s2mm {1} \
     CONFIG.c_include_mm2s_dre {0} \
+    CONFIG.c_include_s2mm {1} \
     CONFIG.c_include_s2mm_dre {0} \
+    CONFIG.c_include_sg {0} \
     CONFIG.c_m_axi_mm2s_data_width {64} \
-    CONFIG.c_m_axis_mm2s_tdata_width {32} \
     CONFIG.c_m_axi_s2mm_data_width {64} \
-    CONFIG.c_s_axis_s2mm_tdata_width {32} \
+    CONFIG.c_m_axis_mm2s_tdata_width {32} \
     CONFIG.c_mm2s_burst_size {16} \
     CONFIG.c_s2mm_burst_size {16} \
+    CONFIG.c_s_axis_s2mm_tdata_width {32} \
     CONFIG.c_sg_length_width {26} \
   ] $axi_dma_0
 
-  # Create instance: axi_mem_intercon -- merges the DMA's two memory-mapped
-  # masters (MM2S read, S2MM write) onto the single HP0 slave port.
+
+  # Create instance: axi_mem_intercon, and set properties
   set axi_mem_intercon [ create_bd_cell -type ip -vlnv xilinx.com:ip:axi_interconnect:2.1 axi_mem_intercon ]
   set_property -dict [list \
     CONFIG.NUM_MI {1} \
     CONFIG.NUM_SI {2} \
   ] $axi_mem_intercon
 
-  # Create instance: xlconcat_0 -- one IRQ_F2P bit per interrupt SOURCE.
-  # IRQ_F2P is 16 bits and each lands on a distinct shared peripheral
-  # interrupt the GIC can target at CPU0 or CPU1 independently, so keeping
-  # sources on separate bits makes a future AMP split a device-tree edit
-  # rather than a rewire. In0 keeps the ADC data-ready interrupt on bit 0
-  # so its existing interrupt ID does not move.
-  set xlconcat_0 [ create_bd_cell -type ip -vlnv xilinx.com:ip:xlconcat:2.1 xlconcat_0 ]
-  set_property -dict [list \
-    CONFIG.NUM_PORTS {3} \
-  ] $xlconcat_0
 
-  # Create instance: rst_rt_50M -- a SECOND reset domain covering the
-  # real-time data path (DMA, stream filter, memory interconnect), kept
-  # separate from the legacy/GPIO group on rst_ps7_0_50M. Both are driven
-  # from FCLK_RESET0_N today, so this changes nothing functionally; it
-  # exists so that under AMP, where a Linux reboot on one core must not
-  # yank the fabric out from under the other core mid-transfer, splitting
-  # them is a one-line change of ext_reset_in rather than a restructure.
+  # Create instance: xlconcat_0, and set properties
+  set xlconcat_0 [ create_bd_cell -type ip -vlnv xilinx.com:ip:xlconcat:2.1 xlconcat_0 ]
+  set_property CONFIG.NUM_PORTS {3} $xlconcat_0
+
+
+  # Create instance: rst_rt_50M, and set properties
   set rst_rt_50M [ create_bd_cell -type ip -vlnv xilinx.com:ip:proc_sys_reset:5.0 rst_rt_50M ]
 
   # Create instance: rst_ps7_0_50M, and set properties
   set rst_ps7_0_50M [ create_bd_cell -type ip -vlnv xilinx.com:ip:proc_sys_reset:5.0 rst_ps7_0_50M ]
 
+  # Create instance: top_hdl, and set properties
+  set block_name user_top
+  set block_cell_name top_hdl
+  if { [catch {set top_hdl [create_bd_cell -type module -reference $block_name $block_cell_name] } errmsg] } {
+     catch {common::send_gid_msg -ssname BD::TCL -id 2095 -severity "ERROR" "Unable to add referenced block <$block_name>. Please add the files for ${block_name}'s definition into the project."}
+     return 1
+   } elseif { $top_hdl eq "" } {
+     catch {common::send_gid_msg -ssname BD::TCL -id 2096 -severity "ERROR" "Unable to referenced block <$block_name>. Please add the files for ${block_name}'s definition into the project."}
+     return 1
+   }
+  
   # Create interface connections
+  connect_bd_intf_net -intf_net axi_dma_0_M_AXIS_MM2S [get_bd_intf_pins axi_dma_0/M_AXIS_MM2S] [get_bd_intf_pins axi_tdm_filter_0/s_axis]
+  connect_bd_intf_net -intf_net axi_dma_0_M_AXI_MM2S [get_bd_intf_pins axi_dma_0/M_AXI_MM2S] [get_bd_intf_pins axi_mem_intercon/S00_AXI]
+  connect_bd_intf_net -intf_net axi_dma_0_M_AXI_S2MM [get_bd_intf_pins axi_dma_0/M_AXI_S2MM] [get_bd_intf_pins axi_mem_intercon/S01_AXI]
+  connect_bd_intf_net -intf_net axi_mem_intercon_M00_AXI [get_bd_intf_pins axi_mem_intercon/M00_AXI] [get_bd_intf_pins processing_system7_0/S_AXI_HP0]
+  connect_bd_intf_net -intf_net axi_tdm_filter_0_m_axis [get_bd_intf_pins axi_tdm_filter_0/m_axis] [get_bd_intf_pins axi_dma_0/S_AXIS_S2MM]
   connect_bd_intf_net -intf_net processing_system7_0_DDR [get_bd_intf_ports DDR] [get_bd_intf_pins processing_system7_0/DDR]
   connect_bd_intf_net -intf_net processing_system7_0_FIXED_IO [get_bd_intf_ports FIXED_IO] [get_bd_intf_pins processing_system7_0/FIXED_IO]
   connect_bd_intf_net -intf_net processing_system7_0_M_AXI_GP0 [get_bd_intf_pins processing_system7_0/M_AXI_GP0] [get_bd_intf_pins ps7_0_axi_periph/S00_AXI]
@@ -875,66 +960,53 @@ proc cr_bd_CoraZ7_Eth { parentCell } {
   connect_bd_intf_net -intf_net ps7_0_axi_periph_M06_AXI [get_bd_intf_pins ps7_0_axi_periph/M06_AXI] [get_bd_intf_pins axi_processing_ch2_0/s00_axi]
   connect_bd_intf_net -intf_net ps7_0_axi_periph_M07_AXI [get_bd_intf_pins ps7_0_axi_periph/M07_AXI] [get_bd_intf_pins axi_tdm_filter_0/s00_axi]
   connect_bd_intf_net -intf_net ps7_0_axi_periph_M08_AXI [get_bd_intf_pins ps7_0_axi_periph/M08_AXI] [get_bd_intf_pins axi_dma_0/S_AXI_LITE]
-  connect_bd_intf_net -intf_net axi_dma_0_M_AXI_MM2S [get_bd_intf_pins axi_dma_0/M_AXI_MM2S] [get_bd_intf_pins axi_mem_intercon/S00_AXI]
-  connect_bd_intf_net -intf_net axi_dma_0_M_AXI_S2MM [get_bd_intf_pins axi_dma_0/M_AXI_S2MM] [get_bd_intf_pins axi_mem_intercon/S01_AXI]
-  connect_bd_intf_net -intf_net axi_mem_intercon_M00_AXI [get_bd_intf_pins axi_mem_intercon/M00_AXI] [get_bd_intf_pins processing_system7_0/S_AXI_HP0]
-  connect_bd_intf_net -intf_net axi_dma_0_M_AXIS_MM2S [get_bd_intf_pins axi_dma_0/M_AXIS_MM2S] [get_bd_intf_pins axi_tdm_filter_0/s_axis]
-  connect_bd_intf_net -intf_net axi_tdm_filter_0_m_axis [get_bd_intf_pins axi_tdm_filter_0/m_axis] [get_bd_intf_pins axi_dma_0/S_AXIS_S2MM]
 
   # Create port connections
-  connect_bd_net -net Net [get_bd_pins processing_system7_0/FCLK_CLK0] [get_bd_pins fpga_top_0/clk] [get_bd_pins axi_processing_ch1_0/s00_axi_aclk] [get_bd_pins axi_processing_ch2_0/s00_axi_aclk] [get_bd_pins ps7_0_axi_periph/M05_ACLK] [get_bd_pins ps7_0_axi_periph/M06_ACLK] [get_bd_pins ps7_0_axi_periph/M00_ACLK] [get_bd_pins ps7_0_axi_periph/M01_ACLK] [get_bd_pins ps7_0_axi_periph/M04_ACLK] [get_bd_pins ps7_0_axi_periph/M02_ACLK] [get_bd_pins ps7_0_axi_periph/M03_ACLK] [get_bd_pins ps7_0_axi_periph/ACLK] [get_bd_pins ps7_0_axi_periph/S00_ACLK] [get_bd_pins axi_gpio_adc_rst/s_axi_aclk] [get_bd_pins axi_gpio_adc_ss/s_axi_aclk] [get_bd_pins axi_gpio_adc_dr/s_axi_aclk] [get_bd_pins axi_gpio_btns/s_axi_aclk] [get_bd_pins axi_gpio_leds/s_axi_aclk] [get_bd_pins processing_system7_0/M_AXI_GP0_ACLK] [get_bd_pins rst_ps7_0_50M/slowest_sync_clk] [get_bd_pins rst_rt_50M/slowest_sync_clk] [get_bd_pins ps7_0_axi_periph/M07_ACLK] [get_bd_pins ps7_0_axi_periph/M08_ACLK] [get_bd_pins axi_tdm_filter_0/s00_axi_aclk] [get_bd_pins axi_dma_0/s_axi_lite_aclk] [get_bd_pins axi_dma_0/m_axi_mm2s_aclk] [get_bd_pins axi_dma_0/m_axi_s2mm_aclk] [get_bd_pins axi_mem_intercon/ACLK] [get_bd_pins axi_mem_intercon/S00_ACLK] [get_bd_pins axi_mem_intercon/S01_ACLK] [get_bd_pins axi_mem_intercon/M00_ACLK] [get_bd_pins processing_system7_0/S_AXI_HP0_ACLK]
-  connect_bd_net -net axi_gpio_adc_dr_ip2intc_irpt [get_bd_pins axi_gpio_adc_dr/ip2intc_irpt] [get_bd_pins xlconcat_0/In0]
+  connect_bd_net -net Net [get_bd_pins processing_system7_0/FCLK_CLK0] [get_bd_pins axi_processing_ch1_0/s00_axi_aclk] [get_bd_pins axi_processing_ch2_0/s00_axi_aclk] [get_bd_pins ps7_0_axi_periph/M05_ACLK] [get_bd_pins ps7_0_axi_periph/M06_ACLK] [get_bd_pins ps7_0_axi_periph/M00_ACLK] [get_bd_pins ps7_0_axi_periph/M01_ACLK] [get_bd_pins ps7_0_axi_periph/M04_ACLK] [get_bd_pins ps7_0_axi_periph/M02_ACLK] [get_bd_pins ps7_0_axi_periph/M03_ACLK] [get_bd_pins ps7_0_axi_periph/ACLK] [get_bd_pins ps7_0_axi_periph/S00_ACLK] [get_bd_pins axi_gpio_adc_rst/s_axi_aclk] [get_bd_pins axi_gpio_adc_ss/s_axi_aclk] [get_bd_pins axi_gpio_adc_dr/s_axi_aclk] [get_bd_pins axi_gpio_btns/s_axi_aclk] [get_bd_pins axi_gpio_leds/s_axi_aclk] [get_bd_pins processing_system7_0/M_AXI_GP0_ACLK] [get_bd_pins rst_ps7_0_50M/slowest_sync_clk] [get_bd_pins rst_rt_50M/slowest_sync_clk] [get_bd_pins ps7_0_axi_periph/M07_ACLK] [get_bd_pins ps7_0_axi_periph/M08_ACLK] [get_bd_pins axi_tdm_filter_0/aclk] [get_bd_pins axi_dma_0/s_axi_lite_aclk] [get_bd_pins axi_dma_0/m_axi_mm2s_aclk] [get_bd_pins axi_dma_0/m_axi_s2mm_aclk] [get_bd_pins axi_mem_intercon/ACLK] [get_bd_pins axi_mem_intercon/S00_ACLK] [get_bd_pins axi_mem_intercon/S01_ACLK] [get_bd_pins axi_mem_intercon/M00_ACLK] [get_bd_pins processing_system7_0/S_AXI_HP0_ACLK] [get_bd_pins top_hdl/clk]
   connect_bd_net -net axi_dma_0_mm2s_introut [get_bd_pins axi_dma_0/mm2s_introut] [get_bd_pins xlconcat_0/In1]
   connect_bd_net -net axi_dma_0_s2mm_introut [get_bd_pins axi_dma_0/s2mm_introut] [get_bd_pins xlconcat_0/In2]
-  connect_bd_net -net xlconcat_0_dout [get_bd_pins xlconcat_0/dout] [get_bd_pins processing_system7_0/IRQ_F2P]
-  connect_bd_net -net rst_rt_50M_peripheral_aresetn [get_bd_pins rst_rt_50M/peripheral_aresetn] [get_bd_pins axi_tdm_filter_0/s00_axi_aresetn] [get_bd_pins axi_dma_0/axi_resetn] [get_bd_pins axi_mem_intercon/ARESETN] [get_bd_pins axi_mem_intercon/S00_ARESETN] [get_bd_pins axi_mem_intercon/S01_ARESETN] [get_bd_pins axi_mem_intercon/M00_ARESETN]
+  connect_bd_net -net axi_gpio_adc_dr_ip2intc_irpt [get_bd_pins axi_gpio_adc_dr/ip2intc_irpt] [get_bd_pins xlconcat_0/In0]
   connect_bd_net -net axi_gpio_adc_rst_gpio_io_o [get_bd_pins axi_gpio_adc_rst/gpio_io_o] [get_bd_ports adc_rst]
   connect_bd_net -net axi_gpio_adc_ss_gpio_io_o [get_bd_pins axi_gpio_adc_ss/gpio_io_o] [get_bd_ports adc_ss]
   connect_bd_net -net axi_gpio_leds_gpio_io_o [get_bd_pins axi_gpio_leds/gpio_io_o] [get_bd_ports leds_ps]
-  connect_bd_net -net btn_pl_0_1 [get_bd_ports btn_pl] [get_bd_pins fpga_top_0/btn_pl]
-  connect_bd_net -net fpga_top_0_led_pl_b [get_bd_pins fpga_top_0/led_pl_b] [get_bd_ports led_pl_b]
-  connect_bd_net -net fpga_top_0_led_pl_g [get_bd_pins fpga_top_0/led_pl_g] [get_bd_ports led_pl_g]
-  connect_bd_net -net fpga_top_0_led_pl_r [get_bd_pins fpga_top_0/led_pl_r] [get_bd_ports led_pl_r]
+  connect_bd_net -net btn_pl_1 [get_bd_ports btn_pl] [get_bd_pins top_hdl/btn_pl]
   connect_bd_net -net gpio_io_i_0_1 [get_bd_ports adc_dr] [get_bd_pins axi_gpio_adc_dr/gpio_io_i]
   connect_bd_net -net gpio_io_i_1_1 [get_bd_ports btn_ps] [get_bd_pins axi_gpio_btns/gpio_io_i]
   connect_bd_net -net processing_system7_0_FCLK_RESET0_N [get_bd_pins processing_system7_0/FCLK_RESET0_N] [get_bd_pins rst_ps7_0_50M/ext_reset_in] [get_bd_pins rst_rt_50M/ext_reset_in]
   connect_bd_net -net rst_ps7_0_50M_peripheral_aresetn [get_bd_pins rst_ps7_0_50M/peripheral_aresetn] [get_bd_pins axi_processing_ch1_0/s00_axi_aresetn] [get_bd_pins axi_processing_ch2_0/s00_axi_aresetn] [get_bd_pins ps7_0_axi_periph/M05_ARESETN] [get_bd_pins ps7_0_axi_periph/M06_ARESETN] [get_bd_pins ps7_0_axi_periph/M00_ARESETN] [get_bd_pins ps7_0_axi_periph/M01_ARESETN] [get_bd_pins ps7_0_axi_periph/M04_ARESETN] [get_bd_pins ps7_0_axi_periph/M02_ARESETN] [get_bd_pins ps7_0_axi_periph/M03_ARESETN] [get_bd_pins ps7_0_axi_periph/ARESETN] [get_bd_pins ps7_0_axi_periph/S00_ARESETN] [get_bd_pins axi_gpio_adc_rst/s_axi_aresetn] [get_bd_pins axi_gpio_adc_ss/s_axi_aresetn] [get_bd_pins axi_gpio_adc_dr/s_axi_aresetn] [get_bd_pins axi_gpio_btns/s_axi_aresetn] [get_bd_pins axi_gpio_leds/s_axi_aresetn] [get_bd_pins ps7_0_axi_periph/M07_ARESETN] [get_bd_pins ps7_0_axi_periph/M08_ARESETN]
+  connect_bd_net -net rst_rt_50M_peripheral_aresetn [get_bd_pins rst_rt_50M/peripheral_aresetn] [get_bd_pins axi_tdm_filter_0/aresetn] [get_bd_pins axi_dma_0/axi_resetn] [get_bd_pins axi_mem_intercon/ARESETN] [get_bd_pins axi_mem_intercon/S00_ARESETN] [get_bd_pins axi_mem_intercon/S01_ARESETN] [get_bd_pins axi_mem_intercon/M00_ARESETN]
+  connect_bd_net -net user_top_0_led_pl_b [get_bd_pins top_hdl/led_pl_b] [get_bd_ports led_pl_b]
+  connect_bd_net -net user_top_0_led_pl_g [get_bd_pins top_hdl/led_pl_g] [get_bd_ports led_pl_g]
+  connect_bd_net -net user_top_0_led_pl_r [get_bd_pins top_hdl/led_pl_r] [get_bd_ports led_pl_r]
+  connect_bd_net -net xlconcat_0_dout [get_bd_pins xlconcat_0/dout] [get_bd_pins processing_system7_0/IRQ_F2P]
 
   # Create address segments
-  #
-  # Real-time group kept contiguous in 0x40000000-0x4001FFFF: under AMP,
-  # ownership is assigned per-peripheral and both the Linux device tree and
-  # the MMU work in pages, so grouping everything one core will own into a
-  # single aligned region now costs nothing and saves a fiddly split later.
-  # 0x40000000 is the slot the removed axi_fir used to occupy.
-  assign_bd_address -offset 0x40000000 -range 0x00001000 -target_address_space [get_bd_addr_spaces processing_system7_0/Data] [get_bd_addr_segs axi_tdm_filter_0/s00_axi/reg0] -force
   assign_bd_address -offset 0x40010000 -range 0x00010000 -target_address_space [get_bd_addr_spaces processing_system7_0/Data] [get_bd_addr_segs axi_dma_0/S_AXI_LITE/Reg] -force
-  # The DMA's own view of DDR, through HP0.
-  assign_bd_address -offset 0x00000000 -range 0x20000000 -target_address_space [get_bd_addr_spaces axi_dma_0/Data_MM2S] [get_bd_addr_segs processing_system7_0/S_AXI_HP0/HP0_DDR_LOWOCM] -force
-  assign_bd_address -offset 0x00000000 -range 0x20000000 -target_address_space [get_bd_addr_spaces axi_dma_0/Data_S2MM] [get_bd_addr_segs processing_system7_0/S_AXI_HP0/HP0_DDR_LOWOCM] -force
-  assign_bd_address -offset 0x40001000 -range 0x00001000 -target_address_space [get_bd_addr_spaces processing_system7_0/Data] [get_bd_addr_segs axi_processing_ch1_0/s00_axi/reg0] -force
-  assign_bd_address -offset 0x40002000 -range 0x00001000 -target_address_space [get_bd_addr_spaces processing_system7_0/Data] [get_bd_addr_segs axi_processing_ch2_0/s00_axi/reg0] -force
   assign_bd_address -offset 0x41200000 -range 0x00010000 -target_address_space [get_bd_addr_spaces processing_system7_0/Data] [get_bd_addr_segs axi_gpio_adc_dr/S_AXI/Reg] -force
   assign_bd_address -offset 0x41210000 -range 0x00010000 -target_address_space [get_bd_addr_spaces processing_system7_0/Data] [get_bd_addr_segs axi_gpio_adc_rst/S_AXI/Reg] -force
   assign_bd_address -offset 0x41220000 -range 0x00010000 -target_address_space [get_bd_addr_spaces processing_system7_0/Data] [get_bd_addr_segs axi_gpio_adc_ss/S_AXI/Reg] -force
   assign_bd_address -offset 0x41230000 -range 0x00010000 -target_address_space [get_bd_addr_spaces processing_system7_0/Data] [get_bd_addr_segs axi_gpio_btns/S_AXI/Reg] -force
   assign_bd_address -offset 0x41240000 -range 0x00010000 -target_address_space [get_bd_addr_spaces processing_system7_0/Data] [get_bd_addr_segs axi_gpio_leds/S_AXI/Reg] -force
+  assign_bd_address -offset 0x40001000 -range 0x00001000 -target_address_space [get_bd_addr_spaces processing_system7_0/Data] [get_bd_addr_segs axi_processing_ch1_0/s00_axi/reg0] -force
+  assign_bd_address -offset 0x40002000 -range 0x00001000 -target_address_space [get_bd_addr_spaces processing_system7_0/Data] [get_bd_addr_segs axi_processing_ch2_0/s00_axi/reg0] -force
+  assign_bd_address -offset 0x40000000 -range 0x00001000 -target_address_space [get_bd_addr_spaces processing_system7_0/Data] [get_bd_addr_segs axi_tdm_filter_0/s00_axi/reg0] -force
+  assign_bd_address -offset 0x00000000 -range 0x20000000 -target_address_space [get_bd_addr_spaces axi_dma_0/Data_MM2S] [get_bd_addr_segs processing_system7_0/S_AXI_HP0/HP0_DDR_LOWOCM] -force
+  assign_bd_address -offset 0x00000000 -range 0x20000000 -target_address_space [get_bd_addr_spaces axi_dma_0/Data_S2MM] [get_bd_addr_segs processing_system7_0/S_AXI_HP0/HP0_DDR_LOWOCM] -force
 
-
-  # A module reference's inferred AXI-Stream interfaces do not pick up the
-  # clock frequency from the net the way packaged IP does -- they keep the
-  # 100 MHz default and validation fails against the DMA's 50 MHz streams.
-  # Stamp them from FCLK_CLK0 itself rather than hardcoding a number, so
-  # this stays correct if the fabric clock is ever changed.
-  set fclk_freq_hz [get_property CONFIG.FREQ_HZ [get_bd_pins processing_system7_0/FCLK_CLK0]]
-  set_property CONFIG.FREQ_HZ $fclk_freq_hz [get_bd_intf_pins axi_tdm_filter_0/s_axis]
-  set_property CONFIG.FREQ_HZ $fclk_freq_hz [get_bd_intf_pins axi_tdm_filter_0/m_axis]
 
   # Restore current instance
   current_bd_instance $oldCurInst
 
   validate_bd_design
   save_bd_design
-  close_bd_design $design_name 
 }
-# End of cr_bd_CoraZ7_Eth()
+# End of create_root_design()
+
+
+##################################################################
+# MAIN FLOW
+##################################################################
+
+create_root_design ""
+
+

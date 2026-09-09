@@ -56,8 +56,8 @@ entity axi_tdm_filter is
     );
     port (
         -- AXI4-Lite slave: control/status only, no sample data
-        s00_axi_aclk    : in  std_logic;
-        s00_axi_aresetn : in  std_logic;
+        aclk            : in  std_logic;
+        aresetn         : in  std_logic;
         s00_axi_awaddr  : in  std_logic_vector(C_S00_AXI_ADDR_WIDTH-1 downto 0);
         s00_axi_awprot  : in  std_logic_vector(2 downto 0);
         s00_axi_awvalid : in  std_logic;
@@ -191,8 +191,8 @@ begin
             axi_slv_reg2     => cfg_reg2,
             axi_slv_reg3     => open,
             fir_result       => status,
-            S_AXI_ACLK       => s00_axi_aclk,
-            S_AXI_ARESETN    => s00_axi_aresetn,
+            S_AXI_ACLK       => aclk,
+            S_AXI_ARESETN    => aresetn,
             S_AXI_AWADDR     => s00_axi_awaddr,
             S_AXI_AWPROT     => s00_axi_awprot,
             S_AXI_AWVALID    => s00_axi_awvalid,
@@ -259,10 +259,10 @@ begin
     m_axis_tdata <= result;
 
     -- ---------------- sequential state ----------------
-    process (s00_axi_aclk)
+    process (aclk)
     begin
-        if rising_edge(s00_axi_aclk) then
-            if s00_axi_aresetn = '0' then
+        if rising_edge(aclk) then
+            if aresetn = '0' then
                 slot_idx <= 0;
             elsif beat = '1' then
                 -- State update: only channel slots carry state.
