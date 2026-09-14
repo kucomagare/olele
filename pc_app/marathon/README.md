@@ -529,7 +529,7 @@ change them, not this doc or the source directly. Currently:
   reserved for future use.
 
 `python_client.py` reads `packet_format.json` directly at runtime. The
-firmware (`vitis/marathon/app/lwip_comm_client_raw.c`) and this relay
+firmware (`vitis/marathon/app/src/`) and this relay
 (`tcp_server_app.cpp`) can't -- being compiled, bare-metal C has no
 filesystem -- so `../../shared/gen_packet_header.py` generates a C header
 from the same JSON, run automatically by `build.sh` and

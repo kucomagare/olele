@@ -2,13 +2,26 @@
 
 Bare-metal firmware for the "marathon" hardware version: an lwIP raw-mode TCP
 client running on the Zynq PS (Cortex-A9), based on the Xilinx
-`lwip_tcp_perf_client` template but heavily customized. `lwip_comm_client_raw.c`
-is the TCP protocol state machine (lifecycle callbacks + packet framing);
-it delegates to three small, independently-focused modules rather than
-doing everything itself:
-- `comm_log.{c,h}` — buffered logging (append cheaply, flush once/loop)
-- `rx_ring.{c,h}` — generic circular byte buffer, no protocol knowledge
-- `axi_processing.{c,h}` — pokes/reads the ch1/ch2 AXI-Lite peripherals
+`lwip_tcp_perf_client` template but heavily customized.
+
+Everything hand-written is under `app/src/`. The top level is the
+application; the subfolders are services it uses:
+
+- `main.c` — boot, network bring-up, the main loop
+- `comm_process.{c,h}` — what happens to a received packet: DATA goes to the
+  DMA path or the legacy AXI-Lite path (`comm_use_dma`), CONFIG sets the
+  filter registers and replies with a read-back
+- `comm_stats.{c,h}` — throughput counters, service latency, the `[S]` line
+  and the metrics packet
+- `board_config.h` — **every constant that must match something outside the
+  firmware** (IPs, port, payload limit, PL base addresses), each commented
+  with the file it has to match
+- `net/` — `tcp_link` (connect, reconnect, receive, send), `packet_codec`
+  (wire byte-swap), `rx_ring` (circular byte buffer, no protocol knowledge)
+- `processing/` — `dma_stream` (AXI DMA + TDM filter), `axi_processing`
+  (per-sample ch1/ch2 AXI-Lite peripherals)
+- `util/` — `comm_log` (buffered, budget-capped UART logging), `mono_clock`
+  (SCU global timer)
 
 ## Reading the UART output
 
@@ -47,7 +60,7 @@ connection is guaranteed to start on a packet boundary. Never "recover" by
 discarding a partial run of bytes and continuing — that is precisely what
 turned a transient overload into permanent corruption once already.
 
-See `app/main.c` for the top-level loop and stats reporting.
+See `app/src/main.c` for the top-level loop.
 
 ## This is an SDT-flow build (matters more than it looks)
 
@@ -75,11 +88,13 @@ with the full installer, not flipping a flag — this install is the
 "embedded installer", which omits the classic IDE entirely.
 
 ```
-app/                  hand-written sources (excludes generated BSP)
-  main.c, lwip_comm_client_raw.{c,h}, comm_log.{c,h}, rx_ring.{c,h},
-  axi_processing.{c,h}, platform.{c,h}, platform_config.h.in,
-  lscript.ld, CMakeLists.txt, UserConfig.cmake,
-  lwip_tcp_perf_client.cmake, app.yaml
+app/
+  CMakeLists.txt       source list -- add new .c files here
+  app.yaml             Vitis IDE component descriptor
+  src/                 all hand-written firmware (see top of this README)
+  platform/            Xilinx template glue: platform.{c,h}, platform_config.h.in
+  build_config/        UserConfig.cmake (flags), lscript.ld (memory map),
+                       the two vendor lwip_tcp_perf_client .cmake files
 build/                 empty in git; platform + app build output lands here
 build_platform.sh      creates the Vitis platform component from a .xsa
 build_app.sh           builds app/ against that platform via CMake
@@ -202,11 +217,11 @@ using the system `cmake` (not the Vitis-bundled one) and `-DNON_YOCTO=ON`
 (required — without it the lwIP include path isn't added and the build
 fails on missing `lwip/tcp.h`). Output: `build/app/lwip_tcp_perf_client.elf`.
 
-Before compiling, this also regenerates `app/packet_format.h` from
-`../../shared/<variant>/packet_format.json` (see the root README's "Wire packet
-format" section) — `lwip_comm_client_raw.c` picks it up via a plain
-`#include "packet_format.h"`. The generated header is gitignored; edit
-`packet_format.json`, not `app/packet_format.h` directly.
+Before compiling, this also regenerates `build/app/generated/packet_format.h`
+from `../../shared/<variant>/packet_format.json` (see the root README's "Wire
+packet format" section). It lives in the build tree, not `app/`, and
+`CMakeLists.txt` puts that directory on the include path. Edit
+`packet_format.json`, never the generated header.
 
 ## 4. Run it on the board
 

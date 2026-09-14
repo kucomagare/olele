@@ -83,7 +83,7 @@ automation API, no GUI) + firmware build, then the PC app's relay server
 binary + venv. See each `<tool>/<variant>/README.md` for what each step does
 and how to run its pieces individually.
 
-Changed only the firmware C code (`vitis/<variant>/app/*.c`) or the C++
+Changed only the firmware C code (`vitis/<variant>/app/`) or the C++
 relay server (`pc_app/<variant>/tcp_server_app.cpp`)? Skip the slow Vivado
 synth/impl and Vitis platform-creation steps and just recompile:
 

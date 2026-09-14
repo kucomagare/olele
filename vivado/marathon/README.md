@@ -104,8 +104,8 @@ same single-pole IIR low-pass filter: `y[n] = y[n-1] + (x[n] - y[n-1]) >>
 SHIFT` (`SHIFT` generic, default 4 -- alpha = 1/16, no multiplier needed
 since it's a power-of-two shift) -- edit one file alone to give that
 channel a different architecture. The firmware
-(`vitis/marathon/app/lwip_comm_client_raw.c`) writes each channel's raw
+(`vitis/marathon/app/src/processing/axi_processing.c`) writes each channel's raw
 sample to its chain's reg0 and reads the processed result back from reg3,
-synchronously, per sample -- see the `AXI_CH1_BASE`/`AXI_CH2_BASE`
-`#define`s there, which must stay in sync with the `assign_bd_address`
+synchronously, per sample -- see `AXI_CH1_BASE`/`AXI_CH2_BASE` in
+`vitis/marathon/app/src/board_config.h`, which must stay in sync with the `assign_bd_address`
 calls in `bd_CoraZ7_Eth.tcl` if either ever changes.

@@ -125,8 +125,8 @@ SEND_RATE = 64
 # packet per DMA buffer, so this is the frames-per-packet count.
 CHUNK_SIZE = 16
 
-# Mirrors MAX_SAMPLES in tcp_server_app.cpp / MAX_PAYLOAD_SAMPLES in
-# lwip_comm_client_raw.c -- the wire/firmware hard ceiling. Panel clamps to
+# Mirrors MAX_SAMPLES in tcp_server_app.cpp / MAX_PAYLOAD_SAMPLES in the
+# firmware's board_config.h -- the wire/firmware hard ceiling. Panel clamps to
 # this; also a multiple of 8.
 MAX_CHUNK_SIZE = 2000
 
