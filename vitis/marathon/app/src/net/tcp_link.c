@@ -8,6 +8,7 @@
 #include "comm_log.h"
 #include "rx_ring.h"
 #include "mono_clock.h"
+#include "board_config.h"
 
 struct tcp_pcb *client_pcb = NULL;
 static int connected = 0;
@@ -53,7 +54,7 @@ static void tcp_client_start(void)
         connect_pending = 0;
     }
 
-    IP4_ADDR(&server_ip, 192,168,1,100);   // PC IP
+    PC_IP_ADDR(&server_ip);
 
     client_pcb = tcp_new();
     if (!client_pcb) {
@@ -75,7 +76,7 @@ static void tcp_client_start(void)
 
     comm_log("[N] connecting\r\n");
 
-    err_t err = tcp_connect(client_pcb, &server_ip, 5001, tcp_client_connected);
+    err_t err = tcp_connect(client_pcb, &server_ip, PC_TCP_PORT, tcp_client_connected);
     if (err != ERR_OK) {
         comm_log("[E] connect failed %d\r\n", err);
     }

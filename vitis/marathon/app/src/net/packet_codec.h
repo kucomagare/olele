@@ -3,12 +3,11 @@
 
 #include <stdint.h>
 #include "packet_format.h"
+#include "board_config.h"   /* MAX_PAYLOAD_SAMPLES */
 
 /* Wire-format helpers shared by the receive (comm_process.c) and send
    (tcp_link.c) sides. Struct layouts and field widths come from the
    generated packet_format.h -- edit shared/marathon/packet_format.json. */
-
-#define MAX_PAYLOAD_SAMPLES 2000
 
 /* Bounds the static payload buffers in comm_process.c and tcp_link.c
    regardless of which type arrives -- sized off the biggest packet type in

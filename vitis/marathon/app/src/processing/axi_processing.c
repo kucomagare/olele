@@ -1,12 +1,11 @@
 #include "xil_io.h"
 #include "axi_processing.h"
+#include "board_config.h"
 
 /* Separate ch1/ch2 VHDL entities on purpose so their architectures can
-   diverge (vivado/marathon/hdl/axi_processing_ch1/2.vhd). Addresses match
-   assign_bd_address in bd_CoraZ7_Eth.tcl. reg0 (write) = input sample,
+   diverge (vivado/marathon/hdl/axi_processing_ch1/2.vhd). Base addresses in
+   board_config.h. reg0 (write) = input sample,
    reg3 (read) = processed result. */
-#define AXI_CH1_BASE     0x40001000u
-#define AXI_CH2_BASE     0x40002000u
 #define AXI_PROC_REG_IN  0x0u
 #define AXI_PROC_REG_OUT 0xCu
 

@@ -45,14 +45,11 @@
 #include "comm_log.h"
 #include "rx_ring.h"   /* rx_ring_used() -- peak ring occupancy for the metrics packet */
 #include "mono_clock.h"
+#include "board_config.h"
 
-/* IPv4 + static IP only (LWIP_IPV6/LWIP_DHCP off, lwipopts.h). Fixed at
-   192.168.1.10 -- the PC relay identifies the board by source IP, so it
-   can't float. Stock template's IPv6/DHCP branches were dropped, not kept
-   as dead #if blocks. */
-#define DEFAULT_IP_ADDRESS	"192.168.1.10"
-#define DEFAULT_IP_MASK	  	"255.255.255.0"
-#define DEFAULT_GW_ADDRESS	"192.168.1.1"
+/* IPv4 + static IP only (LWIP_IPV6/LWIP_DHCP off, lwipopts.h), addresses in
+   board_config.h. Stock template's IPv6/DHCP branches were dropped, not
+   kept as dead #if blocks. */
 
 extern volatile int TcpFastTmrFlag;
 extern volatile int TcpSlowTmrFlag;
@@ -77,17 +74,17 @@ static void assign_default_ip(ip_addr_t *ip, ip_addr_t *mask, ip_addr_t *gw)
 {
 	int err;
 
-	xil_printf("\rConfiguring default IP %s \r\n", DEFAULT_IP_ADDRESS);
+	xil_printf("\rConfiguring default IP %s \r\n", BOARD_IP_ADDRESS);
 
-	err = inet_aton(DEFAULT_IP_ADDRESS, ip);
+	err = inet_aton(BOARD_IP_ADDRESS, ip);
 	if (!err)
 		xil_printf("\rInvalid default IP address: %d\r\n", err);
 
-	err = inet_aton(DEFAULT_IP_MASK, mask);
+	err = inet_aton(BOARD_IP_MASK, mask);
 	if (!err)
 		xil_printf("\rInvalid default IP MASK: %d\r\n", err);
 
-	err = inet_aton(DEFAULT_GW_ADDRESS, gw);
+	err = inet_aton(BOARD_GW_ADDRESS, gw);
 	if (!err)
 		xil_printf("\rInvalid default gateway address: %d\r\n", err);
 }
@@ -96,9 +93,7 @@ int main(void)
 {
 	struct netif *netif;
     
-	/* the mac address of the board. this should be unique per board */
-	unsigned char mac_ethernet_address[] = {
-		0x00, 0x0a, 0x35, 0x00, 0x01, 0x02 };
+	unsigned char mac_ethernet_address[] = BOARD_MAC_ADDRESS;
 
 	netif = &server_netif;
 

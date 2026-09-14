@@ -4,7 +4,7 @@
 #include <stdint.h>
 #include "lwip/tcp.h"
 
-/* The TCP connection to the PC relay (192.168.1.100:5001): connect,
+/* The TCP connection to the PC relay (address in board_config.h): connect,
    reconnect with backoff, push received bytes into rx_ring, send packets.
    Knows nothing about what the packets mean -- that's comm_process.c. */
 
