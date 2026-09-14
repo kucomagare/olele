@@ -15,6 +15,6 @@ void axi_process_sample(packet_data_t *entry)
        one AXI4-Lite round trip, so the result is already settled below. */
     Xil_Out32(AXI_CH1_BASE + AXI_PROC_REG_IN, (u32)entry->ch1);
     Xil_Out32(AXI_CH2_BASE + AXI_PROC_REG_IN, (u32)entry->ch2);
-    entry->ch1 = (uint16_t)(Xil_In32(AXI_CH1_BASE + AXI_PROC_REG_OUT) & 0xFFFFu);
-    entry->ch2 = (uint16_t)(Xil_In32(AXI_CH2_BASE + AXI_PROC_REG_OUT) & 0xFFFFu);
+    entry->ch1 = Xil_In32(AXI_CH1_BASE + AXI_PROC_REG_OUT);
+    entry->ch2 = Xil_In32(AXI_CH2_BASE + AXI_PROC_REG_OUT);
 }
