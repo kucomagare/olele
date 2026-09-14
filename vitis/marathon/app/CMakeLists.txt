@@ -15,7 +15,10 @@ enable_language(C ASM)
 
 # ---- Sources: add new .c files here --------------------------------------
 # Order is link order; keep appending at the end rather than re-sorting.
-collect (PROJECT_LIB_SOURCES src/net/lwip_comm_client_raw.c)
+collect (PROJECT_LIB_SOURCES src/net/tcp_link.c)
+collect (PROJECT_LIB_SOURCES src/net/packet_codec.c)
+collect (PROJECT_LIB_SOURCES src/comm_process.c)
+collect (PROJECT_LIB_SOURCES src/comm_stats.c)
 collect (PROJECT_LIB_SOURCES src/util/comm_log.c)
 collect (PROJECT_LIB_SOURCES src/util/mono_clock.c)
 collect (PROJECT_LIB_SOURCES src/net/rx_ring.c)

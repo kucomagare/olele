@@ -33,6 +33,6 @@ void rx_ring_reset(void);
    dropping bytes out of a length-prefixed stream destroys alignment, and
    every later header parse reads garbage. The only safe response to a full
    ring is discard-everything + resync on a fresh connection (see
-   tcp_client_resync() in lwip_comm_client_raw.c). */
+   tcp_client_resync() in tcp_link.c). */
 
 #endif /* RX_RING_H */
