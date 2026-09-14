@@ -116,7 +116,7 @@ set(USER_LINK_DIRECTORIES
 
 # -----------------------------------------
 
-set(USER_LINKER_SCRIPT "${CMAKE_SOURCE_DIR}/lscript.ld")
+set(USER_LINKER_SCRIPT "${CMAKE_SOURCE_DIR}/build_config/lscript.ld")
 
 # Add linker options to be passed, they will be added as extra linker options
 # Example : adding -s will pass -s to the linker.
