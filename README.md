@@ -18,8 +18,8 @@ proj            the single entry point -- one verb per thing you do:
                                 restart-server|status|logs
                   proj net      apply|show|revert|loss
                 Global: -v/--variant <name>, -h/--help. Run ./proj --help.
-net_tune.sh     host route/NIC tuning for the board link; reached as
-                "proj net", not usually called directly
+net_tune.sh     "proj net": link loss check, plus optional host tuning
+                (not needed since the 2026-09-15 firmware fixes)
 vivado/<v>/     block design + custom RTL, batch-built bitstream/.xsa
 vitis/<v>/      bare-metal lwIP TCP client firmware
 pc_app/<v>/     Python client + C++ relay server
