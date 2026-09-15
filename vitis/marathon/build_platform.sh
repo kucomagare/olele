@@ -128,6 +128,13 @@ for _param, _value in [
     domain.set_config(option="lib", param=_param, value=_value,
                       lib_name="lwip213")
 
+# DO NOT remove: raw-mode lwIP leaves its heap unlocked, but the EMAC TX-done
+# ISR frees pbufs into it -> heap corruption, board crash (seen 2026-09-15).
+# First part of the value is the stock default.
+domain.set_config(option="proc", param="proc_extra_compiler_flags",
+                  value=" -g -Wall -Wextra -fno-tree-loop-distribute-patterns"
+                        " -DLWIP_ALLOW_MEM_FREE_FROM_OTHER_CONTEXT=1")
+
 # NOTE: deliberately NOT raising lwip213_n_rx_descriptors. The Xilinx EMAC
 # port (contrib/ports/xilinx/netif/xemacpsif_dma.c) allocates one pbuf from
 # PBUF_POOL per RX descriptor at init and pins it for the lifetime of the
