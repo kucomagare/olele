@@ -19,6 +19,9 @@ void tcp_link_service(void);
 /* Non-zero when connected and client_pcb is usable for sending. */
 int tcp_link_up(void);
 
+/* Call after removing bytes from rx_ring; reopens the TCP receive window. */
+void tcp_link_consumed(uint32_t nbytes);
+
 /* Framing is lost: drop the connection, discard the ring, reconnect. */
 void tcp_client_resync(const char *why);
 

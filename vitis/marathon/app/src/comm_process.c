@@ -108,6 +108,7 @@ void comm_process(void)
 
         /* Now we can safely consume header + body */
         rx_ring_advance(4);
+        tcp_link_consumed(4);
 
         static uint8_t payload_buf[MAX_PAYLOAD_BYTES];
 
@@ -137,6 +138,7 @@ void comm_process(void)
 
             rx_ring_peek(0, dma_stream_tx_buf(), body_bytes);
             rx_ring_advance(body_bytes);
+            tcp_link_consumed(body_bytes);
 
             packets_rx++;
             samples_rx += length;
@@ -157,6 +159,7 @@ void comm_process(void)
 
         rx_ring_peek(0, payload_buf, body_bytes);
         rx_ring_advance(body_bytes);
+        tcp_link_consumed(body_bytes);
         for (uint32_t i = 0; i < length; i++)
             swap_be_fields(payload_buf + i * record_size, type);
 

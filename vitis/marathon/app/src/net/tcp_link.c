@@ -94,6 +94,14 @@ void tcp_link_service(void)
         tcp_client_start();
 }
 
+/* Reopen the TCP window only for bytes comm_process() actually used, so a
+   stalled board pushes back on the PC instead of overflowing rx_ring. */
+void tcp_link_consumed(uint32_t nbytes)
+{
+    if (client_pcb)
+        tcp_recved(client_pcb, (u16_t)nbytes);
+}
+
 int tcp_link_up(void)
 {
     return client_pcb && connected;
@@ -154,10 +162,9 @@ static err_t tcp_client_recv(void *arg, struct tcp_pcb *tpcb,
         return ERR_OK;
     }
 
-    /* Check capacity up front -- pushing part of the chain then bailing
-       would itself leave a fragment. A full ring means comm_process()
-       couldn't drain for a long time (sender durably outrunning us), so
-       dropping the link is the only non-corrupting way out. */
+    /* Safety net only: the window is opened by tcp_link_consumed(), and
+       TCP_WND (65535) < ring size, so this shouldn't trigger. Pushing part
+       of the chain then bailing would leave a fragment, hence all-or-nothing. */
     if (rx_ring_free() < p->tot_len) {
         pbuf_free(p);
         tcp_client_resync("ring full");
@@ -170,9 +177,7 @@ static err_t tcp_client_recv(void *arg, struct tcp_pcb *tpcb,
         q = q->next;
     }
 
-    u16_t tot_len = p->tot_len;
     pbuf_free(p);
-    tcp_recved(tpcb, tot_len);
 
     return ERR_OK;
 }
