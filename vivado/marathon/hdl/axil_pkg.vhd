@@ -12,14 +12,15 @@
 --   * user_top's entity -- Vivado infers BD interfaces from port NAMES, so the
 --     boundary facing the block design must stay flat. Packed into a record on
 --     the first line of the architecture and never seen flat again.
---   * my_axi -- it is Verilog, and Verilog has no records. Every my_axi
---     instance needs one flat unpack. Today that is two (ch1, ch2); once the
---     central register file replaces the per-module slaves it is exactly one.
+--   * Verilog modules -- Verilog has no records, so a Verilog slave (the old
+--     my_axi.v) needs one flat unpack per instance. Nothing in the build is
+--     Verilog-with-a-bus any more: my_axi is VHDL and there is one instance,
+--     inside csr_top.
 --
 -- ADDRESS WIDTH is fixed at 32 so one record type serves every bus regardless
 -- of how much of the window a given slave decodes. Slaves take the low bits
--- they care about and ignore the rest -- which is what they already do, since
--- my_axi decodes 4 bits inside a 4K segment.
+-- they care about and ignore the rest -- csr_top's my_axi latches the low 14
+-- (a 16K window).
 ----------------------------------------------------------------------------------
 
 library IEEE;
@@ -84,7 +85,8 @@ package axil_pkg is
   constant AXIS_S2M_IDLE : t_axis_s2m := (tready => '0');
 
   -- Unconstrained arrays of a constrained record: also VHDL-93 legal as a
-  -- port type, the actual supplies the range. Lets one demux serve any N.
+  -- port type, the actual supplies the range. Currently unused -- kept for a
+  -- future case with several bus slaves behind one window.
   type t_axil_m2s_array is array (natural range <>) of t_axil_m2s;
   type t_axil_s2m_array is array (natural range <>) of t_axil_s2m;
 

@@ -22,12 +22,15 @@
 -- SHIFT=4, dead zone below 2**SHIFT) -- kept deliberately so marathon stays
 -- comparable with sizif's output.
 --
--- AXI4-LITE REGS (via my_axi.v; reg3 rides the "fir_result" hook):
---   reg0 (0x0,W) N_CHANNELS  -- clamped to MAX_CHANNELS
---   reg1 (0x4,W) SHIFT       -- bits [4:0]; 0 = bypass
---   reg2 (0x8,W) CONTROL     -- bit0 byte-swap, bit1 clear-state
---   reg3 (0xC,R) STATUS      -- [7:0] slot, [15:8] N_CHANNELS,
---                                [20:16] SHIFT, [24] s_tvalid, [25] m_tready
+-- CONFIG / STATUS: no bus logic in here. csr_top owns the registers (window
+-- 0x0000..0x000C) and passes the three config words in as plain 32-bit ports;
+-- this module decodes the fields it needs and returns STATUS, which csr_top
+-- serves as a live read-only register:
+--   cfg_reg0 (0x0,W) N_CHANNELS  -- clamped to MAX_CHANNELS
+--   cfg_reg1 (0x4,W) SHIFT       -- bits [4:0]; 0 = bypass
+--   cfg_reg2 (0x8,W) CONTROL     -- bit0 byte-swap, bit1 clear-state
+--   status   (0xC,R) STATUS      -- [7:0] slot, [15:8] N_CHANNELS,
+--                                   [20:16] SHIFT, [24] s_tvalid, [25] m_tready
 --   Byte-swap does big/little-endian conversion in fabric so the CPU never
 --   touches a sample; default OFF so software-swap firmware keeps working.
 --   Clear forces state writes to zero and output passthrough; hold one
@@ -50,20 +53,11 @@ use work.axil_pkg.all;
 
 entity axi_tdm_filter is
   generic (
-    -- Depth of the per-channel state RAM. Sized well past what is used
-    -- today on purpose: 64 x 32 bits is ~256 bytes, i.e. free, and it
-    -- means growing the channel count never needs a resynthesis.
-    MAX_CHANNELS          : integer := 64;
-    C_S00_AXI_DATA_WIDTH  : integer := 32;
-    C_S00_AXI_ADDR_WIDTH  : integer := 4
-    );
+    MAX_CHANNELS : integer := 64
+  );
   port (
     aclk        : in  std_logic;
     aresetn     : in  std_logic;
-
-    -- AXI4-Lite slave: control/status only, no sample data
-    s_m2s       : in  t_axil_m2s;
-    s_s2m       : out t_axil_s2m;
 
     -- AXI4-Stream slave: samples in, from the DMA's MM2S channel
     s_axis_m2s  : in  t_axis_m2s;
@@ -71,33 +65,19 @@ entity axi_tdm_filter is
 
     -- AXI4-Stream master: samples out, to the DMA's S2MM channel
     m_axis_m2s  : out t_axis_m2s;
-    m_axis_s2m  : in  t_axis_s2m
+    m_axis_s2m  : in  t_axis_s2m;
+
+    -- Config words from csr_top (raw register values; decoded below)
+    cfg_reg0 : in  std_logic_vector(31 downto 0);
+    cfg_reg1 : in  std_logic_vector(31 downto 0);
+    cfg_reg2 : in  std_logic_vector(31 downto 0);
+
+    -- Live status word back to csr_top (read-only register)
+    status   : out std_logic_vector(31 downto 0)
     );
 end axi_tdm_filter;
 
 architecture rtl of axi_tdm_filter is
-
-  -- reg3 rides its STATUS word on the "fir_result" hook (axi_processing_ch1/2
-  -- ride their filter output on the same hook).
-  component my_axi is
-    generic (
-      C_S_AXI_ADDR_WIDTH : integer := 4
-      );
-    port (
-      axi_slv_reg_rden : out std_logic;
-      axi_slv_reg_wren : out std_logic;
-      axi_reg_data_out : out std_logic_vector(AXIL_DATA_W-1 downto 0);
-      axi_slv_reg0     : out std_logic_vector(AXIL_DATA_W-1 downto 0);
-      axi_slv_reg1     : out std_logic_vector(AXIL_DATA_W-1 downto 0);
-      axi_slv_reg2     : out std_logic_vector(AXIL_DATA_W-1 downto 0);
-      axi_slv_reg3     : out std_logic_vector(AXIL_DATA_W-1 downto 0);
-      fir_result       : in  std_logic_vector(AXIL_DATA_W-1 downto 0);
-      aclk             : in  std_logic;
-      aresetn          : in  std_logic;
-      s_m2s            : in  t_axil_m2s;
-      s_s2m            : out t_axil_s2m
-      );
-  end component;
 
   -- Byte-reverse a 32-bit word (big-endian <-> little-endian). Pure
   -- rewiring: costs no logic at all, which is the whole point of moving
@@ -107,11 +87,6 @@ architecture rtl of axi_tdm_filter is
   begin
     return x(7 downto 0) & x(15 downto 8) & x(23 downto 16) & x(31 downto 24);
   end function;
-
-  signal cfg_reg0 : std_logic_vector(C_S00_AXI_DATA_WIDTH-1 downto 0);
-  signal cfg_reg1 : std_logic_vector(C_S00_AXI_DATA_WIDTH-1 downto 0);
-  signal cfg_reg2 : std_logic_vector(C_S00_AXI_DATA_WIDTH-1 downto 0);
-  signal status   : std_logic_vector(C_S00_AXI_DATA_WIDTH-1 downto 0);
 
   -- Per-channel filter state. Initialised here rather than reset: the
   -- init value is loaded at configuration time on Xilinx parts, and
@@ -141,25 +116,6 @@ architecture rtl of axi_tdm_filter is
   signal result      : std_logic_vector(31 downto 0);
 
 begin
-
-  my_axi_inst : my_axi
-    generic map (
-      C_S_AXI_ADDR_WIDTH => C_S00_AXI_ADDR_WIDTH
-      )
-    port map (
-      axi_slv_reg_rden => open,
-      axi_slv_reg_wren => open,
-      axi_reg_data_out => open,
-      axi_slv_reg0     => cfg_reg0,
-      axi_slv_reg1     => cfg_reg1,
-      axi_slv_reg2     => cfg_reg2,
-      axi_slv_reg3     => open,
-      fir_result       => status,
-      aclk             => aclk,
-      aresetn          => aresetn,
-      s_m2s            => s_m2s,
-      s_s2m            => s_s2m
-      );
 
   -- ---------------- control register decode ----------------
   -- Clamped so a bad register write can never index past the state RAM.

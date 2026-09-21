@@ -26,6 +26,8 @@
 #    "$origin_dir/hdl/axil_pkg.vhd"
 #    "$origin_dir/hdl/fpga_top.v"
 #    "$origin_dir/hdl/my_axi.vhd"
+#    "$origin_dir/hdl/csr_reg.vhd"
+#    "$origin_dir/hdl/csr_top.vhd"
 #    "$origin_dir/hdl/axi_processing_ch1.vhd"
 #    "$origin_dir/hdl/axi_processing_ch2.vhd"
 #    "$origin_dir/hdl/axi_tdm_filter.vhd"
@@ -45,6 +47,8 @@ proc checkRequiredFiles { origin_dir} {
  "[file normalize "$origin_dir/hdl/axil_pkg.vhd"]"\
  "[file normalize "$origin_dir/hdl/fpga_top.v"]"\
  "[file normalize "$origin_dir/hdl/my_axi.vhd"]"\
+ "[file normalize "$origin_dir/hdl/csr_reg.vhd"]"\
+ "[file normalize "$origin_dir/hdl/csr_top.vhd"]"\
  "[file normalize "$origin_dir/hdl/axi_processing_ch1.vhd"]"\
  "[file normalize "$origin_dir/hdl/axi_processing_ch2.vhd"]"\
  "[file normalize "$origin_dir/hdl/axi_tdm_filter.vhd"]"\
@@ -190,6 +194,8 @@ set files [list \
  [file normalize "${origin_dir}/hdl/axil_pkg.vhd" ]\
  [file normalize "${origin_dir}/hdl/user_top.vhd" ]\
  [file normalize "${origin_dir}/hdl/my_axi.vhd" ]\
+ [file normalize "${origin_dir}/hdl/csr_reg.vhd" ]\
+ [file normalize "${origin_dir}/hdl/csr_top.vhd" ]\
  [file normalize "${origin_dir}/hdl/axi_processing_ch1.vhd" ]\
  [file normalize "${origin_dir}/hdl/axi_processing_ch2.vhd" ]\
  [file normalize "${origin_dir}/hdl/axi_tdm_filter.vhd" ]\
@@ -258,6 +264,12 @@ if { [get_files [list fpga_top.v]] == "" } {
 if { [get_files [list my_axi.vhd]] == "" } {
   add_files -quiet -norecurse -fileset sources_1 $origin_dir/hdl/my_axi.vhd
 }
+if { [get_files [list csr_reg.vhd]] == "" } {
+  add_files -quiet -norecurse -fileset sources_1 $origin_dir/hdl/csr_reg.vhd
+}
+if { [get_files [list csr_top.vhd]] == "" } {
+  add_files -quiet -norecurse -fileset sources_1 $origin_dir/hdl/csr_top.vhd
+}
 if { [get_files [list axi_processing_ch1.vhd]] == "" } {
   add_files -quiet -norecurse -fileset sources_1 $origin_dir/hdl/axi_processing_ch1.vhd
 }
@@ -279,9 +291,9 @@ if { [get_files [list user_top.vhd]] == "" } {
 #   write_bd_tcl -force [file normalize $origin_dir/bd_CoraZ7_Eth.tcl]
 # That script defines create_root_design and invokes it in its own MAIN
 # FLOW section, so sourcing it is enough -- no separate call here.
-# The module refs it needs (axi_processing_ch1/ch2, axi_tdm_filter,
-# user_top) are added above, which is why that block must stay ahead of
-# this line.
+# The module ref it needs (user_top, plus every file it instantiates:
+# csr_top, csr_reg, my_axi, axi_tdm_filter, axi_processing_ch1/ch2) is added
+# above, which is why that block must stay ahead of this line.
 #
 # Never source bd_CoraZ7_Eth.tcl on its own. write_bd_tcl emits a fallback
 # that runs "create_project project_1 myproj" when no project is open, so

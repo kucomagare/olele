@@ -14,9 +14,10 @@
 --     associates only with the interface of the same prefix, which leaves any
 --     other interface with no clock, a default 100MHz FREQ_HZ, and a BD that
 --     fails validation against the 50MHz masters.
---   * AXI-Lite slaves are named s<nn>_axi_*. s00_axi is deliberately left free
---     for the future consolidated bus (one slave + address decode in here),
---     which is what stops the port count growing with the module count.
+--   * There is exactly ONE AXI-Lite slave, s00_axi. Every control/status
+--     register in the design sits behind it, so the port count no longer grows
+--     with the module count. A new register means a line in csr_top, never a
+--     new port here.
 --
 -- The entity is flat because Vivado's module-reference resolver cannot see an
 -- entity that has a record port -- verified, not assumed: an otherwise
@@ -26,20 +27,27 @@
 --
 -- Hosts:
 --   fpga_top             LED PWM blink, bring-up sanity check, no bus
---   axi_tdm_filter       TDM streaming filter, s00_axi @ 0x40000000,
---                        streams to/from the DMA via s_axis/m_axis
---   axi_processing_ch1   ch1 filter chain, s01_axi @ 0x40001000
---   axi_processing_ch2   ch2 filter chain, s02_axi @ 0x40002000
+--   csr_top              the only bus slave: all registers, the address decode
+--                        and the read mux. Submodules see plain wires from it,
+--                        never the bus.
+--   axi_tdm_filter       TDM streaming filter, streams to/from the DMA via
+--                        s_axis/m_axis; its config comes from csr_top
+--   axi_processing_ch1   ch1 per-sample filter: x/x_wr in from csr_top, y back
+--   axi_processing_ch2   ch2 per-sample filter: same as ch1
 --
--- Three windows because each module still owns a my_axi. The central register
--- file collapses both into one slave on one window; until then there is
--- nothing to route and no reason for routing logic.
+-- ADDRESS MAP: one segment, 16K at 0x40000000, offsets decoded in csr_top.
+--   0x0000  axi_tdm_filter   +0x0 N_CHANNELS  +0x4 SHIFT  +0x8 CONTROL
+--                            +0xC STATUS (read-only)
+--   0x1000  axi_processing_ch1   +0x0 X_IN (write pulse)  +0xC Y_OUT (read-only)
+--   0x2000  axi_processing_ch2   same layout as ch1
+--   0x3000  unmapped: reads 0, writes ignored, the bus still answers OKAY
+-- These are the addresses the modules already had as separate slaves, which is
+-- why the consolidation needs no firmware change.
 --
--- ADDRESS MAP: one segment, 8K at 0x40001000, addr[12] selects the channel.
--- Sized and placed so both channels keep the addresses they had as separate BD
--- cells -- ch1 0x40001000, ch2 0x40002000 -- which is why this restructuring
--- needs no firmware change at all. Step 4 widens the same window to 16K at
--- 0x40000000 to absorb axi_tdm_filter without moving anything either.
+-- C_AXI_ADDR_WIDTH must be 14. csr_top decodes address bits [13:12] to pick the
+-- module; a narrower port drops those bits and every module aliases onto the
+-- first one's registers. The BD does not override this generic, so this default
+-- is the value in use.
 ----------------------------------------------------------------------------------
 
 library IEEE;
@@ -59,14 +67,14 @@ entity user_top is
     CH1_SHIFT         : integer := 4;
     CH2_SHIFT         : integer := 4;
     C_AXI_DATA_WIDTH  : integer := 32;
-    C_AXI_ADDR_WIDTH  : integer := 4
+    C_AXI_ADDR_WIDTH  : integer := 14
     );
   port (
     -- Bare aclk/aresetn: associates with every inferred interface.
     aclk            : in  std_logic;
     aresetn         : in  std_logic;
 
-    -- AXI4-Lite slave: axi_tdm_filter control/status
+    -- AXI4-Lite slave: the whole register file (see ADDRESS MAP above)
     s00_axi_awaddr  : in  std_logic_vector(C_AXI_ADDR_WIDTH-1 downto 0);
     s00_axi_awprot  : in  std_logic_vector(2 downto 0);
     s00_axi_awvalid : in  std_logic;
@@ -88,7 +96,7 @@ entity user_top is
     s00_axi_rready  : in  std_logic;
 
     -- AXI4-Stream to/from the DMA. Flat for the same reason the AXI-Lite
-    -- windows are: name-based interface inference at the BD boundary.
+    -- window is: name-based interface inference at the BD boundary.
     s_axis_tdata    : in  std_logic_vector(C_AXI_DATA_WIDTH-1 downto 0);
     s_axis_tvalid   : in  std_logic;
     s_axis_tready   : out std_logic;
@@ -98,48 +106,6 @@ entity user_top is
     m_axis_tvalid   : out std_logic;
     m_axis_tready   : in  std_logic;
     m_axis_tlast    : out std_logic;
-
-    -- AXI4-Lite slave: axi_processing_ch1 control/status
-    s01_axi_awaddr  : in  std_logic_vector(C_AXI_ADDR_WIDTH-1 downto 0);
-    s01_axi_awprot  : in  std_logic_vector(2 downto 0);
-    s01_axi_awvalid : in  std_logic;
-    s01_axi_awready : out std_logic;
-    s01_axi_wdata   : in  std_logic_vector(C_AXI_DATA_WIDTH-1 downto 0);
-    s01_axi_wstrb   : in  std_logic_vector((C_AXI_DATA_WIDTH/8)-1 downto 0);
-    s01_axi_wvalid  : in  std_logic;
-    s01_axi_wready  : out std_logic;
-    s01_axi_bresp   : out std_logic_vector(1 downto 0);
-    s01_axi_bvalid  : out std_logic;
-    s01_axi_bready  : in  std_logic;
-    s01_axi_araddr  : in  std_logic_vector(C_AXI_ADDR_WIDTH-1 downto 0);
-    s01_axi_arprot  : in  std_logic_vector(2 downto 0);
-    s01_axi_arvalid : in  std_logic;
-    s01_axi_arready : out std_logic;
-    s01_axi_rdata   : out std_logic_vector(C_AXI_DATA_WIDTH-1 downto 0);
-    s01_axi_rresp   : out std_logic_vector(1 downto 0);
-    s01_axi_rvalid  : out std_logic;
-    s01_axi_rready  : in  std_logic;
-
-    -- AXI4-Lite slave: axi_processing_ch2 control/status
-    s02_axi_awaddr  : in  std_logic_vector(C_AXI_ADDR_WIDTH-1 downto 0);
-    s02_axi_awprot  : in  std_logic_vector(2 downto 0);
-    s02_axi_awvalid : in  std_logic;
-    s02_axi_awready : out std_logic;
-    s02_axi_wdata   : in  std_logic_vector(C_AXI_DATA_WIDTH-1 downto 0);
-    s02_axi_wstrb   : in  std_logic_vector((C_AXI_DATA_WIDTH/8)-1 downto 0);
-    s02_axi_wvalid  : in  std_logic;
-    s02_axi_wready  : out std_logic;
-    s02_axi_bresp   : out std_logic_vector(1 downto 0);
-    s02_axi_bvalid  : out std_logic;
-    s02_axi_bready  : in  std_logic;
-    s02_axi_araddr  : in  std_logic_vector(C_AXI_ADDR_WIDTH-1 downto 0);
-    s02_axi_arprot  : in  std_logic_vector(2 downto 0);
-    s02_axi_arvalid : in  std_logic;
-    s02_axi_arready : out std_logic;
-    s02_axi_rdata   : out std_logic_vector(C_AXI_DATA_WIDTH-1 downto 0);
-    s02_axi_rresp   : out std_logic_vector(1 downto 0);
-    s02_axi_rvalid  : out std_logic;
-    s02_axi_rready  : in  std_logic;
 
     -- Board I/O
     btn_pl          : in  std_logic;
@@ -161,54 +127,85 @@ architecture rtl of user_top is
       );
   end component;
 
-  component axi_tdm_filter is
+  component csr_top is
     generic (
-      MAX_CHANNELS          : integer := 64;
-      C_S00_AXI_DATA_WIDTH  : integer := 32;
-      C_S00_AXI_ADDR_WIDTH  : integer := 4
+      C_S_AXI_ADDR_WIDTH : integer := 14
       );
     port (
-      aclk        : in  std_logic;
-      aresetn     : in  std_logic;
-      s_m2s       : in  t_axil_m2s;
-      s_s2m       : out t_axil_s2m;
-      s_axis_m2s  : in  t_axis_m2s;
-      s_axis_s2m  : out t_axis_s2m;
-      m_axis_m2s  : out t_axis_m2s;
-      m_axis_s2m  : in  t_axis_s2m
+      aclk         : in  std_logic;
+      aresetn      : in  std_logic;
+      s_m2s        : in  t_axil_m2s;
+      s_s2m        : out t_axil_s2m;
+
+      tdm_cfg_reg0 : out std_logic_vector(AXIL_DATA_W-1 downto 0);
+      tdm_cfg_reg1 : out std_logic_vector(AXIL_DATA_W-1 downto 0);
+      tdm_cfg_reg2 : out std_logic_vector(AXIL_DATA_W-1 downto 0);
+      tdm_status   : in  std_logic_vector(AXIL_DATA_W-1 downto 0);
+
+      ch1_x        : out std_logic_vector(AXIL_DATA_W-1 downto 0);
+      ch1_x_wr     : out std_logic;
+      ch1_y        : in  std_logic_vector(AXIL_DATA_W-1 downto 0);
+      ch2_x        : out std_logic_vector(AXIL_DATA_W-1 downto 0);
+      ch2_x_wr     : out std_logic;
+      ch2_y        : in  std_logic_vector(AXIL_DATA_W-1 downto 0)
+      );
+  end component;
+
+  component axi_tdm_filter is
+    generic (
+      MAX_CHANNELS : integer := 64
+      );
+    port (
+      aclk       : in  std_logic;
+      aresetn    : in  std_logic;
+      s_axis_m2s : in  t_axis_m2s;
+      s_axis_s2m : out t_axis_s2m;
+      m_axis_m2s : out t_axis_m2s;
+      m_axis_s2m : in  t_axis_s2m;
+      cfg_reg0   : in  std_logic_vector(31 downto 0);
+      cfg_reg1   : in  std_logic_vector(31 downto 0);
+      cfg_reg2   : in  std_logic_vector(31 downto 0);
+      status     : out std_logic_vector(31 downto 0)
       );
   end component;
 
   component axi_processing_ch1 is
     generic (
-      SHIFT                 : integer := 4;
-      C_S00_AXI_DATA_WIDTH  : integer := 32;
-      C_S00_AXI_ADDR_WIDTH  : integer := 4
+      SHIFT : integer := 4
       );
     port (
-      aclk    : in  std_logic;
-      aresetn : in  std_logic;
-      s_m2s   : in  t_axil_m2s;
-      s_s2m   : out t_axil_s2m
+      aclk             : in  std_logic;
+      aresetn          : in  std_logic;
+      axi_slv_reg_wren : in  std_logic;
+      axi_slv_reg0     : in  std_logic_vector(31 downto 0);
+      filtered_result  : out std_logic_vector(31 downto 0)
       );
   end component;
 
   component axi_processing_ch2 is
     generic (
-      SHIFT                 : integer := 4;
-      C_S00_AXI_DATA_WIDTH  : integer := 32;
-      C_S00_AXI_ADDR_WIDTH  : integer := 4
+      SHIFT : integer := 4
       );
     port (
-      aclk    : in  std_logic;
-      aresetn : in  std_logic;
-      s_m2s   : in  t_axil_m2s;
-      s_s2m   : out t_axil_s2m
+      aclk             : in  std_logic;
+      aresetn          : in  std_logic;
+      axi_slv_reg_wren : in  std_logic;
+      axi_slv_reg0     : in  std_logic_vector(31 downto 0);
+      filtered_result  : out std_logic_vector(31 downto 0)
       );
   end component;
 
-  signal tdm_m2s, ch1_m2s, ch2_m2s : t_axil_m2s;
-  signal tdm_s2m, ch1_s2m, ch2_s2m : t_axil_s2m;
+  -- The one AXI-Lite bus, packed into records.
+  signal csr_m2s : t_axil_m2s;
+  signal csr_s2m : t_axil_s2m;
+
+  -- csr_top <-> axi_tdm_filter
+  signal tdm_cfg_reg0, tdm_cfg_reg1, tdm_cfg_reg2 : std_logic_vector(AXIL_DATA_W-1 downto 0);
+  signal tdm_status                               : std_logic_vector(AXIL_DATA_W-1 downto 0);
+
+  -- csr_top <-> per-channel filters: sample in + write pulse, result back
+  signal ch1_x, ch1_y, ch2_x, ch2_y : std_logic_vector(AXIL_DATA_W-1 downto 0);
+  signal ch1_x_wr, ch2_x_wr         : std_logic;
 
   signal tdm_s_axis_m2s, tdm_m_axis_m2s : t_axis_m2s;
   signal tdm_s_axis_s2m, tdm_m_axis_s2m : t_axis_s2m;
@@ -216,31 +213,31 @@ architecture rtl of user_top is
 begin
 
   ------------------------------------------------------------------------
-  -- Flat -> record, once per window. The only place in the design the bus
-  -- appears as loose signals: Vivado infers BD interfaces from port names,
-  -- so this entity cannot take a record (verified -- an otherwise identical
-  -- entity fails to resolve as a module reference with record ports).
+  -- Flat -> record, once. The only place in the design the bus appears as
+  -- loose signals: Vivado infers BD interfaces from port names, so this
+  -- entity cannot take a record (verified -- an otherwise identical entity
+  -- fails to resolve as a module reference with record ports).
   ------------------------------------------------------------------------
-  tdm_m2s.awaddr  <= std_logic_vector(resize(unsigned(s00_axi_awaddr), AXIL_ADDR_W));
-  tdm_m2s.awprot  <= s00_axi_awprot;
-  tdm_m2s.awvalid <= s00_axi_awvalid;
-  tdm_m2s.wdata   <= s00_axi_wdata;
-  tdm_m2s.wstrb   <= s00_axi_wstrb;
-  tdm_m2s.wvalid  <= s00_axi_wvalid;
-  tdm_m2s.bready  <= s00_axi_bready;
-  tdm_m2s.araddr  <= std_logic_vector(resize(unsigned(s00_axi_araddr), AXIL_ADDR_W));
-  tdm_m2s.arprot  <= s00_axi_arprot;
-  tdm_m2s.arvalid <= s00_axi_arvalid;
-  tdm_m2s.rready  <= s00_axi_rready;
+  csr_m2s.awaddr  <= std_logic_vector(resize(unsigned(s00_axi_awaddr), AXIL_ADDR_W));
+  csr_m2s.awprot  <= s00_axi_awprot;
+  csr_m2s.awvalid <= s00_axi_awvalid;
+  csr_m2s.wdata   <= s00_axi_wdata;
+  csr_m2s.wstrb   <= s00_axi_wstrb;
+  csr_m2s.wvalid  <= s00_axi_wvalid;
+  csr_m2s.bready  <= s00_axi_bready;
+  csr_m2s.araddr  <= std_logic_vector(resize(unsigned(s00_axi_araddr), AXIL_ADDR_W));
+  csr_m2s.arprot  <= s00_axi_arprot;
+  csr_m2s.arvalid <= s00_axi_arvalid;
+  csr_m2s.rready  <= s00_axi_rready;
 
-  s00_axi_awready <= tdm_s2m.awready;
-  s00_axi_wready  <= tdm_s2m.wready;
-  s00_axi_bresp   <= tdm_s2m.bresp;
-  s00_axi_bvalid  <= tdm_s2m.bvalid;
-  s00_axi_arready <= tdm_s2m.arready;
-  s00_axi_rdata   <= tdm_s2m.rdata;
-  s00_axi_rresp   <= tdm_s2m.rresp;
-  s00_axi_rvalid  <= tdm_s2m.rvalid;
+  s00_axi_awready <= csr_s2m.awready;
+  s00_axi_wready  <= csr_s2m.wready;
+  s00_axi_bresp   <= csr_s2m.bresp;
+  s00_axi_bvalid  <= csr_s2m.bvalid;
+  s00_axi_arready <= csr_s2m.arready;
+  s00_axi_rdata   <= csr_s2m.rdata;
+  s00_axi_rresp   <= csr_s2m.rresp;
+  s00_axi_rvalid  <= csr_s2m.rvalid;
 
   tdm_s_axis_m2s.tdata  <= s_axis_tdata;
   tdm_s_axis_m2s.tvalid <= s_axis_tvalid;
@@ -251,48 +248,6 @@ begin
   m_axis_tvalid         <= tdm_m_axis_m2s.tvalid;
   m_axis_tlast          <= tdm_m_axis_m2s.tlast;
   tdm_m_axis_s2m.tready <= m_axis_tready;
-
-  ch1_m2s.awaddr  <= std_logic_vector(resize(unsigned(s01_axi_awaddr), AXIL_ADDR_W));
-  ch1_m2s.awprot  <= s01_axi_awprot;
-  ch1_m2s.awvalid <= s01_axi_awvalid;
-  ch1_m2s.wdata   <= s01_axi_wdata;
-  ch1_m2s.wstrb   <= s01_axi_wstrb;
-  ch1_m2s.wvalid  <= s01_axi_wvalid;
-  ch1_m2s.bready  <= s01_axi_bready;
-  ch1_m2s.araddr  <= std_logic_vector(resize(unsigned(s01_axi_araddr), AXIL_ADDR_W));
-  ch1_m2s.arprot  <= s01_axi_arprot;
-  ch1_m2s.arvalid <= s01_axi_arvalid;
-  ch1_m2s.rready  <= s01_axi_rready;
-
-  s01_axi_awready <= ch1_s2m.awready;
-  s01_axi_wready  <= ch1_s2m.wready;
-  s01_axi_bresp   <= ch1_s2m.bresp;
-  s01_axi_bvalid  <= ch1_s2m.bvalid;
-  s01_axi_arready <= ch1_s2m.arready;
-  s01_axi_rdata   <= ch1_s2m.rdata;
-  s01_axi_rresp   <= ch1_s2m.rresp;
-  s01_axi_rvalid  <= ch1_s2m.rvalid;
-
-  ch2_m2s.awaddr  <= std_logic_vector(resize(unsigned(s02_axi_awaddr), AXIL_ADDR_W));
-  ch2_m2s.awprot  <= s02_axi_awprot;
-  ch2_m2s.awvalid <= s02_axi_awvalid;
-  ch2_m2s.wdata   <= s02_axi_wdata;
-  ch2_m2s.wstrb   <= s02_axi_wstrb;
-  ch2_m2s.wvalid  <= s02_axi_wvalid;
-  ch2_m2s.bready  <= s02_axi_bready;
-  ch2_m2s.araddr  <= std_logic_vector(resize(unsigned(s02_axi_araddr), AXIL_ADDR_W));
-  ch2_m2s.arprot  <= s02_axi_arprot;
-  ch2_m2s.arvalid <= s02_axi_arvalid;
-  ch2_m2s.rready  <= s02_axi_rready;
-
-  s02_axi_awready <= ch2_s2m.awready;
-  s02_axi_wready  <= ch2_s2m.wready;
-  s02_axi_bresp   <= ch2_s2m.bresp;
-  s02_axi_bvalid  <= ch2_s2m.bvalid;
-  s02_axi_arready <= ch2_s2m.arready;
-  s02_axi_rdata   <= ch2_s2m.rdata;
-  s02_axi_rresp   <= ch2_s2m.rresp;
-  s02_axi_rvalid  <= ch2_s2m.rvalid;
 
   ------------------------------------------------------------------------
 
@@ -305,47 +260,66 @@ begin
       led_pl_r => led_pl_r
       );
 
+  csr : csr_top
+    generic map (
+      C_S_AXI_ADDR_WIDTH => C_AXI_ADDR_WIDTH
+      )
+    port map (
+      aclk         => aclk,
+      aresetn      => aresetn,
+      s_m2s        => csr_m2s,
+      s_s2m        => csr_s2m,
+      tdm_cfg_reg0 => tdm_cfg_reg0,
+      tdm_cfg_reg1 => tdm_cfg_reg1,
+      tdm_cfg_reg2 => tdm_cfg_reg2,
+      tdm_status   => tdm_status,
+      ch1_x        => ch1_x,
+      ch1_x_wr     => ch1_x_wr,
+      ch1_y        => ch1_y,
+      ch2_x        => ch2_x,
+      ch2_x_wr     => ch2_x_wr,
+      ch2_y        => ch2_y
+      );
+
   tdm : axi_tdm_filter
     generic map (
-      MAX_CHANNELS          => MAX_CHANNELS,
-      C_S00_AXI_DATA_WIDTH  => AXIL_DATA_W,
-      C_S00_AXI_ADDR_WIDTH  => C_AXI_ADDR_WIDTH
+      MAX_CHANNELS => MAX_CHANNELS
       )
     port map (
       aclk       => aclk,
       aresetn    => aresetn,
-      s_m2s      => tdm_m2s,
-      s_s2m      => tdm_s2m,
       s_axis_m2s => tdm_s_axis_m2s,
       s_axis_s2m => tdm_s_axis_s2m,
       m_axis_m2s => tdm_m_axis_m2s,
-      m_axis_s2m => tdm_m_axis_s2m
+      m_axis_s2m => tdm_m_axis_s2m,
+      cfg_reg0   => tdm_cfg_reg0,
+      cfg_reg1   => tdm_cfg_reg1,
+      cfg_reg2   => tdm_cfg_reg2,
+      status     => tdm_status
       );
 
   ch1 : axi_processing_ch1
     generic map (
-      SHIFT                 => CH1_SHIFT,
-      C_S00_AXI_DATA_WIDTH  => AXIL_DATA_W,
-      C_S00_AXI_ADDR_WIDTH  => C_AXI_ADDR_WIDTH
+      SHIFT => CH1_SHIFT
       )
     port map (
-      aclk    => aclk,
-      aresetn => aresetn,
-      s_m2s   => ch1_m2s,
-      s_s2m   => ch1_s2m
+      aclk             => aclk,
+      aresetn          => aresetn,
+      axi_slv_reg_wren => ch1_x_wr,
+      axi_slv_reg0     => ch1_x,
+      filtered_result  => ch1_y
       );
 
   ch2 : axi_processing_ch2
     generic map (
-      SHIFT                 => CH2_SHIFT,
-      C_S00_AXI_DATA_WIDTH  => AXIL_DATA_W,
-      C_S00_AXI_ADDR_WIDTH  => C_AXI_ADDR_WIDTH
+      SHIFT => CH2_SHIFT
       )
     port map (
-      aclk    => aclk,
-      aresetn => aresetn,
-      s_m2s   => ch2_m2s,
-      s_s2m   => ch2_s2m
+      aclk             => aclk,
+      aresetn          => aresetn,
+      axi_slv_reg_wren => ch2_x_wr,
+      axi_slv_reg0     => ch2_x,
+      filtered_result  => ch2_y
       );
 
 end rtl;
