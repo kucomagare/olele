@@ -27,78 +27,78 @@ use IEEE.STD_LOGIC_1164.ALL;
 
 package axil_pkg is
 
-    constant AXIL_ADDR_W : integer := 32;
-    constant AXIL_DATA_W : integer := 32;
-    constant AXIL_STRB_W : integer := AXIL_DATA_W/8;
+  constant AXIL_ADDR_W : integer := 32;
+  constant AXIL_DATA_W : integer := 32;
+  constant AXIL_STRB_W : integer := AXIL_DATA_W/8;
 
-    subtype t_axil_addr is std_logic_vector(AXIL_ADDR_W-1 downto 0);
-    subtype t_axil_data is std_logic_vector(AXIL_DATA_W-1 downto 0);
-    subtype t_axil_strb is std_logic_vector(AXIL_STRB_W-1 downto 0);
-    subtype t_axil_resp is std_logic_vector(1 downto 0);
-    subtype t_axil_prot is std_logic_vector(2 downto 0);
+  subtype t_axil_addr is std_logic_vector(AXIL_ADDR_W-1 downto 0);
+  subtype t_axil_data is std_logic_vector(AXIL_DATA_W-1 downto 0);
+  subtype t_axil_strb is std_logic_vector(AXIL_STRB_W-1 downto 0);
+  subtype t_axil_resp is std_logic_vector(1 downto 0);
+  subtype t_axil_prot is std_logic_vector(2 downto 0);
 
-    constant AXIL_RESP_OKAY   : t_axil_resp := "00";
-    constant AXIL_RESP_DECERR : t_axil_resp := "11";
+  constant AXIL_RESP_OKAY   : t_axil_resp := "00";
+  constant AXIL_RESP_DECERR : t_axil_resp := "11";
 
-    -- Master -> slave: everything the master drives.
-    type t_axil_m2s is record
-        awaddr  : t_axil_addr;
-        awprot  : t_axil_prot;
-        awvalid : std_logic;
-        wdata   : t_axil_data;
-        wstrb   : t_axil_strb;
-        wvalid  : std_logic;
-        bready  : std_logic;
-        araddr  : t_axil_addr;
-        arprot  : t_axil_prot;
-        arvalid : std_logic;
-        rready  : std_logic;
-    end record;
+  -- Master -> slave: everything the master drives.
+  type t_axil_m2s is record
+    awaddr  : t_axil_addr;
+    awprot  : t_axil_prot;
+    awvalid : std_logic;
+    wdata   : t_axil_data;
+    wstrb   : t_axil_strb;
+    wvalid  : std_logic;
+    bready  : std_logic;
+    araddr  : t_axil_addr;
+    arprot  : t_axil_prot;
+    arvalid : std_logic;
+    rready  : std_logic;
+  end record;
 
-    -- Slave -> master: everything the slave drives.
-    type t_axil_s2m is record
-        awready : std_logic;
-        wready  : std_logic;
-        bresp   : t_axil_resp;
-        bvalid  : std_logic;
-        arready : std_logic;
-        rdata   : t_axil_data;
-        rresp   : t_axil_resp;
-        rvalid  : std_logic;
-    end record;
+  -- Slave -> master: everything the slave drives.
+  type t_axil_s2m is record
+    awready : std_logic;
+    wready  : std_logic;
+    bresp   : t_axil_resp;
+    bvalid  : std_logic;
+    arready : std_logic;
+    rdata   : t_axil_data;
+    rresp   : t_axil_resp;
+    rvalid  : std_logic;
+  end record;
 
-    -- AXI4-Stream, same split. Only the fields this design uses -- tdata,
-    -- tvalid, tlast, tready. Widen here if a tkeep/tuser ever appears.
-    type t_axis_m2s is record
-        tdata  : t_axil_data;
-        tvalid : std_logic;
-        tlast  : std_logic;
-    end record;
+  -- AXI4-Stream, same split. Only the fields this design uses -- tdata,
+  -- tvalid, tlast, tready. Widen here if a tkeep/tuser ever appears.
+  type t_axis_m2s is record
+    tdata  : t_axil_data;
+    tvalid : std_logic;
+    tlast  : std_logic;
+  end record;
 
-    type t_axis_s2m is record
-        tready : std_logic;
-    end record;
+  type t_axis_s2m is record
+    tready : std_logic;
+  end record;
 
-    constant AXIS_M2S_IDLE : t_axis_m2s := (
-        tdata => (others => '0'), tvalid => '0', tlast => '0');
-    constant AXIS_S2M_IDLE : t_axis_s2m := (tready => '0');
+  constant AXIS_M2S_IDLE : t_axis_m2s := (
+    tdata => (others => '0'), tvalid => '0', tlast => '0');
+  constant AXIS_S2M_IDLE : t_axis_s2m := (tready => '0');
 
-    -- Unconstrained arrays of a constrained record: also VHDL-93 legal as a
-    -- port type, the actual supplies the range. Lets one demux serve any N.
-    type t_axil_m2s_array is array (natural range <>) of t_axil_m2s;
-    type t_axil_s2m_array is array (natural range <>) of t_axil_s2m;
+  -- Unconstrained arrays of a constrained record: also VHDL-93 legal as a
+  -- port type, the actual supplies the range. Lets one demux serve any N.
+  type t_axil_m2s_array is array (natural range <>) of t_axil_m2s;
+  type t_axil_s2m_array is array (natural range <>) of t_axil_s2m;
 
-    constant AXIL_M2S_IDLE : t_axil_m2s := (
-        awaddr => (others => '0'), awprot => (others => '0'), awvalid => '0',
-        wdata  => (others => '0'), wstrb  => (others => '0'), wvalid  => '0',
-        bready => '0',
-        araddr => (others => '0'), arprot => (others => '0'), arvalid => '0',
-        rready => '0');
+  constant AXIL_M2S_IDLE : t_axil_m2s := (
+    awaddr => (others => '0'), awprot => (others => '0'), awvalid => '0',
+    wdata  => (others => '0'), wstrb  => (others => '0'), wvalid  => '0',
+    bready => '0',
+    araddr => (others => '0'), arprot => (others => '0'), arvalid => '0',
+    rready => '0');
 
-    constant AXIL_S2M_IDLE : t_axil_s2m := (
-        awready => '0', wready => '0',
-        bresp   => AXIL_RESP_OKAY, bvalid => '0',
-        arready => '0',
-        rdata   => (others => '0'), rresp => AXIL_RESP_OKAY, rvalid => '0');
+  constant AXIL_S2M_IDLE : t_axil_s2m := (
+    awready => '0', wready => '0',
+    bresp   => AXIL_RESP_OKAY, bvalid => '0',
+    arready => '0',
+    rdata   => (others => '0'), rresp => AXIL_RESP_OKAY, rvalid => '0');
 
 end package axil_pkg;

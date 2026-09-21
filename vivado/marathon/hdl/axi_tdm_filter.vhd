@@ -49,188 +49,188 @@ library work;
 use work.axil_pkg.all;
 
 entity axi_tdm_filter is
-    generic (
-        -- Depth of the per-channel state RAM. Sized well past what is used
-        -- today on purpose: 64 x 32 bits is ~256 bytes, i.e. free, and it
-        -- means growing the channel count never needs a resynthesis.
-        MAX_CHANNELS          : integer := 64;
-        C_S00_AXI_DATA_WIDTH  : integer := 32;
-        C_S00_AXI_ADDR_WIDTH  : integer := 4
+  generic (
+    -- Depth of the per-channel state RAM. Sized well past what is used
+    -- today on purpose: 64 x 32 bits is ~256 bytes, i.e. free, and it
+    -- means growing the channel count never needs a resynthesis.
+    MAX_CHANNELS          : integer := 64;
+    C_S00_AXI_DATA_WIDTH  : integer := 32;
+    C_S00_AXI_ADDR_WIDTH  : integer := 4
     );
-    port (
-        aclk        : in  std_logic;
-        aresetn     : in  std_logic;
+  port (
+    aclk        : in  std_logic;
+    aresetn     : in  std_logic;
 
-        -- AXI4-Lite slave: control/status only, no sample data
-        s_m2s       : in  t_axil_m2s;
-        s_s2m       : out t_axil_s2m;
+    -- AXI4-Lite slave: control/status only, no sample data
+    s_m2s       : in  t_axil_m2s;
+    s_s2m       : out t_axil_s2m;
 
-        -- AXI4-Stream slave: samples in, from the DMA's MM2S channel
-        s_axis_m2s  : in  t_axis_m2s;
-        s_axis_s2m  : out t_axis_s2m;
+    -- AXI4-Stream slave: samples in, from the DMA's MM2S channel
+    s_axis_m2s  : in  t_axis_m2s;
+    s_axis_s2m  : out t_axis_s2m;
 
-        -- AXI4-Stream master: samples out, to the DMA's S2MM channel
-        m_axis_m2s  : out t_axis_m2s;
-        m_axis_s2m  : in  t_axis_s2m
+    -- AXI4-Stream master: samples out, to the DMA's S2MM channel
+    m_axis_m2s  : out t_axis_m2s;
+    m_axis_s2m  : in  t_axis_s2m
     );
 end axi_tdm_filter;
 
 architecture rtl of axi_tdm_filter is
 
-    -- reg3 rides its STATUS word on the "fir_result" hook (axi_processing_ch1/2
-    -- ride their filter output on the same hook).
-    component my_axi is
-        generic (
-            C_S_AXI_ADDR_WIDTH : integer := 4
-        );
-        port (
-            axi_slv_reg_rden : out std_logic;
-            axi_slv_reg_wren : out std_logic;
-            axi_reg_data_out : out std_logic_vector(AXIL_DATA_W-1 downto 0);
-            axi_slv_reg0     : out std_logic_vector(AXIL_DATA_W-1 downto 0);
-            axi_slv_reg1     : out std_logic_vector(AXIL_DATA_W-1 downto 0);
-            axi_slv_reg2     : out std_logic_vector(AXIL_DATA_W-1 downto 0);
-            axi_slv_reg3     : out std_logic_vector(AXIL_DATA_W-1 downto 0);
-            fir_result       : in  std_logic_vector(AXIL_DATA_W-1 downto 0);
-            aclk             : in  std_logic;
-            aresetn          : in  std_logic;
-            s_m2s            : in  t_axil_m2s;
-            s_s2m            : out t_axil_s2m
-        );
-    end component;
+  -- reg3 rides its STATUS word on the "fir_result" hook (axi_processing_ch1/2
+  -- ride their filter output on the same hook).
+  component my_axi is
+    generic (
+      C_S_AXI_ADDR_WIDTH : integer := 4
+      );
+    port (
+      axi_slv_reg_rden : out std_logic;
+      axi_slv_reg_wren : out std_logic;
+      axi_reg_data_out : out std_logic_vector(AXIL_DATA_W-1 downto 0);
+      axi_slv_reg0     : out std_logic_vector(AXIL_DATA_W-1 downto 0);
+      axi_slv_reg1     : out std_logic_vector(AXIL_DATA_W-1 downto 0);
+      axi_slv_reg2     : out std_logic_vector(AXIL_DATA_W-1 downto 0);
+      axi_slv_reg3     : out std_logic_vector(AXIL_DATA_W-1 downto 0);
+      fir_result       : in  std_logic_vector(AXIL_DATA_W-1 downto 0);
+      aclk             : in  std_logic;
+      aresetn          : in  std_logic;
+      s_m2s            : in  t_axil_m2s;
+      s_s2m            : out t_axil_s2m
+      );
+  end component;
 
-    -- Byte-reverse a 32-bit word (big-endian <-> little-endian). Pure
-    -- rewiring: costs no logic at all, which is the whole point of moving
-    -- the swap off the CPU.
-    function bswap32 (x : std_logic_vector(31 downto 0))
-        return std_logic_vector is
-    begin
-        return x(7 downto 0) & x(15 downto 8) & x(23 downto 16) & x(31 downto 24);
-    end function;
+  -- Byte-reverse a 32-bit word (big-endian <-> little-endian). Pure
+  -- rewiring: costs no logic at all, which is the whole point of moving
+  -- the swap off the CPU.
+  function bswap32 (x : std_logic_vector(31 downto 0))
+    return std_logic_vector is
+  begin
+    return x(7 downto 0) & x(15 downto 8) & x(23 downto 16) & x(31 downto 24);
+  end function;
 
-    signal cfg_reg0 : std_logic_vector(C_S00_AXI_DATA_WIDTH-1 downto 0);
-    signal cfg_reg1 : std_logic_vector(C_S00_AXI_DATA_WIDTH-1 downto 0);
-    signal cfg_reg2 : std_logic_vector(C_S00_AXI_DATA_WIDTH-1 downto 0);
-    signal status   : std_logic_vector(C_S00_AXI_DATA_WIDTH-1 downto 0);
+  signal cfg_reg0 : std_logic_vector(C_S00_AXI_DATA_WIDTH-1 downto 0);
+  signal cfg_reg1 : std_logic_vector(C_S00_AXI_DATA_WIDTH-1 downto 0);
+  signal cfg_reg2 : std_logic_vector(C_S00_AXI_DATA_WIDTH-1 downto 0);
+  signal status   : std_logic_vector(C_S00_AXI_DATA_WIDTH-1 downto 0);
 
-    -- Per-channel filter state. Initialised here rather than reset: the
-    -- init value is loaded at configuration time on Xilinx parts, and
-    -- keeping reset off the array is what lets it infer as distributed
-    -- RAM instead of 2048 flip-flops.
-    type state_array_t is array (0 to MAX_CHANNELS-1)
-        of signed(31 downto 0);
-    signal state : state_array_t := (others => (others => '0'));
-    attribute ram_style : string;
-    attribute ram_style of state : signal is "distributed";
+  -- Per-channel filter state. Initialised here rather than reset: the
+  -- init value is loaded at configuration time on Xilinx parts, and
+  -- keeping reset off the array is what lets it infer as distributed
+  -- RAM instead of 2048 flip-flops.
+  type state_array_t is array (0 to MAX_CHANNELS-1)
+    of signed(31 downto 0);
+  signal state : state_array_t := (others => (others => '0'));
+  attribute ram_style : string;
+  attribute ram_style of state : signal is "distributed";
 
-    -- Slot 0 = timestamp, slots 1..n_channels = samples. Needs one extra
-    -- bit of range over MAX_CHANNELS because it counts 0..N inclusive.
-    signal slot_idx : integer range 0 to MAX_CHANNELS := 0;
+  -- Slot 0 = timestamp, slots 1..n_channels = samples. Needs one extra
+  -- bit of range over MAX_CHANNELS because it counts 0..N inclusive.
+  signal slot_idx : integer range 0 to MAX_CHANNELS := 0;
 
-    signal n_channels  : integer range 0 to MAX_CHANNELS;
-    signal shift_amt   : integer range 0 to 31;
-    signal swap_en     : std_logic;
-    signal clear_state : std_logic;
+  signal n_channels  : integer range 0 to MAX_CHANNELS;
+  signal shift_amt   : integer range 0 to 31;
+  signal swap_en     : std_logic;
+  signal clear_state : std_logic;
 
-    signal beat        : std_logic;   -- a beat actually transfers this cycle
-    signal is_ts_slot  : std_logic;
+  signal beat        : std_logic;   -- a beat actually transfers this cycle
+  signal is_ts_slot  : std_logic;
 
-    signal x_native    : std_logic_vector(31 downto 0);
-    signal y_prev      : signed(31 downto 0);
-    signal y_new       : signed(31 downto 0);
-    signal result      : std_logic_vector(31 downto 0);
+  signal x_native    : std_logic_vector(31 downto 0);
+  signal y_prev      : signed(31 downto 0);
+  signal y_new       : signed(31 downto 0);
+  signal result      : std_logic_vector(31 downto 0);
 
 begin
 
-    my_axi_inst : my_axi
-        generic map (
-            C_S_AXI_ADDR_WIDTH => C_S00_AXI_ADDR_WIDTH
-        )
-        port map (
-            axi_slv_reg_rden => open,
-            axi_slv_reg_wren => open,
-            axi_reg_data_out => open,
-            axi_slv_reg0     => cfg_reg0,
-            axi_slv_reg1     => cfg_reg1,
-            axi_slv_reg2     => cfg_reg2,
-            axi_slv_reg3     => open,
-            fir_result       => status,
-            aclk             => aclk,
-            aresetn          => aresetn,
-            s_m2s            => s_m2s,
-            s_s2m            => s_s2m
-        );
+  my_axi_inst : my_axi
+    generic map (
+      C_S_AXI_ADDR_WIDTH => C_S00_AXI_ADDR_WIDTH
+      )
+    port map (
+      axi_slv_reg_rden => open,
+      axi_slv_reg_wren => open,
+      axi_reg_data_out => open,
+      axi_slv_reg0     => cfg_reg0,
+      axi_slv_reg1     => cfg_reg1,
+      axi_slv_reg2     => cfg_reg2,
+      axi_slv_reg3     => open,
+      fir_result       => status,
+      aclk             => aclk,
+      aresetn          => aresetn,
+      s_m2s            => s_m2s,
+      s_s2m            => s_s2m
+      );
 
-    -- ---------------- control register decode ----------------
-    -- Clamped so a bad register write can never index past the state RAM.
-    n_channels <= MAX_CHANNELS
-                  when unsigned(cfg_reg0) > to_unsigned(MAX_CHANNELS, 32)
-                  else to_integer(unsigned(cfg_reg0(7 downto 0)));
-    shift_amt   <= to_integer(unsigned(cfg_reg1(4 downto 0)));
-    swap_en     <= cfg_reg2(0);
-    clear_state <= cfg_reg2(1);
+  -- ---------------- control register decode ----------------
+  -- Clamped so a bad register write can never index past the state RAM.
+  n_channels <= MAX_CHANNELS
+                when unsigned(cfg_reg0) > to_unsigned(MAX_CHANNELS, 32)
+                else to_integer(unsigned(cfg_reg0(7 downto 0)));
+  shift_amt   <= to_integer(unsigned(cfg_reg1(4 downto 0)));
+  swap_en     <= cfg_reg2(0);
+  clear_state <= cfg_reg2(1);
 
-    status(7 downto 0)   <= std_logic_vector(to_unsigned(slot_idx, 8));
-    status(15 downto 8)  <= std_logic_vector(to_unsigned(n_channels, 8));
-    status(20 downto 16) <= std_logic_vector(to_unsigned(shift_amt, 5));
-    status(23 downto 21) <= (others => '0');
-    status(24)           <= s_axis_m2s.tvalid;
-    status(25)           <= m_axis_s2m.tready;
-    status(31 downto 26) <= (others => '0');
+  status(7 downto 0)   <= std_logic_vector(to_unsigned(slot_idx, 8));
+  status(15 downto 8)  <= std_logic_vector(to_unsigned(n_channels, 8));
+  status(20 downto 16) <= std_logic_vector(to_unsigned(shift_amt, 5));
+  status(23 downto 21) <= (others => '0');
+  status(24)           <= s_axis_m2s.tvalid;
+  status(25)           <= m_axis_s2m.tready;
+  status(31 downto 26) <= (others => '0');
 
-    -- ---------------- stream handshake ----------------
-    -- Straight pass-through: this block never stalls of its own accord, so
-    -- backpressure from S2MM propagates directly back to MM2S.
-    s_axis_s2m.tready <= m_axis_s2m.tready;
-    m_axis_m2s.tvalid <= s_axis_m2s.tvalid;
-    m_axis_m2s.tlast  <= s_axis_m2s.tlast;
+  -- ---------------- stream handshake ----------------
+  -- Straight pass-through: this block never stalls of its own accord, so
+  -- backpressure from S2MM propagates directly back to MM2S.
+  s_axis_s2m.tready <= m_axis_s2m.tready;
+  m_axis_m2s.tvalid <= s_axis_m2s.tvalid;
+  m_axis_m2s.tlast  <= s_axis_m2s.tlast;
 
-    beat       <= s_axis_m2s.tvalid and m_axis_s2m.tready;
-    is_ts_slot <= '1' when slot_idx = 0 else '0';
+  beat       <= s_axis_m2s.tvalid and m_axis_s2m.tready;
+  is_ts_slot <= '1' when slot_idx = 0 else '0';
 
-    -- ---------------- datapath ----------------
-    x_native <= bswap32(s_axis_m2s.tdata) when swap_en = '1' else s_axis_m2s.tdata;
+  -- ---------------- datapath ----------------
+  x_native <= bswap32(s_axis_m2s.tdata) when swap_en = '1' else s_axis_m2s.tdata;
 
-    -- Slot 0 has no state entry; index 0 is a harmless dummy read.
-    y_prev <= state(slot_idx - 1) when slot_idx > 0 else (others => '0');
-    y_new  <= y_prev + shift_right(signed(x_native) - y_prev, shift_amt);
+  -- Slot 0 has no state entry; index 0 is a harmless dummy read.
+  y_prev <= state(slot_idx - 1) when slot_idx > 0 else (others => '0');
+  y_new  <= y_prev + shift_right(signed(x_native) - y_prev, shift_amt);
 
-    -- Timestamp passes through byte-for-byte (swapping twice would be a
-    -- no-op anyway). Clear forces passthrough so the filter's effect can be
-    -- switched out without disturbing the stream.
-    result <= s_axis_m2s.tdata
-                  when (is_ts_slot = '1' or clear_state = '1')
-              else bswap32(std_logic_vector(y_new)) when swap_en = '1'
-              else std_logic_vector(y_new);
+  -- Timestamp passes through byte-for-byte (swapping twice would be a
+  -- no-op anyway). Clear forces passthrough so the filter's effect can be
+  -- switched out without disturbing the stream.
+  result <= s_axis_m2s.tdata
+            when (is_ts_slot = '1' or clear_state = '1')
+            else bswap32(std_logic_vector(y_new)) when swap_en = '1'
+            else std_logic_vector(y_new);
 
-    m_axis_m2s.tdata <= result;
+  m_axis_m2s.tdata <= result;
 
-    -- ---------------- sequential state ----------------
-    process (aclk)
-    begin
-        if rising_edge(aclk) then
-            if aresetn = '0' then
-                slot_idx <= 0;
-            elsif beat = '1' then
-                -- State update: only channel slots carry state.
-                if slot_idx > 0 then
-                    if clear_state = '1' then
-                        state(slot_idx - 1) <= (others => '0');
-                    else
-                        state(slot_idx - 1) <= y_new;
-                    end if;
-                end if;
-
-                -- Slot counter. tlast resynchronises to slot 0 so a buffer
-                -- boundary can never leave the counter mid-frame; the
-                -- n_channels wrap does the same at every frame boundary.
-                if s_axis_m2s.tlast = '1' or slot_idx >= n_channels then
-                    slot_idx <= 0;
-                else
-                    slot_idx <= slot_idx + 1;
-                end if;
-            end if;
+  -- ---------------- sequential state ----------------
+  process (aclk)
+  begin
+    if rising_edge(aclk) then
+      if aresetn = '0' then
+        slot_idx <= 0;
+      elsif beat = '1' then
+        -- State update: only channel slots carry state.
+        if slot_idx > 0 then
+          if clear_state = '1' then
+            state(slot_idx - 1) <= (others => '0');
+          else
+            state(slot_idx - 1) <= y_new;
+          end if;
         end if;
-    end process;
+
+        -- Slot counter. tlast resynchronises to slot 0 so a buffer
+        -- boundary can never leave the counter mid-frame; the
+        -- n_channels wrap does the same at every frame boundary.
+        if s_axis_m2s.tlast = '1' or slot_idx >= n_channels then
+          slot_idx <= 0;
+        else
+          slot_idx <= slot_idx + 1;
+        end if;
+      end if;
+    end if;
+  end process;
 
 end rtl;
