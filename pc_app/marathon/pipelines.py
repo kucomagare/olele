@@ -152,15 +152,18 @@ def pipe1_scipy(x, state, params):
 
     fs = float(params.get("fs", 2048.0))
     fc = float(params.get("hp_hz", 0.5))
+    xs = _from_wire(x).astype(np.float64)
     if "sos" not in state:
         # Designed once per run, not per chunk -- fs/fc rarely change and
         # sosfilt_zi isn't cheap enough to redo 50x a second.
         state["sos"] = signal.butter(2, fc / (fs / 2.0),
                                      btype="highpass", output="sos")
-        # Start from rest, not sosfilt_zi's steady state -- no history yet.
-        state["zi"] = np.zeros_like(signal.sosfilt_zi(state["sos"]))
+        # Seed at the lead-in's mean, not rest -- design model, not iir.
+        # A single sample risks landing on a QRS spike; averaging a short
+        # window is a steadier baseline estimate.
+        lead_in = xs[:min(32, xs.size)]
+        state["zi"] = signal.sosfilt_zi(state["sos"]) * (lead_in.mean() if lead_in.size else 0.0)
 
-    xs = _from_wire(x).astype(np.float64)
     y, state["zi"] = signal.sosfilt(state["sos"], xs, zi=state["zi"])
     return _to_wire_centred(np.rint(y), x.dtype)
 
@@ -223,6 +226,7 @@ def pipe2_scipy(x, state, params):
     from scipy import signal
 
     hp_hz, notch_hz, notch_q, lp_hz, fs = _pipe2_freqs(params)
+    xs = _from_wire(x).astype(np.float64)
     if "sos" not in state:
         nyq = fs / 2.0
         sections = []
@@ -239,10 +243,12 @@ def pipe2_scipy(x, state, params):
         # the chain stays a filter instead of a special case.
         state["sos"] = (np.vstack(sections) if sections
                         else np.array([[1., 0., 0., 1., 0., 0.]]))
-        # From rest, not sosfilt_zi's steady state -- same reason as pipe1.
-        state["zi"] = np.zeros((state["sos"].shape[0], 2))
+        # Seed at the lead-in's mean, not rest -- design model, not iir.
+        # A single sample risks landing on a QRS spike; averaging a short
+        # window is a steadier baseline estimate.
+        lead_in = xs[:min(32, xs.size)]
+        state["zi"] = signal.sosfilt_zi(state["sos"]) * (lead_in.mean() if lead_in.size else 0.0)
 
-    xs = _from_wire(x).astype(np.float64)
     y, state["zi"] = signal.sosfilt(state["sos"], xs, zi=state["zi"])
     return _to_wire_centred(np.rint(y), x.dtype)
 

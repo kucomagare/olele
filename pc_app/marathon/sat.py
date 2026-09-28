@@ -1113,18 +1113,21 @@ def main(argv=None):
                     help="bins more than this many dB below the strongest "
                          "bin, in either trace, are left out of the phase "
                          "column (default: %(default)s)")
-    ap.add_argument("--model", choices=model_choices(),
+    ap.add_argument("--model", choices=model_choices(), default=config.SAT_MODEL,
                     help="also run this pipeline on the recorded "
                          "input and score it against the recorded output. "
                          "bypass and iir take no implementation; design "
                          "pipelines are named pipe:impl (e.g. pipe1:scipy). "
-                         "Applies to both channels unless overridden below")
+                         "Applies to both channels unless overridden below "
+                         "(default: %(default)s)")
     ap.add_argument("--model-ch1", choices=model_choices(),
                     help="score ch1 against this instead of --model. The two "
                          "channels can have been produced by different "
                          "pipelines, so they can be scored separately")
     ap.add_argument("--model-ch2", choices=model_choices(),
-                    help="score ch2 against this instead of --model")
+                    default=config.SAT_MODEL_CH2,
+                    help="score ch2 against this instead of --model "
+                         "(default: %(default)s)")
     ap.add_argument("--shift", type=int, default=config.SAT_SHIFT,
                     help="shift for --model (default: the board's, from the sidecar)")
     ap.add_argument("--settle", type=int, default=config.SAT_SETTLE,

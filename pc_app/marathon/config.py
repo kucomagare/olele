@@ -343,8 +343,8 @@ def all_local():
 #         integer arithmetic, what it WILL do as RTL -- the translated one.
 # A pipeline with only one implementation (iir is hardware-only) falls back
 # to that one rather than to passthrough.
-CH_PIPE = ["iir", "iir"]
-CH_IMPL = ["manual", "manual"]
+CH_PIPE = ["pipe2", "pipe2"]
+CH_IMPL = ["scipy", "manual"]
 
 # alpha = 1/2**LOCAL_SHIFT for the local filter -- local mode's counterpart
 # of the board's shift register, separate since there's no hardware to
@@ -417,8 +417,8 @@ SAT_PHASE_GATE_DB = -60.0
 
 # The reference-model comparison. None leaves a channel unscored, and a
 # None shift takes whatever the board's register held, from the sidecar.
-SAT_MODEL = None
-SAT_MODEL_CH2 = None
+SAT_MODEL = "pipe2:scipy"
+SAT_MODEL_CH2 = "pipe2:manual"
 SAT_SHIFT = None
 SAT_SETTLE = 200            # samples skipped before scoring, for the
                             # model's zeroed start the board did not have
