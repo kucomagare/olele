@@ -140,7 +140,7 @@ def load_dump(csv_path):
         "shift": number("board filter registers (read back from fabric)::shift",
                         default=None),
         "heart_rate": number("ECG_HEART_RATE", "hr"),
-        "amplitude": number("ECG_AMPLITUDE", "amplitude"),
+        "amplitude": number("ECG_AMPLITUDE_MV", "amplitude_mv"),
         "send_rate": number("SEND_RATE", "send_rate"),
         "chunk": number("CHUNK_SIZE", "chunk"),
         "trigger": meta.get("PLOT_TRIGGER", header_meta.get("trigger")),
@@ -149,7 +149,7 @@ def load_dump(csv_path):
         "sines": [(n, ch, meta.get(f"ECG_SINE{n}_CH{ch}_ENABLED"),
                    meta.get(f"ECG_SINE{n}_CH{ch}_FREQ"),
                    meta.get(f"ECG_SINE{n}_CH{ch}_PHASE"),
-                   meta.get(f"ECG_SINE{n}_CH{ch}_LEVEL"))
+                   meta.get(f"ECG_SINE{n}_CH{ch}_LEVEL_MV"))
                   for n in range(1, 5) for ch in (1, 2)],
         "meta": meta,
     }

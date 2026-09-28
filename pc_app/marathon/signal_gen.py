@@ -13,24 +13,20 @@ import numpy as np
 import neurokit2 as nk
 
 import config
+import adc_sim
 from packet_format import DATA_TYPE, DATA_DTYPE, TS_MODULUS, CH1_DTYPE, CH2_DTYPE
 
-# Generation (nk.ecg_simulate, expensive) and amplitude scaling (cheap) are
-# deliberately decoupled: the raw buffer is cached and only rebuilt when
-# its _config_signature() changes; ECG_AMPLITUDE applies fresh per chunk
-# in _scale_to_wire(), so dragging the amplitude control is instant.
+# Generation is cached (_config_signature()); ECG_AMPLITUDE_MV rescales
+# fresh per chunk in generate_ecg_chunk(), so it stays instant to drag.
 #
-# Note: nk.ecg_simulate's own `ai` kwarg (per-wave heights) is NOT a usable
-# amplitude knob -- neurokit renormalizes regardless of a uniform `ai`
-# scale (verified: 0.5x-3x all landed within ~3% of the same ptp).
-# Amplitude is implemented here instead, as a post-generation fit into a
-# band centered on each channel's dtype range. `ai`'s RATIOS between
-# components do still reshape the waveform (verified), so it stays
-# exposed as a panel field -- just not as an amplitude control.
+# Note: nk.ecg_simulate's `ai` kwarg can't do amplitude (neurokit
+# renormalizes regardless) -- kept exposed only for its wave-shape ratios.
 #
-# (signature tuple the raw buffers were built with, then per-channel
-#  (raw array, raw min, raw max))
-_cache = (None, None, None)
+# _cache: (signature, ch1_raw, ch1_ptp, ch1_extra_mv,
+#                      ch2_raw, ch2_ptp, ch2_extra_mv)
+# ch*_raw is neurokit's arbitrary-unit ECG (rescaled at chunk time);
+# ch*_extra_mv is noise+sine, already absolute mV.
+_cache = (None, None, None, None, None, None, None)
 
 # Regeneration runs on its OWN thread; old buffers keep serving until the
 # new ones are ready. nk.ecg_simulate(60s @ 2048Hz) is ~0.74s x2, and it
@@ -52,25 +48,16 @@ def _regen(signature):
     global _cache, _regen_busy
     try:
         while True:
-            ch1_raw, ch1_ecg_ptp = _simulate_raw(config.ECG_RANDOM_SEED, 1)
-            ch2_raw, _ = _simulate_raw(config.ECG_RANDOM_SEED + 1, 2)
+            ch1_raw, ch1_ptp = _simulate_raw(config.ECG_RANDOM_SEED, 1)
+            ch2_raw, ch2_ptp = _simulate_raw(config.ECG_RANDOM_SEED + 1, 2)
 
-            # Reference ptp is ch1's CLEAN ECG swing for BOTH channels, so
-            # equal levels mean equal amplitude regardless of noise/ECG-off state.
-            ch1_raw = ch1_raw + _sine_contribution(len(ch1_raw), ch1_ecg_ptp, 1)
-            ch2_raw = ch2_raw + _sine_contribution(len(ch2_raw), ch1_ecg_ptp, 2)
+            ch1_extra = (_noise_sum_mv(len(ch1_raw), config.ECG_RANDOM_SEED, 1)
+                         + _sine_contribution(len(ch1_raw), 1))
+            ch2_extra = (_noise_sum_mv(len(ch2_raw), config.ECG_RANDOM_SEED + 1, 2)
+                         + _sine_contribution(len(ch2_raw), 2))
 
-            if config.ECG_ENABLED:
-                ch1_entry = (ch1_raw, ch1_raw.min(), ch1_raw.max())
-                ch2_entry = (ch2_raw, ch2_raw.min(), ch2_raw.max())
-            else:
-                # FIXED span [-0.5, 0.5], not the buffer's own extremes --
-                # auto-fitting would stretch any level to fill the plot,
-                # making sine level invisible with the ECG gone.
-                ch1_entry = (ch1_raw, -0.5, 0.5)
-                ch2_entry = (ch2_raw, -0.5, 0.5)
-
-            _cache = (signature, ch1_entry, ch2_entry)
+            _cache = (signature, ch1_raw, ch1_ptp, ch1_extra,
+                                  ch2_raw, ch2_ptp, ch2_extra)
 
             # Loop rather than return: settings may have moved again while
             # that ran (a dragged control streams edits) -- last edit
@@ -88,7 +75,7 @@ def _regen(signature):
             _regen_busy = False
 
 # Colored-noise layers: any combination active simultaneously (config.py's
-# ECG_NOISE_*_ENABLED/_LEVEL), summed before adding to the ECG. Config
+# ECG_NOISE_*_ENABLED/_LEVEL_MV), summed before adding to the ECG. Config
 # names built from these per channel, same pattern as the sine generators.
 NOISE_COLOURS = (
     ("VIOLET", -2),
@@ -102,17 +89,17 @@ NOISE_COLOURS = (
 def noise_attrs(colour, ch):
     """The two config names for `colour` on channel `ch`."""
     prefix = f"ECG_NOISE_{colour}_CH{ch}_"
-    return prefix + "ENABLED", prefix + "LEVEL"
+    return prefix + "ENABLED", prefix + "LEVEL_MV"
 
 # Sine interference generators, four of them, each configured per channel:
-# ECG_SINE<n>_CH<c>_{ENABLED,FREQ,PHASE,LEVEL}. Count lives here once.
+# ECG_SINE<n>_CH<c>_{ENABLED,FREQ,PHASE,LEVEL_MV}. Count lives here once.
 SINE_COUNT = 4
 
 
 def sine_attrs(n, ch):
     """The four config names for generator `n` (1-based) on channel `ch`."""
     prefix = f"ECG_SINE{n}_CH{ch}_"
-    return tuple(prefix + f for f in ("ENABLED", "FREQ", "PHASE", "LEVEL"))
+    return tuple(prefix + f for f in ("ENABLED", "FREQ", "PHASE", "LEVEL_MV"))
 
 
 _SINE_GENERATORS = tuple((n, ch) for n in range(1, SINE_COUNT + 1)
@@ -142,6 +129,8 @@ def _config_signature():
 
 
 def _simulate_raw(random_state, channel):
+    """(ecg_raw, ecg_raw_ptp) in neurokit's own units -- NOT rescaled to
+    ECG_AMPLITUDE_MV here, see generate_ecg_chunk()."""
     raw = nk.ecg_simulate(
         duration=config.ECG_DURATION_S,
         sampling_rate=config.ECG_SAMPLING_RATE,
@@ -157,68 +146,47 @@ def _simulate_raw(random_state, channel):
     )
     raw = np.asarray(raw, dtype=np.float64)
 
-    # Measured on the CLEAN signal, once, before any noise is added -- so
-    # each layer's LEVEL keeps meaning "N% of the clean ECG's own swing"
-    # regardless of how many other layers are also active.
-    raw_ptp = raw.max() - raw.min()
-
-    # ECG off: drop the waveform but keep raw_ptp, so the noise/sine
-    # layers below stay scaled to the swing the ECG *would* have had.
-    # Zeroing before measuring would make raw_ptp 0 and skip the whole
-    # noise block, leaving silence instead of the generators.
     if not config.ECG_ENABLED:
-        raw = np.zeros_like(raw)
-        # Nothing to be a fraction OF, so the reference becomes full
-        # scale -- every generator's LEVEL is then its own ptp as a share
-        # of the plot's whole range, independent of which others are running.
-        raw_ptp = 1.0
-    if raw_ptp > 0:
-        total_noise = np.zeros_like(raw)
-        for i, (colour, beta) in enumerate(NOISE_COLOURS):
-            enabled_attr, level_attr = noise_attrs(colour, channel)
-            if not getattr(config, enabled_attr):
-                continue
-            level = getattr(config, level_attr)
-            if level <= 0:
-                continue
-            # Distinct random_state per layer (and offset from the ECG's
-            # own seed) so simultaneous layers -- or the same colour on
-            # both channels -- don't correlate.
-            noise = np.asarray(
-                nk.signal_noise(
-                    duration=config.ECG_DURATION_S,
-                    sampling_rate=config.ECG_SAMPLING_RATE,
-                    beta=beta,
-                    random_state=random_state * 1000 + i,
-                ),
-                dtype=np.float64,
-            )
-            # Length matches duration*sampling_rate exactly in practice,
-            # but pad/truncate defensively rather than assume it always will.
-            n = min(len(raw), len(noise))
-            noise_ptp = noise[:n].max() - noise[:n].min()
-            if noise_ptp > 0:
-                total_noise[:n] += noise[:n] * (level * raw_ptp / noise_ptp)
-        raw = raw + total_noise
+        return np.zeros_like(raw), 0.0  # noise/sine keep running regardless
 
-    # raw_ptp returned alongside the buffer: it's the CLEAN swing the sine
-    # layer added in _raw_buffers() needs. Recomputing it from the
-    # returned buffer would give a different number once noise is mixed
-    # in, and zero when ECG_ENABLED is off -- silently sizing the sine to nothing.
-    return raw, raw_ptp
+    return raw, raw.max() - raw.min()
 
 
-def _sine_contribution(n_samples, raw_ptp, channel):
-    """Sum of the four generators for ONE channel, over n_samples.
-
-    raw_ptp is a parameter, not measured here: it's ch1's clean ECG swing
-    for both channels, so equal levels on ch1 and ch2 mean equal
-    amplitudes. Measuring each channel's own ptp (different seeds) made
-    equal settings differ by a fraction of a percent.
-    """
+def _noise_sum_mv(n_samples, random_state, channel):
+    """Sum of every enabled colored-noise layer for ONE channel, absolute
+    mV peak-to-peak (config.py's ECG_NOISE_*_LEVEL_MV)."""
     total = np.zeros(n_samples)
-    if raw_ptp <= 0:
-        return total
+    for i, (colour, beta) in enumerate(NOISE_COLOURS):
+        enabled_attr, level_attr = noise_attrs(colour, channel)
+        if not getattr(config, enabled_attr):
+            continue
+        level_mv = getattr(config, level_attr)
+        if level_mv <= 0:
+            continue
+        # Distinct random_state per layer (and offset from the ECG's own
+        # seed) so simultaneous layers -- or the same colour on both
+        # channels -- don't correlate.
+        noise = np.asarray(
+            nk.signal_noise(
+                duration=config.ECG_DURATION_S,
+                sampling_rate=config.ECG_SAMPLING_RATE,
+                beta=beta,
+                random_state=random_state * 1000 + i,
+            ),
+            dtype=np.float64,
+        )
+        # Length matches duration*sampling_rate exactly in practice, but
+        # pad/truncate defensively rather than assume it always will.
+        n = min(n_samples, len(noise))
+        noise_ptp = noise[:n].max() - noise[:n].min()
+        if noise_ptp > 0:
+            total[:n] += noise[:n] * (level_mv / noise_ptp)
+    return total
+
+
+def _sine_contribution(n_samples, channel):
+    """Sum of the four generators for ONE channel, absolute mV."""
+    total = np.zeros(n_samples)
     t = np.arange(n_samples) / config.ECG_SAMPLING_RATE
     for n, ch in _SINE_GENERATORS:
         if ch != channel:
@@ -226,43 +194,34 @@ def _sine_contribution(n_samples, raw_ptp, channel):
         enabled_attr, freq_attr, phase_attr, level_attr = sine_attrs(n, ch)
         if not getattr(config, enabled_attr):
             continue
-        level = getattr(config, level_attr)
-        if level <= 0:
+        level_mv = getattr(config, level_attr)
+        if level_mv <= 0:
             continue
         freq = getattr(config, freq_attr)
         phase_rad = np.deg2rad(getattr(config, phase_attr))
-        # level = fraction of the reference ptp that becomes the sine's
-        # OWN peak-to-peak (same convention as the noise layers), so
-        # amplitude (sin()'s single-sided swing) is half of that.
-        total += (level * raw_ptp / 2.0) * np.sin(2 * np.pi * freq * t
-                                                  + phase_rad)
+        # sin()'s single-sided amplitude is half the configured peak-to-peak.
+        total += (level_mv / 2.0) * np.sin(2 * np.pi * freq * t + phase_rad)
     return total
 
 
 def _raw_buffers():
-    """Return (ch1_raw, ch1_lo, ch1_hi, ch2_raw, ch2_lo, ch2_hi).
-
-    Blocks on the simulator only on cold start, when nothing is cached
-    yet. After that a settings change starts a regeneration on its own
-    thread (see _regen) and this keeps handing back the previous buffers
-    until the new ones are published -- so a panel knob applies in a
-    fraction of a second instead of freezing the window for the ~1.5s two
-    channels of nk.ecg_simulate() take.
-    """
+    """(ch1_raw, ch1_ptp, ch1_extra_mv, ch2_raw, ch2_ptp, ch2_extra_mv) --
+    see _cache's comment. Blocks only on cold start; otherwise hands back
+    the previous buffers while a regen runs on its own thread."""
     global _regen_busy
-    sig, ch1_entry, ch2_entry = _cache
+    sig, ch1_raw, ch1_ptp, ch1_extra, ch2_raw, ch2_ptp, ch2_extra = _cache
     current_sig = _config_signature()
 
     if sig == current_sig:
-        return ch1_entry + ch2_entry
+        return ch1_raw, ch1_ptp, ch1_extra, ch2_raw, ch2_ptp, ch2_extra
 
-    if ch1_entry is None:
+    if ch1_raw is None:
         # Cold start: nothing to serve, so this one has to be synchronous.
         # python_client.py pays it in the background at launch precisely
         # so it doesn't land on a user action. _regen() publishes into _cache.
         _regen(current_sig)
-        _, ch1_entry, ch2_entry = _cache
-        return ch1_entry + ch2_entry
+        _, ch1_raw, ch1_ptp, ch1_extra, ch2_raw, ch2_ptp, ch2_extra = _cache
+        return ch1_raw, ch1_ptp, ch1_extra, ch2_raw, ch2_ptp, ch2_extra
 
     with _regen_lock:
         if not _regen_busy:
@@ -273,60 +232,32 @@ def _raw_buffers():
         # finishes and go round again (see _regen's loop) -- starting a
         # second thread here would just have both simulating at once.
 
-    return ch1_entry + ch2_entry
-
-
-def _scale_to_wire(raw_chunk, raw_lo, raw_hi, dtype):
-    """Fit raw_chunk (using the *whole buffer's* min/max, not the
-    chunk's -- otherwise each chunk would rescale to its own local
-    extremes and the waveform would lose its true relative shape) into a
-    band centered on dtype's range, sized to config.ECG_AMPLITUDE
-    fraction of that range. ECG_AMPLITUDE=1.0 spans the full dtype range
-    (e.g. 0..65535 for uint16); 0.0 collapses to the midpoint."""
-    dtype_max = np.iinfo(dtype).max
-    # ECG off: force amplitude=1.0, or it would be a second hidden gain
-    # in front of every generator's own level, and the levels would stop
-    # being the full-scale fractions they now claim to be.
-    amplitude = (max(0.0, min(1.0, config.ECG_AMPLITUDE))
-                 if config.ECG_ENABLED else 1.0)
-    # Offset shifts the band's centre; amplitude still sizes it around
-    # the midpoint, so the two controls stay independent.
-    offset = max(config.ECG_OFFSET_MIN,
-                 min(config.ECG_OFFSET_MAX, config.ECG_OFFSET))
-    center = dtype_max / 2.0 + offset * dtype_max
-    half_span = (dtype_max / 2.0) * amplitude
-    out_lo, out_hi = center - half_span, center + half_span
-
-    span = raw_hi - raw_lo
-    if span > 0:
-        scaled = out_lo + (raw_chunk - raw_lo) * (out_hi - out_lo) / span
-    else:
-        scaled = np.full_like(raw_chunk, center)
-    # Safety net only -- out_lo/out_hi are already within [0, dtype_max]
-    # by construction, this just guards float rounding at the exact edges.
-    return np.clip(scaled, 0, dtype_max).astype(dtype)
+    return ch1_raw, ch1_ptp, ch1_extra, ch2_raw, ch2_ptp, ch2_extra
 
 
 def generate_ecg_chunk(counter):
-    """Slice CHUNK_SIZE consecutive samples out of the ECG buffer starting
-    at `counter`, wrapping around, then scale to wire units. `counter` is
-    the running sample index (same one used for the ts field), so
-    playback position tracks it exactly regardless of CHUNK_SIZE changes
-    at runtime."""
-    ch1_raw, ch1_lo, ch1_hi, ch2_raw, ch2_lo, ch2_hi = _raw_buffers()
+    """Slice CHUNK_SIZE samples at `counter` (wrapping), rescale ECG to
+    ECG_AMPLITUDE_MV, add noise+sine (mV), digitize via adc_sim."""
+    (ch1_raw, ch1_ptp, ch1_extra,
+     ch2_raw, ch2_ptp, ch2_extra) = _raw_buffers()
     n = config.CHUNK_SIZE
     pos = counter % len(ch1_raw)
 
-    if pos + n <= len(ch1_raw):
-        ch1_slice = ch1_raw[pos:pos + n]
-        ch2_slice = ch2_raw[pos:pos + n]
-    else:
-        wrap = pos + n - len(ch1_raw)
-        ch1_slice = np.concatenate((ch1_raw[pos:], ch1_raw[:wrap]))
-        ch2_slice = np.concatenate((ch2_raw[pos:], ch2_raw[:wrap]))
+    def _slice(buf):
+        if pos + n <= len(buf):
+            return buf[pos:pos + n]
+        wrap = pos + n - len(buf)
+        return np.concatenate((buf[pos:], buf[:wrap]))
 
-    ch1 = _scale_to_wire(ch1_slice, ch1_lo, ch1_hi, CH1_DTYPE)
-    ch2 = _scale_to_wire(ch2_slice, ch2_lo, ch2_hi, CH2_DTYPE)
+    # ptp == 0 -> zero scale, not a divide by zero.
+    ch1_scale = (config.ECG_AMPLITUDE_MV / ch1_ptp) if ch1_ptp > 0 else 0.0
+    ch2_scale = (config.ECG_AMPLITUDE_MV / ch2_ptp) if ch2_ptp > 0 else 0.0
+
+    ch1_mv = _slice(ch1_raw) * ch1_scale + _slice(ch1_extra)
+    ch2_mv = _slice(ch2_raw) * ch2_scale + _slice(ch2_extra)
+
+    ch1 = adc_sim.digitize(ch1_mv, 1, CH1_DTYPE)
+    ch2 = adc_sim.digitize(ch2_mv, 2, CH2_DTYPE)
     return ch1, ch2
 
 

@@ -16,6 +16,7 @@ from matplotlib.lines import Line2D
 from matplotlib.ticker import MultipleLocator, ScalarFormatter
 import numpy as np
 
+import adc_sim
 import config
 import guiutil
 import sat
@@ -1254,6 +1255,19 @@ class SATWindow:
         phase_by_ch = {p["channel"]: p for p in phases if p}
         t = np.arange(self.info["samples"]) / rate
 
+        # Recorded VREF/ADC_BITS, not this session's live config -- a dump
+        # analysed later must not reinterpret itself under different knobs.
+        meta = self.info.get("meta") or {}
+        def _meta_num(key, cast, default):
+            try:
+                return cast(meta[key])
+            except (KeyError, ValueError):
+                return default
+        vref_minus = _meta_num("VREF_MINUS", float, config.VREF_MINUS)
+        vref_plus = _meta_num("VREF_PLUS", float, config.VREF_PLUS)
+        adc_bits = _meta_num("ADC_BITS", int, config.ADC_BITS)
+        to_v = lambda wire: adc_sim.to_volts(wire, vref_minus, vref_plus, adc_bits)
+
         # A third column only when there is phase to put in it -- an empty
         # one would take a third of the width from the two panels that have
         # something in them.
@@ -1268,14 +1282,16 @@ class SATWindow:
             for direction, color in (("in", "tab:blue"), ("out", "tab:red")):
                 key = f"{ch}_{direction}"
                 if key in self.traces:
-                    ax_t.plot(t, self.traces[key], color=color, lw=0.9, label=direction)
+                    ax_t.plot(t, to_v(self.traces[key]),
+                              color=color, lw=0.9, label=direction)
             m = model_by_ch.get(ch)
             if m is not None:
                 # Dashed over the recorded output -- separation is the point.
-                ax_t.plot(t, m["modelled"], color="tab:green", lw=0.9, ls="--",
-                          label=f"model ({m['algorithm']})")
+                ax_t.plot(t, to_v(m["modelled"]), color="tab:green",
+                          lw=0.9, ls="--", label=f"model ({m['algorithm']})")
             ax_t.set_title(f"{ch} — time")
             ax_t.set_xlabel("Time (s)")
+            ax_t.set_ylabel("Volts")
             ax_t.legend(fontsize=8)
             ax_t.grid(alpha=0.3)
 

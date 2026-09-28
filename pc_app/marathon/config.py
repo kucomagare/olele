@@ -27,11 +27,10 @@ WIRE_FULL_SCALE = _WIRE_MAX
 WINDOW_W = 1280
 WINDOW_H = 540
 
-# Y-axis display range (a view), independent of ECG_AMPLITUDE (how much of
-# the wire range the generated signal actually occupies). Defaults to full
-# wire range; narrow to zoom.
-PLOT_MIN = 0
-PLOT_MAX = _WIRE_MAX
+# Y-axis display range, volts (adc_sim.to_volts() domain). Must match
+# VREF_MINUS/VREF_PLUS below (defined later, so literals not references).
+PLOT_MIN = 0.0
+PLOT_MAX = 3.3
 
 # "scope": most recent PLOT_BUFFER raw samples, full waveform detail --
 # right choice at real ECG rates, shows P-QRS-T shape.
@@ -54,10 +53,9 @@ PLOT_MODE = "scope"
 # to slide within; displayed length/x-axis/PLOT_BUFFER meaning unchanged.
 PLOT_TRIGGER = False
 
-# Trigger level, fraction of PLOT_MIN..PLOT_MAX. 0.6 sits above baseline but
-# below the R peak so it fires once per beat; lower if free-running, raise
-# if it locks onto a T wave or noise.
-PLOT_TRIGGER_LEVEL = 0.6
+# Trigger level, absolute volts (was a fraction of PLOT_MIN/MAX). 2.0V
+# sits above baseline (V_OFFSET_CH1) but below the R-wave peak by default.
+PLOT_TRIGGER_LEVEL = 2.0
 
 # History kept behind the displayed window, x PLOT_BUFFER. 2 lets the
 # trigger slide back up to one full window to find a crossing.
@@ -171,7 +169,7 @@ ECG_TI = (-70, -15, 0, 15, 100)     # P,Q,R,S,T angular positions (degrees).
 ECG_AI = (1.2, -5, 30, -7.5, 0.75)  # P,Q,R,S,T relative heights. Scaling all
                                      # five uniformly has no effect (nk
                                      # renormalizes overall amplitude --
-                                     # that's what ECG_AMPLITUDE is for);
+                                     # that's what ECG_AMPLITUDE_MV is for);
                                      # changing ratios reshapes the waveform.
 ECG_BI = (0.25, 0.1, 0.1, 0.1, 0.4) # P,Q,R,S,T widths (Gaussian sigma).
 ECG_RANDOM_SEED = 1         # Base seed; ch2 uses +1 so channels stay
@@ -184,95 +182,101 @@ ECG_RANDOM_SEED = 1         # Base seed; ch2 uses +1 so channels stay
 # when toggled back on.
 ECG_ENABLED = True
 
-# DC offset, fraction of wire full scale, applied after ECG_AMPLITUDE. 0.0
-# centres the signal; a fraction (not raw counts) so it means the same
-# thing on marathon's 32-bit wire as sizif's 16-bit one. Pushing the band
-# outside [0, max] clips via _scale_to_wire()'s existing rounding guard.
-ECG_OFFSET = 0.0
-ECG_OFFSET_MIN = -0.5
-ECG_OFFSET_MAX = 0.5
-
 # Colored noise added on top of the simulated ECG via nk.signal_noise()
 # (distinct from ECG_NOISE, which is baked into ecg_simulate itself) -- see
 # signal_gen.py's _simulate_raw(). Five layers ((1/f)**beta: -2 violet,
 # -1 blue, 0 white, 1 pink, 2 brown), any combination enabled at its own
-# level. Each _LEVEL is that layer's peak-to-peak as a fraction of the
-# *clean* ECG's own peak-to-peak (measured once before noise is added, so
-# levels don't compound). Per channel, decorrelated (distinct random_state
-# per layer per channel) -- models e.g. one bad electrode rather than
-# uniform noise everywhere.
+# level. _LEVEL_MV is that layer's peak-to-peak in mV, absolute. Per
+# channel, decorrelated -- models e.g. one bad electrode.
 ECG_NOISE_VIOLET_CH1_ENABLED = False
-ECG_NOISE_VIOLET_CH1_LEVEL = 0.1
+ECG_NOISE_VIOLET_CH1_LEVEL_MV = 0.15
 ECG_NOISE_VIOLET_CH2_ENABLED = False
-ECG_NOISE_VIOLET_CH2_LEVEL = 0.1
+ECG_NOISE_VIOLET_CH2_LEVEL_MV = 0.15
 ECG_NOISE_BLUE_CH1_ENABLED = False
-ECG_NOISE_BLUE_CH1_LEVEL = 0.1
+ECG_NOISE_BLUE_CH1_LEVEL_MV = 0.15
 ECG_NOISE_BLUE_CH2_ENABLED = False
-ECG_NOISE_BLUE_CH2_LEVEL = 0.1
+ECG_NOISE_BLUE_CH2_LEVEL_MV = 0.15
 ECG_NOISE_WHITE_CH1_ENABLED = False
-ECG_NOISE_WHITE_CH1_LEVEL = 0.1
+ECG_NOISE_WHITE_CH1_LEVEL_MV = 0.15
 ECG_NOISE_WHITE_CH2_ENABLED = False
-ECG_NOISE_WHITE_CH2_LEVEL = 0.1
+ECG_NOISE_WHITE_CH2_LEVEL_MV = 0.15
 ECG_NOISE_PINK_CH1_ENABLED = False
-ECG_NOISE_PINK_CH1_LEVEL = 0.1
+ECG_NOISE_PINK_CH1_LEVEL_MV = 0.15
 ECG_NOISE_PINK_CH2_ENABLED = False
-ECG_NOISE_PINK_CH2_LEVEL = 0.1
+ECG_NOISE_PINK_CH2_LEVEL_MV = 0.15
 ECG_NOISE_BROWN_CH1_ENABLED = False
-ECG_NOISE_BROWN_CH1_LEVEL = 0.1
+ECG_NOISE_BROWN_CH1_LEVEL_MV = 0.15
 ECG_NOISE_BROWN_CH2_ENABLED = False
-ECG_NOISE_BROWN_CH2_LEVEL = 0.1
+ECG_NOISE_BROWN_CH2_LEVEL_MV = 0.15
 
-# Four independent sine-wave interference generators (powerline hum, other
-# discrete periodic artifacts vs. colored noise's broadband randomness) --
-# see signal_gen.py's _sine_contribution(). Per-channel enable/freq/phase/
-# level: real interference doesn't arrive identically on both leads, and a
-# phase difference is exactly what a rejection scheme must cope with; set
-# both channels the same for common-mode interference. Evaluated at
-# t = sample_index / ECG_SAMPLING_RATE (ECG time base), so frequency is
-# exact regardless of playback speed. _LEVEL is a fraction of ch1's clean
-# ECG peak-to-peak (same convention as noise _LEVEL above, so equal levels
-# = equal amplitudes on both channels). _PHASE in degrees.
+# Four independent sine-wave interference generators (mains hum etc), see
+# signal_gen.py's _sine_contribution(). Per-channel enable/freq/phase/
+# level; set both channels the same for common-mode. _LEVEL_MV is that
+# generator's own peak-to-peak in mV, absolute. _PHASE in degrees.
 ECG_SINE1_CH1_ENABLED = False
 ECG_SINE1_CH1_FREQ = 0.02     # Hz -- EU/UK/most-of-world mains
 ECG_SINE1_CH1_PHASE = 0.0     # degrees
-ECG_SINE1_CH1_LEVEL = 0.25
+ECG_SINE1_CH1_LEVEL_MV = 0.375
 ECG_SINE1_CH2_ENABLED = False
 ECG_SINE1_CH2_FREQ = 0.02
 ECG_SINE1_CH2_PHASE = 0.0
-ECG_SINE1_CH2_LEVEL = 0.25
+ECG_SINE1_CH2_LEVEL_MV = 0.375
 
 ECG_SINE2_CH1_ENABLED = False
 ECG_SINE2_CH1_FREQ = 30.0     # Hz -- US/North America mains
 ECG_SINE2_CH1_PHASE = 0.0
-ECG_SINE2_CH1_LEVEL = 0.15
+ECG_SINE2_CH1_LEVEL_MV = 0.225
 ECG_SINE2_CH2_ENABLED = False
 ECG_SINE2_CH2_FREQ = 30.0
 ECG_SINE2_CH2_PHASE = 0.0
-ECG_SINE2_CH2_LEVEL = 0.15
+ECG_SINE2_CH2_LEVEL_MV = 0.225
 
 ECG_SINE3_CH1_ENABLED = False
 ECG_SINE3_CH1_FREQ = 50.0    # Hz -- 2nd harmonic of 50, what a notch at the
 ECG_SINE3_CH1_PHASE = 0.0     # fundamental alone leaves behind
-ECG_SINE3_CH1_LEVEL = 0.20
+ECG_SINE3_CH1_LEVEL_MV = 0.3
 ECG_SINE3_CH2_ENABLED = False
 ECG_SINE3_CH2_FREQ = 50.0
 ECG_SINE3_CH2_PHASE = 0.0
-ECG_SINE3_CH2_LEVEL = 0.20
+ECG_SINE3_CH2_LEVEL_MV = 0.3
 
 ECG_SINE4_CH1_ENABLED = False
 ECG_SINE4_CH1_FREQ = 150.0    # Hz -- 3rd harmonic, and pipe2's LP corner
 ECG_SINE4_CH1_PHASE = 0.0
-ECG_SINE4_CH1_LEVEL = 0.05
+ECG_SINE4_CH1_LEVEL_MV = 0.075
 ECG_SINE4_CH2_ENABLED = False
 ECG_SINE4_CH2_FREQ = 150.0
 ECG_SINE4_CH2_PHASE = 0.0
-ECG_SINE4_CH2_LEVEL = 0.05
+ECG_SINE4_CH2_LEVEL_MV = 0.075
 
-# Fraction (0.0-1.0) of the wire dtype's range the signal's peak-to-peak
-# amplitude occupies, centered at the midpoint -- see signal_gen.py's
-# _scale_to_wire(). Tied to the wire dtype's own max so it can never
-# produce an out-of-range packet value.
-ECG_AMPLITUDE = 0.75
+# Peak-to-peak amplitude of the CLEAN ECG waveform, mV -- physical now,
+# not a fraction of the wire range. ~1-2 mV is a typical limb-lead R-wave.
+ECG_AMPLITUDE_MV = 1.5
+
+# ---------------------------------------------------------------------------
+# ADC front end: per-channel gain + offset, then one shared ADC
+# ---------------------------------------------------------------------------
+# Per-channel instrumentation-amp gain, then a level-shift into the ADC's
+# window, then ONE shared ADC (marathon's real hardware is a single ADC
+# multiplexed via TDM). See adc_sim.py for the transfer function.
+GAIN_CH1 = 1000.0
+GAIN_CH2 = 1000.0
+
+# DC bias added after gain, volts -- lifts the bipolar signal into
+# [VREF_MINUS, VREF_PLUS]. Per channel; default centres a 0..VREF_PLUS window.
+V_OFFSET_CH1 = 1.65
+V_OFFSET_CH2 = 1.65
+
+# The ADC's input range, volts. VREF_MINUS need not be 0. Must stay
+# matching PLOT_MIN/MAX above.
+VREF_PLUS = 3.3
+VREF_MINUS = 0.0
+
+# ADC resolution, bits -- sweep live to see quantisation noise appear.
+# Real ECG AFEs top out ~24-bit; the wire slot stays 32-bit regardless.
+ADC_BITS = 24
+ADC_BITS_MIN = 8
+ADC_BITS_MAX = 32
 
 # ---------------------------------------------------------------------------
 # Session control: what happens at launch, and where the processing runs

@@ -13,6 +13,7 @@ matplotlib.use("TkAgg")
 import matplotlib.pyplot as plt
 from matplotlib.ticker import AutoMinorLocator, FuncFormatter, NullLocator
 
+import adc_sim
 import config
 import guiutil
 import net
@@ -84,7 +85,8 @@ class DualPlot:
             child.pack(**info)
 
         # Capture buffers are PLOT_CAPTURE_FACTOR x the displayed window, so
-        # the trigger has room to slide the window back to.
+        # the trigger has room to slide the window back to. Raw wire codes;
+        # converted to volts only in sync(), via adc_sim.to_volts().
         self._cap_size = buffer_size * config.PLOT_CAPTURE_FACTOR
         self.ch1_in  = np.zeros(self._cap_size, dtype=CH1_DTYPE)
         self.ch2_in  = np.zeros(self._cap_size, dtype=CH2_DTYPE)
@@ -115,7 +117,7 @@ class DualPlot:
             self._style_grid(ax)
             # Engineering suffixes (2.1G) instead of matplotlib's shared
             # "1e9" offset text, which would sit in the gap we closed.
-            ax.yaxis.set_major_formatter(FuncFormatter(self._format_count_tick))
+            ax.yaxis.set_major_formatter(FuncFormatter(self._format_volts_tick))
             # x-data stays the plain buffer index; ticks reinterpret it as
             # time via ECG_SAMPLING_RATE, deliberately not SEND_RATE*CHUNK_SIZE
             # -- each slot is one ECG sample, and ECG time only matches
@@ -232,12 +234,9 @@ class DualPlot:
             ax.grid(False, which="minor")
 
     @staticmethod
-    def _format_count_tick(y, _pos):
-        """Sample counts as 0 / 1.1G / 2.1G rather than 0..4 over a "1e9"."""
-        for scale, suffix in ((1e9, "G"), (1e6, "M"), (1e3, "k")):
-            if abs(y) >= scale:
-                return f"{y / scale:.3g}{suffix}"
-        return f"{y:.0f}"
+    def _format_volts_tick(y, _pos):
+        """Plain decimal volts -- axis is a small span now, not raw counts."""
+        return f"{y:.3g}V"
 
     def invalidate_view(self):
         """Force the next refresh() to re-apply every view setting, even
@@ -302,15 +301,13 @@ class DualPlot:
         most recent upward crossing of the trigger level with a full window
         left after it (last, not first, since a repeating waveform's phase
         is the same at any crossing). Falls back to the newest window when
-        triggering is off, the range is degenerate, or it never crosses."""
+        triggering is off or it never crosses."""
         newest = self._cap_size - self.buffer_size
         if not config.PLOT_TRIGGER:
             return newest
 
-        lo, hi = config.PLOT_MIN, config.PLOT_MAX
-        if hi <= lo:
-            return newest
-        level = lo + config.PLOT_TRIGGER_LEVEL * (hi - lo)
+        # ref is still raw wire codes -- convert the volts threshold instead.
+        level = adc_sim.from_volts(config.PLOT_TRIGGER_LEVEL)
 
         # float64 avoids the buffers' big-endian wire dtype byte-order/
         # overflow surprises; not a hot path.
@@ -332,10 +329,11 @@ class DualPlot:
         # link RTT); ch1/ch2 share a time base, so reuse ch1's offset.
         off_in  = self._trigger_offset(self.ch1_in)
         off_out = self._trigger_offset(self.ch1_out)
-        self.line_ch1_in.set_ydata(self.ch1_in[off_in:off_in + n])
-        self.line_ch2_in.set_ydata(self.ch2_in[off_in:off_in + n])
-        self.line_ch1_out.set_ydata(self.ch1_out[off_out:off_out + n])
-        self.line_ch2_out.set_ydata(self.ch2_out[off_out:off_out + n])
+        # Convert to volts only here, right before the line data is set.
+        self.line_ch1_in.set_ydata(adc_sim.to_volts(self.ch1_in[off_in:off_in + n]))
+        self.line_ch2_in.set_ydata(adc_sim.to_volts(self.ch2_in[off_in:off_in + n]))
+        self.line_ch1_out.set_ydata(adc_sim.to_volts(self.ch1_out[off_out:off_out + n]))
+        self.line_ch2_out.set_ydata(adc_sim.to_volts(self.ch2_out[off_out:off_out + n]))
         self._dirty = False
 
     def dump_buffers(self, out_dir=None):
@@ -370,12 +368,12 @@ class DualPlot:
             # '#' lines: skippable by genfromtxt/read_csv, harmless to a
             # bare csv reader.
             f.write(f"# samples={n} trigger={config.PLOT_TRIGGER} "
-                    f"level={config.PLOT_TRIGGER_LEVEL}\n")
+                    f"level_v={config.PLOT_TRIGGER_LEVEL}\n")
             f.write(f"# send_rate={config.SEND_RATE} chunk={config.CHUNK_SIZE} "
                     f"effective_sps={config.SEND_RATE * config.CHUNK_SIZE}\n")
             f.write(f"# ecg_rate={config.ECG_SAMPLING_RATE} "
-                    f"amplitude={config.ECG_AMPLITUDE} hr={config.ECG_HEART_RATE}\n")
-            f.write(f"# plot_min={config.PLOT_MIN} plot_max={config.PLOT_MAX} "
+                    f"amplitude_mv={config.ECG_AMPLITUDE_MV} hr={config.ECG_HEART_RATE}\n")
+            f.write(f"# plot_min_v={config.PLOT_MIN} plot_max_v={config.PLOT_MAX} "
                     f"dtype={self.ch1_in.dtype}\n")
             w = csv.writer(f)
             w.writerow(["index", "time_s", *cols.keys()])

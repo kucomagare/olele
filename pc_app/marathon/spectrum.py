@@ -8,7 +8,7 @@
 # the attenuation, step the frequency, plot the response curve.
 #
 # UNITS: magnitudes are dBFS -- relative to a full-scale sine of the wire
-# dtype, so readings are comparable regardless of ECG_AMPLITUDE.
+# dtype, so readings are comparable regardless of ECG_AMPLITUDE_MV.
 
 import inspect
 
