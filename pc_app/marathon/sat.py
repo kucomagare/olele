@@ -161,20 +161,19 @@ def load_dump(csv_path):
 # ---------------------------------------------------------------------------
 
 def wire_full_scale(traces, info=None):
-    """Full-scale value of the wire format the dump was captured in.
-    Prefers the sidecar's `wire_dtype`; inferring from sample values is only
-    right if the capture happens to hit the top of its range (a quiet
-    32-bit capture under 65535 would misread as 16-bit), so that's the
-    fallback only."""
+    """Full-scale value of the ADC's own code range (2**ADC_BITS - 1), NOT
+    the wire dtype's -- right-aligned means the signal only ever occupies
+    the low ADC_BITS. Recorded ADC_BITS from the capture's own sidecar
+    when present (same reasoning as model_params()); live config.ADC_BITS
+    otherwise."""
     if info:
-        dtype = (info.get("meta", {}) or {}).get("wire_dtype")
-        if dtype:
+        bits = (info.get("meta") or {}).get("ADC_BITS")
+        if bits is not None:
             try:
-                return float(np.iinfo(np.dtype(dtype)).max)
+                return float((1 << int(float(bits))) - 1)
             except (TypeError, ValueError):
                 pass                       # unrecognised: fall through
-    peak = max(float(np.max(v)) for v in traces.values())
-    return 2.0 ** 32 - 1 if peak > 65535 else 65535.0
+    return float((1 << config.ADC_BITS) - 1)
 
 
 def analyse_channel(traces, ch, rate, full_scale, size, peak_fmin,
@@ -316,6 +315,12 @@ def model_params(shift, fs, meta=None, overrides=None):
     the recording against a filter that never ran.
     """
     params = {"shift": shift, "fs": float(fs)}
+    adc_bits = (meta or {}).get("ADC_BITS")
+    if adc_bits is not None:
+        try:
+            params["adc_bits"] = int(float(adc_bits))
+        except (TypeError, ValueError):
+            pass
     for sidecar_key, param_key, _label in TUNABLES:
         value = (meta or {}).get(sidecar_key)
         if value is None:
@@ -559,7 +564,7 @@ def measure_response(algorithm, params, fs, size=config.SAT_RESPONSE_SIZE,
         return None
 
     averages = max(1, int(averages))
-    amplitude = max(1.0, float(drive) * pipelines.WIRE_CENTRE)
+    amplitude = max(1.0, float(drive) * pipelines.WIRE_CENTRE())
     rng = np.random.default_rng(seed)
     # Everything between the tones. Nothing was put there, so anything
     # found there is the pipeline's own noise and distortion.

@@ -1080,8 +1080,10 @@ class SignalControlPanel:
                           self._apply_adc_bits,
                           help_text=f"ADC resolution. Real ECG AFEs top out around "
                                      f"24-bit (TI ADS1298); the wire slot stays "
-                                     f"{_WIRE_BITS}-bit regardless -- the extra low "
-                                     f"bits are always zero. Sweep this down live "
+                                     f"{_WIRE_BITS}-bit regardless, right-aligned -- "
+                                     f"the upper bits are zero, so a lower value here "
+                                     f"also gives a numerically smaller sample, not "
+                                     f"just a less precise one. Sweep this down live "
                                      f"to see quantisation noise appear on the plot.")
 
     def _apply_gain_ch1(self):

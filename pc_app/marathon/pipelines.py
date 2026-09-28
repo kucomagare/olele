@@ -14,8 +14,10 @@
 
 import numpy as np
 
+import config
 
-_MASK = 0xFFFFFFFF
+
+_MASK = 0xFFFFFFFF  # iir's fixed 32-bit register width, not ADC_BITS
 _SIGN = 0x80000000
 
 
@@ -104,36 +106,46 @@ def bypass(x, state, params):
 # scipy = 2nd-order Butterworth @0.5Hz; manual = 1st-order shift filter at a
 # comparable corner -- the differing rolloffs are the point of keeping both.
 
-# The wire's own zero: signal_gen centres every chunk on dtype_max/2 in the
-# UNSIGNED domain and clips there, so this is where "no signal" sits.
-_CENTRE = 1 << 31
+def WIRE_CENTRE(adc_bits=None):
+    """The wire's own zero: adc_sim right-aligns the ADC code, so it's
+    mid-code of ADC_BITS, NOT a fixed 32-bit midpoint like iir's
+    _MASK/_SIGN (those model the hardware register, not the ADC).
+    `adc_bits` overrides live config -- a capture must be replayed under
+    its OWN recorded ADC_BITS, not whatever this session's is now."""
+    bits = config.ADC_BITS if adc_bits is None else int(adc_bits)
+    return 1 << (bits - 1)
 
 
-def _from_wire(x):
+def _wire_mask(adc_bits=None):
+    bits = config.ADC_BITS if adc_bits is None else int(adc_bits)
+    return (1 << bits) - 1
+
+
+def _from_wire(x, adc_bits=None):
     """Wire words as a zero-centred signal (NOT _to_signed(), which maps
     the unsigned midpoint to the signed wrap boundary -- fine for `iir`
     since the hardware does the same, but wrong for a filter computing a
     real frequency response: it would see a discontinuity every time the
     signal crosses centre).
     """
-    return x.astype(np.int64) - _CENTRE
+    return x.astype(np.int64) - WIRE_CENTRE(adc_bits)
 
 
-def _to_wire_centred(values, dtype):
+def _to_wire_centred(values, dtype, adc_bits=None):
     """Zero-centred results back to wire words. CLIPS rather than wraps
     (matching signal_gen's own output) -- wrapping would turn an overshoot
     into a full-scale spike at the opposite rail, reading as a broken
     filter. `iir` still wraps, since there the wrap IS what's modelled.
     """
-    return np.clip(np.asarray(values, dtype=np.int64) + _CENTRE,
-                   0, _MASK).astype(dtype)
+    return np.clip(np.asarray(values, dtype=np.int64) + WIRE_CENTRE(adc_bits),
+                   0, _wire_mask(adc_bits)).astype(dtype)
 
 
-# The wire convention, spelled publicly for tools that synthesise their own
-# input and have to drive a pipeline exactly the way the stream does --
-# sat.py's response measurement builds an excitation and reads the result
-# back. Same functions, not a second implementation to drift.
-WIRE_CENTRE = _CENTRE
+# WIRE_CENTRE/to_wire/from_wire: the wire convention, spelled publicly for
+# tools that synthesise their own input and have to drive a pipeline
+# exactly the way the stream does -- sat.py's response measurement builds
+# an excitation and reads the result back. Same functions, not a second
+# implementation to drift.
 
 
 def to_wire(values, dtype):
@@ -152,7 +164,8 @@ def pipe1_scipy(x, state, params):
 
     fs = float(params.get("fs", 2048.0))
     fc = float(params.get("hp_hz", 0.5))
-    xs = _from_wire(x).astype(np.float64)
+    adc_bits = params.get("adc_bits")
+    xs = _from_wire(x, adc_bits).astype(np.float64)
     if "sos" not in state:
         # Designed once per run, not per chunk -- fs/fc rarely change and
         # sosfilt_zi isn't cheap enough to redo 50x a second.
@@ -165,7 +178,7 @@ def pipe1_scipy(x, state, params):
         state["zi"] = signal.sosfilt_zi(state["sos"]) * (lead_in.mean() if lead_in.size else 0.0)
 
     y, state["zi"] = signal.sosfilt(state["sos"], xs, zi=state["zi"])
-    return _to_wire_centred(np.rint(y), x.dtype)
+    return _to_wire_centred(np.rint(y), x.dtype, adc_bits)
 
 
 def pipe1_manual(x, state, params):
@@ -175,8 +188,9 @@ def pipe1_manual(x, state, params):
     implements: subtracting a single-pole lowpass IS a high-pass, cheap in RTL.
     """
     shift = int(params.get("hp_shift", 9)) & 0x1F
+    adc_bits = params.get("adc_bits")
     kernel = _get_kernel()
-    xs = _from_wire(x)
+    xs = _from_wire(x, adc_bits)
 
     if "y" not in state:
         # Seed with the first sample, not 0 -- `iir` starts at 0 to
@@ -185,7 +199,7 @@ def pipe1_manual(x, state, params):
         state["y"] = int(xs[0]) if xs.size else 0
 
     lp, state["y"] = kernel(xs, state["y"], shift)
-    return _to_wire_centred(xs - lp, x.dtype)
+    return _to_wire_centred(xs - lp, x.dtype, adc_bits)
 
 
 # --- pipe2: the ECG diagnostic band -------------------------------------
@@ -226,7 +240,8 @@ def pipe2_scipy(x, state, params):
     from scipy import signal
 
     hp_hz, notch_hz, notch_q, lp_hz, fs = _pipe2_freqs(params)
-    xs = _from_wire(x).astype(np.float64)
+    adc_bits = params.get("adc_bits")
+    xs = _from_wire(x, adc_bits).astype(np.float64)
     if "sos" not in state:
         nyq = fs / 2.0
         sections = []
@@ -250,7 +265,7 @@ def pipe2_scipy(x, state, params):
         state["zi"] = signal.sosfilt_zi(state["sos"]) * (lead_in.mean() if lead_in.size else 0.0)
 
     y, state["zi"] = signal.sosfilt(state["sos"], xs, zi=state["zi"])
-    return _to_wire_centred(np.rint(y), x.dtype)
+    return _to_wire_centred(np.rint(y), x.dtype, adc_bits)
 
 
 def _biquad_scalar(x, g, b1, a1, a2, shift, x1, x2, y1, y2):
@@ -340,7 +355,8 @@ def pipe2_manual(x, state, params):
     """
     hp_hz, notch_hz, notch_q, lp_hz, fs = _pipe2_freqs(params)
     nyq = fs / 2.0
-    xs = _from_wire(x)
+    adc_bits = params.get("adc_bits")
+    xs = _from_wire(x, adc_bits)
 
     if "init" not in state:
         state["init"] = True
@@ -367,7 +383,7 @@ def pipe2_manual(x, state, params):
                                     x1, x2, y1, y2)
         state[key] = (x1, x2, y1, y2)
 
-    return _to_wire_centred(xs, x.dtype)
+    return _to_wire_centred(xs, x.dtype, adc_bits)
 
 
 # An entry is EITHER a bare function (bypass/iir -- nothing to choose

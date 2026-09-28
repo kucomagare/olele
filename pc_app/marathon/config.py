@@ -273,7 +273,8 @@ VREF_PLUS = 3.3
 VREF_MINUS = 0.0
 
 # ADC resolution, bits -- sweep live to see quantisation noise appear.
-# Real ECG AFEs top out ~24-bit; the wire slot stays 32-bit regardless.
+# Right-aligned in the 32-bit wire slot (see adc_sim.py): a lower value
+# here shrinks the sample's numeric magnitude too, not just its precision.
 ADC_BITS = 24
 ADC_BITS_MIN = 8
 ADC_BITS_MAX = 32
