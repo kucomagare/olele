@@ -72,6 +72,15 @@ PLOT_GRID_MODES = ("normal", "fine")
 PLOT_GRID_FINE_DIVISIONS = 5
 PLOT_HSPACE = 0.07
 
+# Which traces each channel's axes draw: "in", "out" or "both". Live-editable
+# from the plot bar; SAT keeps its own per-window copy of the choice.
+PLOT_SHOW_CHOICES = ("both", "in", "out")
+PLOT_SHOW_CH1 = "both"
+PLOT_SHOW_CH2 = "both"
+
+# Trace thickness in points (matplotlib's own default is 1.5). Live-editable.
+PLOT_LINE_WIDTH = 0.8
+
 # The live app deliberately has NO spectrum view -- a rolling-buffer FFT
 # costs every frame forever for a measurement that doesn't need to be live.
 # Moved to sat.py, which reads a Log dump and can take as long as it likes.
@@ -106,7 +115,8 @@ UI_POLL_RATE = 100.0
 # frozen at import). Real CPU cost even with blitting -- measured
 # 2026-08-17 pre-blitting: dropping to 2 took CPU 103%->36% with zero
 # throughput change (that was firmware-bound) -- a UI-smoothness knob only.
-FRAME_RATE = 60
+# Keep equal to SEND_RATE: else some frames get 2 chunks and the scroll jerks.
+FRAME_RATE = 32
 
 # SEND_RATE x CHUNK_SIZE is the effective ECG playback rate pulled from the
 # simulated buffer (see ECG_SAMPLING_RATE) -- both live-editable, these are
@@ -429,7 +439,8 @@ SAT_SETTLE = 200            # samples skipped before scoring, for the
 # pipeline's manual/scipy pair, which is the comparison the view exists for.
 SAT_CURVES = ()
 
-SAT_RESPONSE_SIZE = 16384       # excitation period, samples
+SAT_RESPONSE_SIZE = 0           # excitation period, samples; 0 = the loaded
+                                # capture's own length
 SAT_RESPONSE_POINTS = 96        # tones in the excitation, log-spaced
 SAT_RESPONSE_DRIVE = 0.25       # peak excitation as a fraction of full scale
 SAT_RESPONSE_AVERAGES = 4       # realisations averaged, fresh phases each
@@ -442,6 +453,17 @@ SAT_SHOW_DESIGN = False         # thin black curve straight from the sos
 SAT_OVERLAY = "none"            # capture on the response axes:
                                 # none / gain / spectrum / both
 SAT_OVERLAY_CH = "both"         # ch1 / ch2 / both
+# Bands the capture's own gain overlay is grouped into. Depends on the
+# recording only -- not on the test signal's Tones, band or Rate -- so the
+# overlay is one fixed view of the real data to compare the curves against.
+# "max" = one band per FFT bin (samples/2 - 1), the most the recording holds.
+SAT_OVERLAY_POINTS = "max"
+# Overlay phase is unwrapped only across bands at least this many dB (input
+# power, vs the strongest band) above nothing -- a band the input barely
+# excites has a random phase, and unwrapping through thousands of those
+# drifts the whole curve by many turns. Weaker bands are still drawn, each on
+# the branch nearest the trend, so they scatter within +-180 deg of it.
+SAT_OVERLAY_UNWRAP_DB = -60.0
 
 # --- what the dropdowns offer ---------------------------------------------
 SAT_VIEW_CHOICES = ("capture", "response")
