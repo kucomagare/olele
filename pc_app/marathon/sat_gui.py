@@ -296,6 +296,11 @@ class SATWindow:
             self.fig.clear()
             self.axes = self.fig.subplots(*shape, squeeze=False)
             self._shape = shape
+            if shape == (2, 1):
+                # Amplitude over phase read against one frequency axis: an
+                # x zoom on either moves both, y stays independent (dB and
+                # degrees are different units).
+                self.axes[1][0].sharex(self.axes[0][0])
         for row in self.axes:
             for ax in row:
                 ax.clear()
