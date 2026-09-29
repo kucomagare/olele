@@ -420,10 +420,9 @@ SAT_PEAK_FMIN = 1.0         # ignore bins below this when locating the peak
 SAT_PHASE = "off"        # phase column: off / out-in / raw
 SAT_PHASE_UNITS = "deg"     # deg / phase ms / group ms; both views
 # Bins more than this many dB below the strongest bin (in EITHER trace) are
-# left out of the phase column -- "the phase of noise is noise". A GUI
-# field, separate from SAT_CAPTURE_GATE_DB below (that one gates the
-# response view's gain overlay, an unrelated feature with its own reasons
-# to want a different threshold).
+# left out of the capture view's phase column -- "the phase of noise is
+# noise". A GUI field (Phase gate). The response view's gain overlay has its
+# own filters instead (SAT_OVERLAY_* and the two hide fields).
 SAT_PHASE_GATE_DB = -60.0
 
 # The reference-model comparison. None leaves a channel unscored, and a
@@ -516,12 +515,6 @@ SAT_RESPONSE_SETTLE_PERIODS = 2
 # and is never windowed, so nothing correlates its neighbours and the maths
 # is exact there (verified against an analytic exp(-2i*pi*f*tau)).
 SAT_PHASE_GROUP_LAG = 4
-
-# How far below the strongest part of a trace a band may sit before it is
-# dropped from the phase and capture-gain measurements. Past this the answer
-# is noise over noise -- a confident line through the part of the capture
-# that says the least, which is worse than a gap.
-SAT_CAPTURE_GATE_DB = -60.0
 
 # --- appearance -----------------------------------------------------------
 SAT_FIGSIZE = (13, 7)

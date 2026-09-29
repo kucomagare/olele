@@ -176,6 +176,28 @@ def wire_full_scale(traces, info=None):
     return float((1 << config.ADC_BITS) - 1)
 
 
+def in_out_lag(traces, ch):
+    """(lag in samples, normalised correlation) of out against in, by
+    circular cross-correlation; None without both traces. A filter delays
+    by a few samples; a lag of a whole chunk or more means the capture's
+    in/out were not recorded aligned, and every in-vs-out result is off."""
+    src, dst = f"{ch}_in", f"{ch}_out"
+    if src not in traces or dst not in traces:
+        return None
+    x = np.asarray(traces[src], dtype=np.float64)
+    y = np.asarray(traces[dst], dtype=np.float64)
+    n = min(x.size, y.size)
+    if n < 64:
+        return None
+    x, y = x[:n] - x[:n].mean(), y[:n] - y[:n].mean()
+    norm = float(np.sqrt(np.sum(x * x) * np.sum(y * y)))
+    if norm <= 0:
+        return None
+    xc = np.fft.irfft(np.fft.rfft(y) * np.conj(np.fft.rfft(x)), n=n)
+    k = int(np.argmax(xc))
+    return (k if k <= n // 2 else k - n), float(xc[k] / norm)
+
+
 def analyse_channel(traces, ch, rate, full_scale, size, peak_fmin,
                     hop=0, average=False, window="hann"):
     """Spectra of one channel's in/out, plus the peak comparison between
@@ -214,6 +236,9 @@ def analyse_channel(traces, ch, rate, full_scale, size, peak_fmin,
 
     result["n"] = n_ref
     result["resolution"] = rate / n_ref
+    lag = in_out_lag(traces, ch)
+    if lag is not None:
+        result["lag"], result["lag_corr"] = lag
     result["n_windows"] = n_windows
     result["averaged"] = bool(average and n_windows > 1)
 
@@ -855,7 +880,7 @@ def phase_display(freqs, deg, h, units, lag=1):
 
 
 def phase_spectrum(traces, ch, rate, mode=config.SAT_PHASE, size=0,
-                   gate_db=config.SAT_CAPTURE_GATE_DB):
+                   gate_db=config.SAT_PHASE_GATE_DB):
     """Phase against frequency for one channel of a capture, in degrees.
 
     The rfft that produces the magnitude spectrum produces this at no extra
@@ -1016,6 +1041,15 @@ def format_report(info, results, models, responses=(), gains=(), phases=()):
             line += f"   out {r['out_dbfs']:7.2f}"
         if "delta_db" in r:
             line += f"   delta {r['delta_db']:7.2f} dB"
+        if "lag" in r:
+            say(line)
+            line = (f"    {'':8} in->out lag {r['lag']:+d} samples "
+                    f"({r['lag'] / info['rate'] * 1e3:+.2f} ms), "
+                    f"corr {r['lag_corr']:.3f}")
+            chunk = info.get("chunk") or 16
+            if abs(r["lag"]) >= chunk:
+                line += (f"   [!] a chunk or more -- in/out likely recorded "
+                         f"misaligned (dump older than the pairing fix?)")
         say(line)
 
     if any(models):
