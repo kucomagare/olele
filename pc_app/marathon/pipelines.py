@@ -242,7 +242,10 @@ def pipe2_scipy(x, state, params):
     hp_hz, notch_hz, notch_q, lp_hz, fs = _pipe2_freqs(params)
     adc_bits = params.get("adc_bits")
     xs = _from_wire(x, adc_bits).astype(np.float64)
-    if "sos" not in state:
+    key = (hp_hz, notch_hz, notch_q, lp_hz, fs)
+    if state.get("key") != key:
+        # First chunk, or a corner changed: redesign. zi survives a retune
+        # when the section count is unchanged, so the trace doesn't glitch.
         nyq = fs / 2.0
         sections = []
         if 0 < hp_hz < nyq:
@@ -256,13 +259,18 @@ def pipe2_scipy(x, state, params):
                                           output="sos"))
         # All corners out of range (fs too low): an all-pass section, so
         # the chain stays a filter instead of a special case.
-        state["sos"] = (np.vstack(sections) if sections
-                        else np.array([[1., 0., 0., 1., 0., 0.]]))
-        # Seed at the lead-in's mean, not rest -- design model, not iir.
-        # A single sample risks landing on a QRS spike; averaging a short
-        # window is a steadier baseline estimate.
-        lead_in = xs[:min(32, xs.size)]
-        state["zi"] = signal.sosfilt_zi(state["sos"]) * (lead_in.mean() if lead_in.size else 0.0)
+        new_sos = (np.vstack(sections) if sections
+                   else np.array([[1., 0., 0., 1., 0., 0.]]))
+        reseed = "zi" not in state or state["sos"].shape != new_sos.shape
+        state["sos"] = new_sos
+        state["key"] = key
+        if reseed:
+            # Seed at the lead-in's mean, not rest -- design model, not iir.
+            # A single sample risks landing on a QRS spike; averaging a short
+            # window is a steadier baseline estimate.
+            lead_in = xs[:min(32, xs.size)]
+            state["zi"] = signal.sosfilt_zi(new_sos) * (
+                lead_in.mean() if lead_in.size else 0.0)
 
     y, state["zi"] = signal.sosfilt(state["sos"], xs, zi=state["zi"])
     return _to_wire_centred(np.rint(y), x.dtype, adc_bits)
@@ -358,12 +366,16 @@ def pipe2_manual(x, state, params):
     adc_bits = params.get("adc_bits")
     xs = _from_wire(x, adc_bits)
 
-    if "init" not in state:
-        state["init"] = True
+    key = (hp_hz, notch_hz, notch_q, lp_hz, fs)
+    if state.get("key") != key:
+        # Redesign on any corner change; biquad history is kept.
+        state["key"] = key
         state["hp_shift"] = _shift_for(hp_hz, fs) if 0 < hp_hz < nyq else None
         state["notch"] = (_notch_coeffs(notch_hz, notch_q, fs)
                           if 0 < notch_hz < nyq else None)
         state["lp"] = _lowpass_coeffs(lp_hz, fs) if 0 < lp_hz < nyq else None
+
+    if "hp_y" not in state:
         # HP seeded with the first sample, not 0 -- same reason as pipe1.
         state["hp_y"] = int(xs[0]) if xs.size else 0
         state["ns"] = (0, 0, 0, 0)      # notch    x1, x2, y1, y2
