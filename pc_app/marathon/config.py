@@ -472,6 +472,18 @@ SAT_PHASE_CHOICES = ("off", "out-in", "raw")
 SAT_PHASE_UNIT_CHOICES = ("deg", "phase ms", "group ms")
 SAT_OVERLAY_CHOICES = ("none", "gain", "spectrum", "both")
 SAT_OVERLAY_CH_CHOICES = ("ch1", "ch2", "both")
+# Response view axes, chosen independently: frequency log/linear, amplitude
+# dB / attenuation. Both amplitude scales are logarithmic; "attenuation" is the
+# dB axis labelled in times cut, 0 = none, -20 dB reads -10, -40 dB reads -100.
+# Phase is unaffected.
+SAT_FREQ_SCALE = "log"
+SAT_AMP_SCALE = "dB"
+# The capture view's spectra take the same choices, set separately (a spectrum
+# is a LEVEL: attenuation reads as times below full scale).
+SAT_CAPTURE_FREQ_SCALE = "linear"
+SAT_CAPTURE_AMP_SCALE = "dB"
+SAT_FREQ_SCALE_CHOICES = ("log", "linear")
+SAT_AMP_SCALE_CHOICES = ("dB", "attenuation")
 
 # The lowest frequency a measurement can reach is one bin, rate/size, so the
 # only way down the frequency axis is a longer period. At 2 kHz the top of

@@ -13,7 +13,7 @@ import matplotlib
 matplotlib.use("TkAgg")
 import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
-from matplotlib.ticker import MultipleLocator, ScalarFormatter
+from matplotlib.ticker import FuncFormatter, MultipleLocator, ScalarFormatter
 import numpy as np
 
 import adc_sim
@@ -78,6 +78,18 @@ def _pad_delay_axis(ax, units):
         mid = 0.5 * (lo + hi)
         ax.set_ylim(mid - config.SAT_MIN_DELAY_SPAN_MS / 2.0,
                     mid + config.SAT_MIN_DELAY_SPAN_MS / 2.0)
+
+
+def _attenuation_ticks(ax):
+    """The same log (dB) y axis, ticked every 20 dB and labelled in times cut:
+    0 = none, -20 dB reads -10, -40 dB reads -100, -60 dB reads -1,000."""
+    def label(v, _pos):
+        if abs(v) < 1e-9:
+            return "0"
+        times = 10.0 ** (abs(v) / 20.0)
+        return f"{'-' if v < 0 else '+'}{times:,.0f}"
+    ax.yaxis.set_major_locator(MultipleLocator(20))
+    ax.yaxis.set_major_formatter(FuncFormatter(label))
 
 
 def _curve_style(response):
@@ -250,6 +262,10 @@ class SATWindow:
         self._overlay = tk.StringVar(
             value=overlay if overlay in config.SAT_OVERLAY_CHOICES else "none")
         self._overlay_points = tk.StringVar(value=str(config.SAT_OVERLAY_POINTS))
+        self._cap_freq_scale = tk.StringVar(value=config.SAT_CAPTURE_FREQ_SCALE)
+        self._cap_amp_scale = tk.StringVar(value=config.SAT_CAPTURE_AMP_SCALE)
+        self._freq_scale = tk.StringVar(value=config.SAT_FREQ_SCALE)
+        self._amp_scale = tk.StringVar(value=config.SAT_AMP_SCALE)
         self._min_energy_db = tk.StringVar(value="off")
         self._show_below_db = tk.StringVar(value="off")
         self._overlay_ch = tk.StringVar(
@@ -269,7 +285,9 @@ class SATWindow:
                           self._resp_fmin, self._resp_fmax, self._resp_floor,
                           self._resp_ideal, self._overlay, self._overlay_ch,
                           self._overlay_points, self._min_energy_db,
-                          self._show_below_db, *self._show, *self._pipe, *self._impl,
+                          self._show_below_db, self._freq_scale,
+                          self._amp_scale, self._cap_freq_scale,
+                          self._cap_amp_scale, *self._show, *self._pipe, *self._impl,
                           *self._curves.values(),
                           *self._tunable.values())}
 
@@ -626,6 +644,27 @@ class SATWindow:
             _Tooltip(box, f"Which of channel {n}'s recorded traces to draw, "
                           f"in the time and spectrum plots: in, out or both.")
             row += 1
+        for label, var, choices, tip in (
+                ("Frequency scale", self._cap_freq_scale,
+                 config.SAT_FREQ_SCALE_CHOICES,
+                 "log: equal space per octave -- the low end and a wide band "
+                 "read better. linear: equal space per Hz -- evenly spaced "
+                 "harmonics stay evenly spaced. Applies to the spectra and "
+                 "the phase column. Applied with Apply / Recompute."),
+                ("Amplitude scale", self._cap_amp_scale,
+                 config.SAT_AMP_SCALE_CHOICES,
+                 "A spectrum is a LEVEL against full scale. dB: dBFS. "
+                 "attenuation: the same axis labelled in TIMES below full "
+                 "scale -- 0 = full scale, -20 dBFS reads -10, -40 dBFS reads "
+                 "-100, -60 dBFS reads -1,000. Same data, only the tick "
+                 "labels differ; dB min sets the bottom. Applied with Apply "
+                 "/ Recompute.")):
+            ttk.Label(f, text=label).grid(row=row, column=0, sticky="w", pady=2)
+            box = ttk.Combobox(f, textvariable=var, width=8, state="readonly",
+                               values=list(choices))
+            box.grid(row=row, column=1, sticky="e", pady=2)
+            _Tooltip(box, tip)
+            row += 1
         return f
 
     def _build_model_tab(self):
@@ -827,6 +866,30 @@ class SATWindow:
                           "Bottom of the amplitude axis, in dB of gain (0 dB "
                           "is unity). Shared with the capture view's Plot "
                           "tab, where the same number is dBFS.")
+
+        for label, var, choices, tip in (
+                ("Frequency scale", self._freq_scale,
+                 config.SAT_FREQ_SCALE_CHOICES,
+                 "log: the usual Bode axis, equal space per octave -- reads "
+                 "a wide band and the low end. linear: equal space per Hz -- "
+                 "better for looking at a narrow band or at harmonics that "
+                 "are evenly spaced. Applies to both panels. Applied with "
+                 "Apply / Recompute."),
+                ("Amplitude scale", self._amp_scale,
+                 config.SAT_AMP_SCALE_CHOICES,
+                 "Both scales are logarithmic. dB: gain in decibels. "
+                 "attenuation: the same axis labelled in TIMES the signal is "
+                 "cut -- 0 = not attenuated, -20 dB reads -10, -40 dB reads "
+                 "-100, -60 dB reads -1,000, and so on. Same data and same "
+                 "shape, only the tick labels differ. dB min still sets the "
+                 "bottom. The filters that hide dots take thresholds in dB. "
+                 "Applied with Apply / Recompute.")):
+            ttk.Label(f, text=label).grid(row=row, column=0, sticky="w", pady=2)
+            box = ttk.Combobox(f, textvariable=var, width=8, state="readonly",
+                               values=list(choices))
+            box.grid(row=row, column=1, sticky="e", pady=2)
+            _Tooltip(box, tip)
+            row += 1
 
         ttk.Label(f, text="Phase units").grid(row=row, column=0, sticky="w",
                                               pady=2)
@@ -1074,7 +1137,9 @@ class SATWindow:
                     self._resp_fmin, self._resp_fmax, self._resp_floor,
                     self._resp_ideal, self._overlay, self._overlay_ch,
                     self._overlay_points, self._min_energy_db,
-                    self._show_below_db, *self._pipe, *self._impl, *self._curves.values(),
+                    self._show_below_db, self._freq_scale,
+                    self._amp_scale, self._cap_freq_scale,
+                    self._cap_amp_scale, *self._pipe, *self._impl, *self._curves.values(),
                     *self._tunable.values()):
             var.set(self._initial[id(var)])
         # The corners' "default" is the loaded capture's, not whatever the
@@ -1406,6 +1471,12 @@ class SATWindow:
             for col in range(cols):
                 self.axes[row][col].set_visible(row < len(channels))
 
+        # Spectrum axes: frequency log/linear; level in dB or labelled as
+        # times below full scale. Display only -- the data is never converted,
+        # only the tick labels differ.
+        cap_log = self._cap_freq_scale.get() == "log"
+        cap_att = self._cap_amp_scale.get() == "attenuation"
+
         for row, ch in enumerate(channels):
             ax_t, ax_f = self.axes[row][0], self.axes[row][1]
             shown = self._show[0 if ch == "ch1" else 1].get()
@@ -1425,12 +1496,19 @@ class SATWindow:
             ax_t.legend(fontsize=8)
             ax_t.grid(alpha=0.3)
 
+            pos_lo = float("inf")                    # lowest frequency drawn
             for direction, color in (("in", "tab:blue"), ("out", "tab:red")):
                 curve_list = curves_by_ch.get(ch, {}).get(direction)
                 if not curve_list or shown not in ("both", direction):
                     continue
                 n_curves = len(curve_list)
                 for i, (f, db) in enumerate(curve_list):
+                    f = np.asarray(f, dtype=float)
+                    db = np.asarray(db, dtype=float)
+                    if cap_log:                 # no DC on a log axis
+                        db, f = db[f > 0], f[f > 0]
+                    if f.size:
+                        pos_lo = min(pos_lo, float(f[f > 0].min())) if (f > 0).any() else pos_lo
                     # Older windows fade out, newest is fully opaque -- a
                     # single window (the common case) is drawn solid, same
                     # as before this had a Hop field at all.
@@ -1443,9 +1521,20 @@ class SATWindow:
                              label=label)
             ax_f.set_title(f"{ch} — spectrum")
             ax_f.set_xlabel("Frequency (Hz)")
-            ax_f.set_ylabel("dBFS")
-            ax_f.set_xlim(0, fmax if fmax else rate / 2)
+            f_hi = fmax if fmax else rate / 2
+            if not np.isfinite(pos_lo) or pos_lo >= f_hi:
+                pos_lo = f_hi / 1000.0          # nothing drawn: any log span
+            ax_f.set_xscale("log" if cap_log else "linear")
+            ax_f.set_xlim(pos_lo if cap_log else 0, f_hi)
+            if cap_log and f_hi < pos_lo * 10.0:
+                ax_f.xaxis.set_major_formatter(ScalarFormatter())
+                ax_f.xaxis.set_minor_formatter(ScalarFormatter())
             ax_f.set_ylim(db_min, 6)
+            if cap_att:
+                _attenuation_ticks(ax_f)
+                ax_f.set_ylabel("Times below full scale (0 = full scale)")
+            else:
+                ax_f.set_ylabel("dBFS")
             ax_f.legend(fontsize=8)
             ax_f.grid(alpha=0.3)
 
@@ -1498,8 +1587,14 @@ class SATWindow:
             # crushes every point into the left few percent of the panel.
             # The title carries the mode and the report the extent, so the
             # narrower axis reads as a limit rather than as a mismatch.
-            ax_p.set_xlim(0, min(fmax, p["freqs"][-1]) if fmax
-                          else p["freqs"][-1])
+            p_hi = min(fmax, p["freqs"][-1]) if fmax else p["freqs"][-1]
+            pf = np.asarray(p["freqs"], dtype=float)
+            p_lo = float(pf[pf > 0].min()) if (pf > 0).any() else 0.0
+            ax_p.set_xscale("log" if cap_log else "linear")
+            ax_p.set_xlim(p_lo if cap_log else 0, p_hi)
+            if cap_log and p_hi < p_lo * 10.0:
+                ax_p.xaxis.set_major_formatter(ScalarFormatter())
+                ax_p.xaxis.set_minor_formatter(ScalarFormatter())
             # Degrees have a natural full-scale; a delay does not, so let it
             # autoscale rather than crushing it into a fixed window.
             if units == "deg":
@@ -1544,6 +1639,12 @@ class SATWindow:
             lo, hi = measured_lo, measured_hi
         ideal = self._resp_ideal.get()
         units = self._phase_units.get()
+        log_f = self._freq_scale.get() != "linear"
+        # Both amplitude scales are the dB axis; "attenuation" only relabels
+        # its ticks in times cut. The data is plotted in dB either way.
+        att_amp = self._amp_scale.get() == "attenuation"
+        if not log_f:
+            lo = fmin if fmin > 0 else 0.0     # DC is a real place on a linear axis
         phase_label = {"phase ms": "Phase delay (ms)",
                        "group ms": "Group delay (ms)"}.get(units, "Phase (deg)")
 
@@ -1681,7 +1782,7 @@ class SATWindow:
                 + [float(np.max(g["mag_db"])) for g in gains])
         top = max(6.0, (max(tops) + 6.0) if tops else 6.0)
         for ax in (ax_mag, ax_ph):
-            ax.set_xscale("log")
+            ax.set_xscale("log" if log_f else "linear")
             ax.set_xlim(lo, hi)
             # Log x: minor gridlines are the decade's 2/3/4..., and without
             # them a Bode plot is unreadable between the decades.
@@ -1690,11 +1791,15 @@ class SATWindow:
             # Narrowed to less than a decade -- zoomed onto a notch, say --
             # the log formatter labels the ticks "5 x 10^1", which is a poor
             # way to write 50. Plain numbers below a decade.
-            if hi < lo * 10.0:
+            if log_f and hi < lo * 10.0:
                 ax.xaxis.set_major_formatter(ScalarFormatter())
                 ax.xaxis.set_minor_formatter(ScalarFormatter())
         ax_mag.set_ylim(db_min, top)
-        ax_mag.set_ylabel("Amplitude (dB)")
+        if att_amp:
+            _attenuation_ticks(ax_mag)
+            ax_mag.set_ylabel("Attenuation (times, 0 = none)")
+        else:
+            ax_mag.set_ylabel("Amplitude (dB)")
         title = f"pipeline response — measured at {rate:g} Hz"
         if responses:
             title += f", {responses[0]['drive'] * 100:.0f}% FS drive"
@@ -1712,7 +1817,7 @@ class SATWindow:
             self._twin.set_ylim(peak + 6.0 - (top - db_min), peak + 6.0)
             self._twin.set_ylabel("Capture input level (dBFS)", color="0.35")
             self._twin.tick_params(axis="y", colors="0.35", labelsize=8)
-            self._twin.set_xscale("log")
+            self._twin.set_xscale("log" if log_f else "linear")
             self._twin.set_xlim(lo, hi)
             h2, l2 = self._twin.get_legend_handles_labels()
             handles, labels = handles + h2, labels + l2
