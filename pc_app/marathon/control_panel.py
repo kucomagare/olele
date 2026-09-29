@@ -664,8 +664,13 @@ class SignalControlPanel:
         except ValueError:
             value = getattr(config, attr)
         nyquist = config.ECG_SAMPLING_RATE / 2.0
-        if value > 0:
-            value = min(value, nyquist)
+        if value >= nyquist:
+            # The pipelines skip any stage at or above Nyquist, so a clamp
+            # TO Nyquist would silently turn the stage off. Stay just below.
+            clamped = float(f"{nyquist * 0.99:.4g}")
+            print(f"[local] {attr} {value:g} Hz is at/above Nyquist "
+                  f"({nyquist:g} Hz) -- using {clamped:g} Hz")
+            value = clamped
         var.set(f"{value:g}")
         setattr(config, attr, value)
 

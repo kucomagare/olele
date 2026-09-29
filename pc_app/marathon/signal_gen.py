@@ -37,6 +37,9 @@ _cache = (None, None, None, None, None, None, None)
 # jumps at the swap -- that was already true.
 _regen_lock = threading.Lock()
 _regen_busy = False
+# Serialises the synchronous cold start: warm-up and a quick Start both land
+# there, and each used to run the ~2 s simulation on its own.
+_cold_lock = threading.Lock()
 
 
 def _regen(signature):
@@ -219,7 +222,9 @@ def _raw_buffers():
         # Cold start: nothing to serve, so this one has to be synchronous.
         # python_client.py pays it in the background at launch precisely
         # so it doesn't land on a user action. _regen() publishes into _cache.
-        _regen(current_sig)
+        with _cold_lock:
+            if _cache[1] is None:        # a waiter finds it already built
+                _regen(current_sig)
         _, ch1_raw, ch1_ptp, ch1_extra, ch2_raw, ch2_ptp, ch2_extra = _cache
         return ch1_raw, ch1_ptp, ch1_extra, ch2_raw, ch2_ptp, ch2_extra
 

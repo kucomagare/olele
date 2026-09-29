@@ -166,16 +166,19 @@ def pipe1_scipy(x, state, params):
     fc = float(params.get("hp_hz", 0.5))
     adc_bits = params.get("adc_bits")
     xs = _from_wire(x, adc_bits).astype(np.float64)
-    if "sos" not in state:
-        # Designed once per run, not per chunk -- fs/fc rarely change and
-        # sosfilt_zi isn't cheap enough to redo 50x a second.
+    if state.get("key") != (fs, fc):
+        # Redesigned only when fs/fc change (e.g. a sample-rate edit), not
+        # per chunk. zi is kept across a redesign: same section count.
+        state["key"] = (fs, fc)
         state["sos"] = signal.butter(2, fc / (fs / 2.0),
                                      btype="highpass", output="sos")
-        # Seed at the lead-in's mean, not rest -- design model, not iir.
-        # A single sample risks landing on a QRS spike; averaging a short
-        # window is a steadier baseline estimate.
-        lead_in = xs[:min(32, xs.size)]
-        state["zi"] = signal.sosfilt_zi(state["sos"]) * (lead_in.mean() if lead_in.size else 0.0)
+        if "zi" not in state:
+            # Seed at the lead-in's mean, not rest -- design model, not iir.
+            # A single sample risks landing on a QRS spike; averaging a
+            # short window is a steadier baseline estimate.
+            lead_in = xs[:min(32, xs.size)]
+            state["zi"] = signal.sosfilt_zi(state["sos"]) * (
+                lead_in.mean() if lead_in.size else 0.0)
 
     y, state["zi"] = signal.sosfilt(state["sos"], xs, zi=state["zi"])
     return _to_wire_centred(np.rint(y), x.dtype, adc_bits)
