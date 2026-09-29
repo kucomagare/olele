@@ -473,13 +473,12 @@ SAT_PHASE_UNIT_CHOICES = ("deg", "phase ms", "group ms")
 SAT_OVERLAY_CHOICES = ("none", "gain", "spectrum", "both")
 SAT_OVERLAY_CH_CHOICES = ("ch1", "ch2", "both")
 # Response view axes, chosen independently: frequency log/linear, amplitude
-# dB / attenuation. Both amplitude scales are logarithmic; "attenuation" is the
-# dB axis labelled in times cut, 0 = none, -20 dB reads -10, -40 dB reads -100.
-# Phase is unaffected.
+# dB (a logarithmic axis) / attenuation (a LINEAR axis in times cut: 0 = none,
+# -20 dB plots at -10, -40 dB at -100). Phase is unaffected.
 SAT_FREQ_SCALE = "log"
 SAT_AMP_SCALE = "dB"
 # The capture view's spectra take the same choices, set separately (a spectrum
-# is a LEVEL: attenuation reads as times below full scale).
+# is a LEVEL: attenuation is then times below full scale, 0 = full scale).
 SAT_CAPTURE_FREQ_SCALE = "linear"
 SAT_CAPTURE_AMP_SCALE = "dB"
 SAT_FREQ_SCALE_CHOICES = ("log", "linear")
