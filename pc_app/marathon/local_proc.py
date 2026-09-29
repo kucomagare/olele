@@ -111,12 +111,6 @@ def local_thread(plot_in_q, plot_out_q, stop_event):
         if config.SEND_ENABLED and schedule.due(now):
             with prof.span("gen"):
                 ch1, ch2 = generate_ecg_chunk(counter)
-            try:
-                plot_in_q.put_nowait((ch1, ch2))
-            except queue.Full:
-                # Counted not swallowed -- same as net.py, these samples
-                # genuinely go missing.
-                plot_dropped += 1
 
             if config.RECEIVE_ENABLED:
                 # process_channel owns dispatch/state-reset/error-handling
@@ -125,8 +119,15 @@ def local_thread(plot_in_q, plot_out_q, stop_event):
                     out1 = process_channel(ch1, 0, states[0])
                 with prof.span("proc2"):
                     out2 = process_channel(ch2, 1, states[1])
+                # Input rides with its output (see net.py): always aligned.
                 try:
-                    plot_out_q.put_nowait((out1, out2))
+                    plot_out_q.put_nowait((out1, out2, ch1, ch2))
+                except queue.Full:
+                    # Counted not swallowed -- these samples go missing.
+                    plot_dropped += 1
+            else:
+                try:
+                    plot_in_q.put_nowait((ch1, ch2))
                 except queue.Full:
                     plot_dropped += 1
 

@@ -74,8 +74,10 @@ def main():
 
             try:
                 while True:
-                    ch1, ch2 = plot_out_q.get_nowait()
-                    plotter.update_output(ch1, ch2)
+                    item = plot_out_q.get_nowait()
+                    if len(item) == 4:          # (out1, out2, in1, in2)
+                        plotter.update_input(item[2], item[3])
+                    plotter.update_output(item[0], item[1])
             except queue.Empty:
                 pass
 

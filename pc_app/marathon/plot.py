@@ -350,10 +350,10 @@ class DualPlot:
         if not self._dirty:
             return
         n = self.buffer_size
-        # One offset per direction (in/out have separate triggers, delayed by
-        # link RTT); ch1/ch2 share a time base, so reuse ch1's offset.
-        off_in  = self._trigger_offset(self.ch1_in)
-        off_out = self._trigger_offset(self.ch1_out)
+        # One offset for all four: in and out are sample-aligned in the
+        # buffers (net.py/local_proc.py pair them), so triggering on the
+        # input keeps each output under the input that produced it.
+        off_in = off_out = self._trigger_offset(self.ch1_in)
         # Convert to volts only here, right before the line data is set.
         for line, ch, direction in self._traces:
             if not line.get_visible():
@@ -371,8 +371,8 @@ class DualPlot:
         to a CSV, return the path. Runs on the Tk callback thread, same as
         update_*(), so no locking needed."""
         n = self.buffer_size
-        off_in  = self._trigger_offset(self.ch1_in)
-        off_out = self._trigger_offset(self.ch1_out)
+        # Same offset for in and out -- SAT pairs them sample by sample.
+        off_in = off_out = self._trigger_offset(self.ch1_in)
 
         # Widen to uint64 or csv emits numpy scalar reprs, not plain ints.
         cols = {
@@ -424,8 +424,11 @@ class DualPlot:
             ("displayed_samples",       n),
             ("capture_samples",         self._cap_size),
             ("wire_dtype",              str(self.ch1_in.dtype)),
-            ("trigger_offset_in",       off_in),
-            ("trigger_offset_out",      off_out),
+            ("trigger_offset",          off_in),
+            ("in_out_alignment",        "paired sample by sample"),
+            ("link_rtt_ms",             "local" if config.all_local()
+                                        else "n/a (no echo yet)" if net.rtt_s is None
+                                        else f"{net.rtt_s * 1e3:.2f}"),
         ]
         settings = {}
         for name in sorted(dir(config)):

@@ -42,6 +42,11 @@ config_out_q = queue.Queue(maxsize=16)
 last_config = None
 last_metrics = None
 
+# Round trip (send -> echo) of the last paired chunk, seconds, smoothed; None
+# before any echo. Recorded in dump sidecars, since the in/out pairing
+# removes the latency from the data itself.
+rtt_s = None
+
 # Coarse link state for the panel's status line: idle (not started, or
 # local mode), connecting (retrying), connected.
 link_state = "idle"
@@ -151,7 +156,7 @@ def _run_session(sock, plot_in_q, plot_out_q, stop_event):
     """One connection's worth of send/receive. Returns (instead of
     setting stop_event) on any connection loss, so the outer tcp_thread
     loop reconnects instead of the whole app exiting."""
-    global last_config, last_metrics, rx_stale_s
+    global last_config, last_metrics, rx_stale_s, rtt_s
 
     receiver = PacketReceiver()
 
@@ -160,14 +165,17 @@ def _run_session(sock, plot_in_q, plot_out_q, stop_event):
     # takes effect on the very next packet rather than at the next reconnect.
     schedule = RateScheduler(lambda: config.SEND_RATE)
 
-    # Per-channel filter memory for "local" channels, plus a FIFO of what
-    # was sent: a locally-filtered channel needs the SENT chunk, but its
-    # result has to leave here in the same tuple as the channels that came
-    # BACK, and the board's reply lands packets later. The board echoes in
-    # order and TCP preserves it, so plain FIFO is the whole matching rule.
-    # maxlen bounds it if replies stop coming (board wedged, cable pulled).
+    # Per-channel filter memory for "local" channels, plus a FIFO of every
+    # chunk sent, (ch1, ch2, t_sent). The input is plotted when its echo
+    # returns, not when sent, so the in and out buffers stay sample-aligned
+    # (SAT pairs them index by index). The board echoes in order and TCP
+    # preserves it, so plain FIFO is the whole matching rule. Parked ALWAYS,
+    # not only while a channel is local -- else a mode switch pairs replies
+    # with the wrong inputs. Entries unanswered for RX_WATCHDOG_S are
+    # plotted unpaired so the input trace keeps moving if the board goes quiet.
     local_states = [pipelines.new_state(), pipelines.new_state()]
-    sent_inputs = collections.deque(maxlen=256)
+    sent_inputs = collections.deque()
+    unpaired = 0
 
     packets_sent = 0
     send_stalls = 0
@@ -261,13 +269,14 @@ def _run_session(sock, plot_in_q, plot_out_q, stop_event):
                 else:
                     pending_is_data = True
                     send_stalls += 1
-                if config.any_local():
-                    # Only parked when something will actually consume it.
-                    sent_inputs.append((ch1, ch2))
-                try:
-                    plot_in_q.put_nowait((ch1, ch2))
-                except queue.Full:
-                    plot_dropped += 1
+                if config.RECEIVE_ENABLED:
+                    sent_inputs.append((ch1, ch2, now))
+                else:
+                    # No echo will be read -- plot the input straight away.
+                    try:
+                        plot_in_q.put_nowait((ch1, ch2))
+                    except queue.Full:
+                        plot_dropped += 1
             except OSError as e:
                 print(f"[net] Connection lost while sending: {e}, reconnecting...")
                 return
@@ -286,6 +295,10 @@ def _run_session(sock, plot_in_q, plot_out_q, stop_event):
                 note += f" ({send_stalls} send-stalls)"
             if plot_dropped:
                 note += f" ({plot_dropped} plot-drops -- a dump now is short)"
+            if unpaired:
+                note += (f" ({unpaired} inputs unanswered >{config.RX_WATCHDOG_S:g}s"
+                         f" -- in/out not aligned until reconnect)")
+                unpaired = 0
             if rx_stale_s > config.RX_WATCHDOG_S:
                 # Sending can look flawless into a relay whose other peer
                 # is gone -- say so, rather than report a perfect stream to nowhere.
@@ -334,20 +347,25 @@ def _run_session(sock, plot_in_q, plot_out_q, stop_event):
                     # whether we use what it said.
                     last_rx = time.perf_counter()
                     out1, out2 = records["ch1"], records["ch2"]
-                    if config.any_local():
-                        # Empty queue = no matching input (a reconnect
-                        # dropped it) -- keep the board's samples rather
-                        # than filter the wrong chunk.
-                        src = sent_inputs.popleft() if sent_inputs else None
-                        if src is not None:
-                            if config.CH_MODE[0] == "local":
-                                out1 = local_proc.process_channel(
-                                    src[0], 0, local_states[0])
-                            if config.CH_MODE[1] == "local":
-                                out2 = local_proc.process_channel(
-                                    src[1], 1, local_states[1])
+                    # Empty FIFO = no matching input (sent while Receive was
+                    # off, or expired) -- keep the board's samples rather
+                    # than filter the wrong chunk.
+                    src = sent_inputs.popleft() if sent_inputs else None
+                    if src is not None:
+                        rtt = last_rx - src[2]
+                        rtt_s = rtt if rtt_s is None else 0.9 * rtt_s + 0.1 * rtt
+                        if config.CH_MODE[0] == "local":
+                            out1 = local_proc.process_channel(
+                                src[0], 0, local_states[0])
+                        if config.CH_MODE[1] == "local":
+                            out2 = local_proc.process_channel(
+                                src[1], 1, local_states[1])
+                    # A paired input rides in the SAME item as its output, so
+                    # the plot can never take one without the other.
+                    item = ((out1, out2) if src is None
+                            else (out1, out2, src[0], src[1]))
                     try:
-                        plot_out_q.put_nowait((out1, out2))
+                        plot_out_q.put_nowait(item)
                     except queue.Full:
                         plot_dropped += 1
                 elif ptype == CONFIG_TYPE and len(records):
@@ -357,6 +375,16 @@ def _run_session(sock, plot_in_q, plot_out_q, stop_event):
                 elif ptype == METRICS_TYPE and len(records):
                     last_metrics = dict(zip(records.dtype.names,
                                             (int(v) for v in records[0])))
+
+        # Inputs the far end never answered: plot them unpaired so the input
+        # trace doesn't freeze with a dead board.
+        while sent_inputs and now - sent_inputs[0][2] > config.RX_WATCHDOG_S:
+            ch1_old, ch2_old, _t = sent_inputs.popleft()
+            unpaired += 1
+            try:
+                plot_in_q.put_nowait((ch1_old, ch2_old))
+            except queue.Full:
+                plot_dropped += 1
 
         # Sleep only when idle, never past the next send deadline. Two
         # measured traps: an unconditional sleep caps loop passes to
