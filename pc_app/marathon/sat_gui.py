@@ -13,7 +13,8 @@ import matplotlib
 matplotlib.use("TkAgg")
 import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
-from matplotlib.ticker import FuncFormatter, MultipleLocator, ScalarFormatter
+from matplotlib.ticker import (FuncFormatter, MaxNLocator, MultipleLocator,
+                               ScalarFormatter)
 import numpy as np
 
 import adc_sim
@@ -80,16 +81,20 @@ def _pad_delay_axis(ax, units):
                     mid + config.SAT_MIN_DELAY_SPAN_MS / 2.0)
 
 
-def _attenuation_ticks(ax):
-    """The same log (dB) y axis, ticked every 20 dB and labelled in times cut:
-    0 = none, -20 dB reads -10, -40 dB reads -100, -60 dB reads -1,000."""
-    def label(v, _pos):
-        if abs(v) < 1e-9:
-            return "0"
-        times = 10.0 ** (abs(v) / 20.0)
-        return f"{'-' if v < 0 else '+'}{times:,.0f}"
-    ax.yaxis.set_major_locator(MultipleLocator(20))
-    ax.yaxis.set_major_formatter(FuncFormatter(label))
+def _attenuation_axis(ax, bottom):
+    """A linear y axis in times cut: 0 (not attenuated) at the top, negative
+    going down -- -20 dB is at -10, -40 dB at -100. `bottom` is negative."""
+    ax.set_yscale("linear")
+    ax.set_ylim(bottom, 0.0)
+    ax.yaxis.set_major_locator(MaxNLocator(nbins=8, steps=[1, 2, 5, 10]))
+    ax.yaxis.set_major_formatter(FuncFormatter(
+        lambda v, _p: "0" if abs(v) < 1e-9 else f"{v:,.0f}"))
+
+
+def _times_cut(db):
+    """dB (a gain, or a level below full scale) as minus the times it is cut:
+    0 dB -> -1 (drawn at the top), -20 dB -> -10, -40 dB -> -100."""
+    return -(10.0 ** (-np.asarray(db, dtype=float) / 20.0))
 
 
 def _curve_style(response):
@@ -314,6 +319,12 @@ class SATWindow:
             self.fig.clear()
             self.axes = self.fig.subplots(*shape, squeeze=False)
             self._shape = shape
+            if shape[1] >= 2:
+                # Capture view: ch1 over ch2 read against one frequency axis,
+                # so a zoom on either channel's spectrum (or phase) moves the
+                # other. Time plots stay independent.
+                for col in range(1, shape[1]):
+                    self.axes[1][col].sharex(self.axes[0][col])
             if shape == (2, 1):
                 # Amplitude over phase read against one frequency axis: an
                 # x zoom on either moves both, y stays independent (dB and
@@ -653,12 +664,11 @@ class SATWindow:
                  "the phase column. Applied with Apply / Recompute."),
                 ("Amplitude scale", self._cap_amp_scale,
                  config.SAT_AMP_SCALE_CHOICES,
-                 "A spectrum is a LEVEL against full scale. dB: dBFS. "
-                 "attenuation: the same axis labelled in TIMES below full "
-                 "scale -- 0 = full scale, -20 dBFS reads -10, -40 dBFS reads "
-                 "-100, -60 dBFS reads -1,000. Same data, only the tick "
-                 "labels differ; dB min sets the bottom. Applied with Apply "
-                 "/ Recompute.")):
+                 "A spectrum is a LEVEL against full scale. dB: dBFS, a "
+                 "logarithmic axis. attenuation: a LINEAR axis in TIMES below "
+                 "full scale -- 0 = full scale at the top, -20 dBFS at -10, "
+                 "-40 dBFS at -100. dB min sets how deep the axis goes (-60 "
+                 "shows 0 to -1,000). Applied with Apply / Recompute.")):
             ttk.Label(f, text=label).grid(row=row, column=0, sticky="w", pady=2)
             box = ttk.Combobox(f, textvariable=var, width=8, state="readonly",
                                values=list(choices))
@@ -877,13 +887,13 @@ class SATWindow:
                  "Apply / Recompute."),
                 ("Amplitude scale", self._amp_scale,
                  config.SAT_AMP_SCALE_CHOICES,
-                 "Both scales are logarithmic. dB: gain in decibels. "
-                 "attenuation: the same axis labelled in TIMES the signal is "
-                 "cut -- 0 = not attenuated, -20 dB reads -10, -40 dB reads "
-                 "-100, -60 dB reads -1,000, and so on. Same data and same "
-                 "shape, only the tick labels differ. dB min still sets the "
-                 "bottom. The filters that hide dots take thresholds in dB. "
-                 "Applied with Apply / Recompute.")):
+                 "dB: gain in decibels, a logarithmic axis. attenuation: a "
+                 "LINEAR axis in TIMES the signal is cut -- 0 = not "
+                 "attenuated at the top, -20 dB plots at -10, -40 dB at -100, "
+                 "-60 dB at -1,000. dB min sets how deep the axis goes: -60 "
+                 "shows 0 to -1,000, and anything deeper (a notch) runs off "
+                 "the bottom. The filters that hide dots take thresholds "
+                 "in dB. Applied with Apply / Recompute.")):
             ttk.Label(f, text=label).grid(row=row, column=0, sticky="w", pady=2)
             box = ttk.Combobox(f, textvariable=var, width=8, state="readonly",
                                values=list(choices))
@@ -1471,9 +1481,9 @@ class SATWindow:
             for col in range(cols):
                 self.axes[row][col].set_visible(row < len(channels))
 
-        # Spectrum axes: frequency log/linear; level in dB or labelled as
-        # times below full scale. Display only -- the data is never converted,
-        # only the tick labels differ.
+        # Spectrum axes: frequency log/linear; level in dB (log) or in times
+        # below full scale (linear). Display only -- converted at the plot
+        # call and nothing upstream knows.
         cap_log = self._cap_freq_scale.get() == "log"
         cap_att = self._cap_amp_scale.get() == "attenuation"
 
@@ -1517,7 +1527,8 @@ class SATWindow:
                     # One legend entry per direction, on the newest window
                     # -- one per overlaid window would swamp it.
                     label = direction if i == n_curves - 1 else None
-                    ax_f.plot(f, db, color=color, lw=0.8, alpha=alpha,
+                    level = _times_cut(db) if cap_att else db
+                    ax_f.plot(f, level, color=color, lw=0.8, alpha=alpha,
                              label=label)
             ax_f.set_title(f"{ch} — spectrum")
             ax_f.set_xlabel("Frequency (Hz)")
@@ -1529,11 +1540,11 @@ class SATWindow:
             if cap_log and f_hi < pos_lo * 10.0:
                 ax_f.xaxis.set_major_formatter(ScalarFormatter())
                 ax_f.xaxis.set_minor_formatter(ScalarFormatter())
-            ax_f.set_ylim(db_min, 6)
             if cap_att:
-                _attenuation_ticks(ax_f)
+                _attenuation_axis(ax_f, -(10.0 ** (-db_min / 20.0)))
                 ax_f.set_ylabel("Times below full scale (0 = full scale)")
             else:
+                ax_f.set_ylim(db_min, 6)
                 ax_f.set_ylabel("dBFS")
             ax_f.legend(fontsize=8)
             ax_f.grid(alpha=0.3)
@@ -1640,9 +1651,10 @@ class SATWindow:
         ideal = self._resp_ideal.get()
         units = self._phase_units.get()
         log_f = self._freq_scale.get() != "linear"
-        # Both amplitude scales are the dB axis; "attenuation" only relabels
-        # its ticks in times cut. The data is plotted in dB either way.
+        # dB is a log axis; "attenuation" is a linear one in times cut. The
+        # filters that hide dots keep working in dB either way.
         att_amp = self._amp_scale.get() == "attenuation"
+        to_amp = _times_cut if att_amp else (lambda db: db)
         if not log_f:
             lo = fmin if fmin > 0 else 0.0     # DC is a real place on a linear axis
         phase_label = {"phase ms": "Phase delay (ms)",
@@ -1679,8 +1691,8 @@ class SATWindow:
 
         for r in responses:
             color, ls = _curve_style(r)
-            ax_mag.plot(r["freqs"], r["mag_db"], color=color, ls=ls, lw=1.2,
-                        label=r["algorithm"])
+            ax_mag.plot(r["freqs"], to_amp(r["mag_db"]), color=color, ls=ls,
+                        lw=1.2, label=r["algorithm"])
             px, py, _lab = sat.phase_display(r["freqs"], r["phase_deg"],
                                              r.get("h"), units)
             ax_ph.plot(px, py, color=color, ls=ls, lw=1.2,
@@ -1690,7 +1702,7 @@ class SATWindow:
             # at no visible line it just reads as a missing curve.
             if (self._resp_floor.get() and r["floor_db"].size
                     and float(np.max(r["floor_db"])) > db_min):
-                ax_mag.plot(r["floor_freqs"], r["floor_db"], color=color,
+                ax_mag.plot(r["floor_freqs"], to_amp(r["floor_db"]), color=color,
                             ls=":", lw=0.9, alpha=0.7,
                             label=once("floor", "noise + distortion floor"))
             if ideal and r["sos"] is not None:
@@ -1700,7 +1712,7 @@ class SATWindow:
                 # as an overlay rather than as another curve.
                 w, h = signal.sosfreqz(r["sos"], worN=r["freqs"], fs=r["fs"])
                 mag = 20.0 * np.log10(np.maximum(np.abs(h), 1e-30))
-                ax_mag.plot(w, mag, color="k", lw=0.7, alpha=0.7,
+                ax_mag.plot(w, to_amp(mag), color="k", lw=0.7, alpha=0.7,
                             label=once("design", "design (from sos)"))
                 dx, dy, _lab = sat.phase_display(
                     w, np.degrees(np.unwrap(np.angle(h))), h, units)
@@ -1739,7 +1751,7 @@ class SATWindow:
             if not shown.all():
                 label += f", {int((~shown).sum())} hidden"
             keep = np.flatnonzero(shown)
-            ax_mag.scatter(g["freqs"][keep], mag[keep],
+            ax_mag.scatter(g["freqs"][keep], to_amp(mag[keep]),
                            s=size[keep], c=[rgba[i] for i in keep],
                            edgecolors="none", label=label)
             gx, gy, _lab = sat.phase_display(g["freqs"], g["phase_deg"],
@@ -1794,11 +1806,13 @@ class SATWindow:
             if log_f and hi < lo * 10.0:
                 ax.xaxis.set_major_formatter(ScalarFormatter())
                 ax.xaxis.set_minor_formatter(ScalarFormatter())
-        ax_mag.set_ylim(db_min, top)
         if att_amp:
-            _attenuation_ticks(ax_mag)
+            # dB min sets the depth: -60 shows 0 down to -1,000 times. A deep
+            # notch runs off the bottom rather than flattening everything.
+            _attenuation_axis(ax_mag, -(10.0 ** (-db_min / 20.0)))
             ax_mag.set_ylabel("Attenuation (times, 0 = none)")
         else:
+            ax_mag.set_ylim(db_min, top)
             ax_mag.set_ylabel("Amplitude (dB)")
         title = f"pipeline response — measured at {rate:g} Hz"
         if responses:
