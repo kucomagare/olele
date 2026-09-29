@@ -219,12 +219,15 @@ class SATWindow:
             for name in design:
                 if name.startswith(f"{newest}:"):
                     self._curves[name].set(True)
-        self._resp_size = tk.StringVar(value=str(response_size))
+        self._resp_size = tk.StringVar(value=_size_label(response_size))
         # What was picked from the dropdown, as opposed to what F min pushed
         # it up to. Kept apart so raising F min again drops back to the
         # chosen value instead of leaving the measurement stuck at the
         # longest period it was ever asked for.
-        self._size_floor = int(response_size)
+        self._size_floor = int(response_size)     # 0 = the capture's length
+        # Text WE last wrote into the Size box because F min forced it up --
+        # told apart from a value the user typed or picked.
+        self._size_auto = None
         self._resp_points = tk.StringVar(value=str(response_points))
         self._resp_drive = tk.StringVar(value=f"{response_drive * 100:g}")
         self._resp_averages = tk.StringVar(value=str(response_averages))
@@ -246,8 +249,13 @@ class SATWindow:
         self._resp_ideal = tk.BooleanVar(value=config.SAT_SHOW_DESIGN)
         self._overlay = tk.StringVar(
             value=overlay if overlay in config.SAT_OVERLAY_CHOICES else "none")
+        self._overlay_points = tk.StringVar(value=str(config.SAT_OVERLAY_POINTS))
+        self._min_energy_db = tk.StringVar(value="off")
+        self._show_below_db = tk.StringVar(value="off")
         self._overlay_ch = tk.StringVar(
             value=overlay_ch if overlay_ch in config.SAT_OVERLAY_CH_CHOICES else "both")
+        # Which of each channel's traces the capture view draws.
+        self._show = [tk.StringVar(value="both"), tk.StringVar(value="both")]
 
         # What Defaults restores -- the dump file isn't in here, it's what
         # you're looking at, not a setting.
@@ -260,7 +268,9 @@ class SATWindow:
                           self._resp_drive, self._resp_averages,
                           self._resp_fmin, self._resp_fmax, self._resp_floor,
                           self._resp_ideal, self._overlay, self._overlay_ch,
-                          *self._pipe, *self._impl, *self._curves.values(),
+                          self._overlay_points, self._min_energy_db,
+                          self._show_below_db, *self._show, *self._pipe, *self._impl,
+                          *self._curves.values(),
                           *self._tunable.values())}
 
         self._build_controls()
@@ -602,6 +612,15 @@ class SATWindow:
                           "including bins that are mostly noise; less "
                           "negative (e.g. -40) shows only the bins you can "
                           "trust. -60 is a reasonable starting point.")
+        for n, var in enumerate(self._show, start=1):
+            ttk.Label(f, text=f"Show ch{n}").grid(row=row, column=0,
+                                                  sticky="w", pady=2)
+            box = ttk.Combobox(f, textvariable=var, width=8, state="readonly",
+                               values=list(config.PLOT_SHOW_CHOICES))
+            box.grid(row=row, column=1, sticky="e", pady=2)
+            _Tooltip(box, f"Which of channel {n}'s recorded traces to draw, "
+                          f"in the time and spectrum plots: in, out or both.")
+            row += 1
         return f
 
     def _build_model_tab(self):
@@ -717,20 +736,25 @@ class SATWindow:
         return f
 
     def _build_measure_tab(self):
-        """How hard the response view looks -- excitation length, how many
-        tones, how hard it drives, how many realisations."""
+        """The test signal the response view feeds through each pipeline --
+        period length, how many tones, how hard it drives, how many
+        realisations, and the sample rate it runs at."""
         f = self._tab()
         ttk.Label(f, text="Size").grid(row=0, column=0, sticky="w", pady=2)
-        resp_size = ttk.Combobox(f, textvariable=self._resp_size, width=9,
-                                 state="readonly",
-                                 values=[str(v) for v in config.SAT_RESPONSE_SIZE_CHOICES])
+        resp_size = ttk.Combobox(
+            f, textvariable=self._resp_size, width=9,
+            values=["capture"] + [str(v) for v in config.SAT_RESPONSE_SIZE_CHOICES])
         resp_size.grid(row=0, column=1, sticky="e", pady=2)
         resp_size.bind("<<ComboboxSelected>>", lambda _e: self._pin_size())
+        resp_size.bind("<Return>", lambda _e: self.refresh())
         _Tooltip(resp_size,
-                 "Length of one excitation period, in samples. This is what "
-                 "sets how low the plot can reach: the lowest frequency that "
-                 "exists at all is one bin, rate/Size — 0.125 Hz at 16384 "
-                 "and 2048 Hz, 0.001 Hz at the top of this list.\n\n"
+                 "Length of one test-signal period, in samples. \"capture\" "
+                 "(the default) uses the loaded dump's own length, like "
+                 "Rate; pick or type a number to override it.\n\n"
+                 "This is what sets how low the plot can reach: the lowest "
+                 "frequency that exists at all is one bin, rate/Size — "
+                 "0.125 Hz at 16384 and 2048 Hz, 0.001 Hz at the top of "
+                 "the list.\n\n"
                  "You do not normally have to set it. Lowering F min (Plot "
                  "tab) raises this on its own, to whatever that frequency "
                  "needs, and shows you the value it used — the cost is real "
@@ -781,10 +805,10 @@ class SATWindow:
                     "tones resolves the notch's shape properly.\n\n"
                     "Both ends stop at a hard limit, and they are different "
                     "limits with different answers. Below, it is one bin — "
-                    "rate/Size — so lowering F min simply raises Size (Measure "
+                    "rate/Size — so lowering F min simply raises Size (Test signal "
                     "tab) for you until it fits; watch it follow. Above, it "
                     "is Nyquist, half the Rate, and nothing reaches past it: "
-                    "raise RATE on the Measure tab instead, which asks what "
+                    "raise RATE on the Test signal tab instead, which asks what "
                     "the filter does at a faster sample rate.\n\n"
                     "Asking for more than either is not an error and is not "
                     "silently ignored: the axis stops where the measurement "
@@ -887,6 +911,64 @@ class SATWindow:
                  "Which channel the overlay is taken from. The two channels "
                  "can have run different pipelines, so 'both' is two "
                  "different measurements, not one measured twice.")
+        row += 1
+        tip = ("How many frequency bands the capture's own gain overlay is "
+               "grouped into (one dot each). This depends on the RECORDING "
+               "only -- not on Tones, Rate or the band -- so the overlay "
+               "stays one fixed view of your real data while you change the "
+               "test signal.\n\n"
+               "max (default): one dot per FFT bin, samples/2 - 1 of them "
+               "(DC and Nyquist excluded) -- the most the recording holds, "
+               "and the one to zoom into. A number groups the bins into that "
+               "many log-spaced bands instead: a cleaner overview, less "
+               "scatter per dot. Bands that land on the same bin merge, so "
+               "you get fewer dots than the number you typed.")
+        ttk.Label(f, text="Overlay bands").grid(row=row, column=0, sticky="w",
+                                                pady=2)
+        bands_box = ttk.Combobox(f, textvariable=self._overlay_points,
+                                 width=9,
+                                 values=["max", "100", "200", "500", "1000",
+                                         "2000"])
+        bands_box.grid(row=row, column=1, sticky="e", pady=2)
+        bands_box.bind("<Return>", lambda _e: self.refresh())
+        _Tooltip(bands_box, tip)
+        row += 1
+        ttk.Label(f, text="Min input energy (dB)").grid(row=row, column=0,
+                                                        sticky="w", pady=2)
+        energy_box = ttk.Combobox(f, textvariable=self._min_energy_db, width=9,
+                                  values=["off", "-40", "-60", "-80", "-100"])
+        energy_box.grid(row=row, column=1, sticky="e", pady=2)
+        energy_box.bind("<Return>", lambda _e: self.refresh())
+        _Tooltip(energy_box,
+                 "Applied FIRST. Hide every overlay dot whose band holds less "
+                 "input energy than this, relative to the strongest band "
+                 "(power dB: -60 is one millionth of the peak's power). "
+                 "Those are the bands the recording says nothing about -- "
+                 "gain there is noise divided by noise, so a filter can "
+                 "look attenuating where it is not. On both plots.\n\n"
+                 "-60 suits the ECG capture. off (default), or blank, hides "
+                 "nothing. Pick from the list or type any number. Works "
+                 "together with Show gain below, or on its own.")
+        row += 1
+        ttk.Label(f, text="Show gain below (dB)").grid(row=row, column=0,
+                                                       sticky="w", pady=2)
+        below_box = ttk.Combobox(f, textvariable=self._show_below_db, width=9,
+                                 values=["off", "-3", "-10", "-20", "-40",
+                                         "-60", "-80"])
+        below_box.grid(row=row, column=1, sticky="e", pady=2)
+        below_box.bind("<Return>", lambda _e: self.refresh())
+        _Tooltip(below_box,
+                 "Keep only the overlay dots the filter really attenuates: "
+                 "every dot whose gain -- output energy compared to input "
+                 "energy at that frequency -- is ABOVE this is hidden, on "
+                 "the amplitude and phase plots alike. Applied AFTER Min input "
+                 "energy, on what that left.\n\n"
+                 "-3 keeps everything down more than 3 dB (the roll-offs and "
+                 "the notch) and hides the passband; -20 keeps only what is "
+                 "cut by a factor of 10 or more; -60 only the deep notch.\n\n"
+                 "off (default), or blank, hides nothing. Pick from the list "
+                 "or type any number. The legend counts how many dots are "
+                 "hidden.")
         return f
 
     def _set_curves(self, value):
@@ -905,7 +987,7 @@ class SATWindow:
         if self._view.get() == "response":
             return ((self._tab_dump, "Dump"),
                     (self._tab_curves, "Curves"),
-                    (self._tab_measure, "Measure"),
+                    (self._tab_measure, "Test signal"),
                     (self._tab_response_plot, "Plot"))
         return ((self._tab_dump, "Dump"),
                 (self._tab_capture_plot, "Plot"),
@@ -932,10 +1014,18 @@ class SATWindow:
         return [name for name, var in self._curves.items() if var.get()]
 
     def _pin_size(self):
-        """Picking a Size from the dropdown makes it the floor -- the value
-        F min is allowed to raise but not to fall below."""
+        """A Size the user picked or typed becomes the floor -- the value
+        F min is allowed to raise but not to fall below. "capture" (or
+        blank) is 0: follow the loaded dump. Text we wrote ourselves when
+        F min forced the period up is not a choice, so it is ignored."""
+        text = self._resp_size.get().strip()
+        if text == self._size_auto:
+            return
+        if text in ("", "capture"):
+            self._size_floor = 0
+            return
         try:
-            self._size_floor = int(self._resp_size.get())
+            self._size_floor = max(0, int(text))
         except ValueError:
             pass
 
@@ -978,12 +1068,14 @@ class SATWindow:
                     self._resp_points, self._resp_drive, self._resp_averages,
                     self._resp_fmin, self._resp_fmax, self._resp_floor,
                     self._resp_ideal, self._overlay, self._overlay_ch,
-                    *self._pipe, *self._impl, *self._curves.values(),
+                    self._overlay_points, self._min_energy_db,
+                    self._show_below_db, *self._pipe, *self._impl, *self._curves.values(),
                     *self._tunable.values()):
             var.set(self._initial[id(var)])
         # The corners' "default" is the loaded capture's, not whatever the
         # window happened to open with.
         self._fill_tunables()
+        self._size_auto = None
         self._pin_size()
         for ch in range(2):
             self._sync_impl(ch)
@@ -1072,6 +1164,23 @@ class SATWindow:
     # ------------------------------------------------------------------
     # Recompute + redraw
     # ------------------------------------------------------------------
+    def _show_below_threshold(self):
+        return self._threshold(self._show_below_db)
+
+    def _min_energy_threshold(self):
+        return self._threshold(self._min_energy_db)
+
+    @staticmethod
+    def _threshold(var):
+        """A dB field as a float, or None for off/blank/unreadable."""
+        text = var.get().strip().lower()
+        if text in ("", "off", "none"):
+            return None
+        try:
+            return float(text)
+        except ValueError:
+            return None
+
     def _number(self, var, fallback, cast=float):
         try:
             return cast(var.get())
@@ -1171,7 +1280,8 @@ class SATWindow:
                       "capture' to see the loaded recording on its own.")
             return
 
-        size = self._size_floor
+        self._pin_size()
+        samples = (self.info or {}).get("samples")
         points = max(2, self._number(self._resp_points,
                                      config.SAT_RESPONSE_POINTS, int))
         drive = min(0.95, max(0.001, self._number(
@@ -1189,9 +1299,12 @@ class SATWindow:
         # F min is really asking for a longer period, so grow it to fit
         # rather than quietly measuring nothing down there. Written back to
         # the Size box, because the cost is real and should be visible.
-        size = min(max(size, sat.size_for_fmin(rate, fmin)),
-                   config.SAT_RESPONSE_SIZE_CHOICES[-1])
-        self._resp_size.set(str(size))
+        size = sat.response_period(self._size_floor, samples, rate, fmin)
+        if size == sat.response_period(self._size_floor, samples, rate, 0.0):
+            shown, self._size_auto = _size_label(self._size_floor), None
+        else:
+            shown = self._size_auto = str(size)
+        self._resp_size.set(shown)
         self._resp_points.set(str(points))
         self._resp_drive.set(f"{drive * 100:g}")
         self._resp_averages.set(str(averages))
@@ -1219,23 +1332,34 @@ class SATWindow:
 
         responses = [r for r in responses if r]
 
+        text = self._overlay_points.get().strip().lower()
+        if text in ("", "max"):
+            overlay_points = "max"
+        else:
+            try:
+                overlay_points = max(8, int(float(text)))
+            except ValueError:
+                overlay_points = "max"
+        self._overlay_points.set(str(overlay_points))
+        for var, value in ((self._min_energy_db, self._min_energy_threshold()),
+                           (self._show_below_db, self._show_below_threshold())):
+            var.set("off" if value is None else f"{value:g}")
         channels = (config.SAT_OVERLAY_CH_CHOICES[:2] if self._overlay_ch.get() == "both"
                     else (self._overlay_ch.get(),))
         gains, spectra = [], []
         if overlay in ("gain", "both"):
-            # Onto the response's own x positions, so the measured and the
-            # modelled are read off one grid instead of two that nearly
-            # agree. With nothing ticked there is no grid to share, so build
-            # the one the curves would have used.
-            grid = (responses[0]["freqs"] if responses
-                    else sat.response_bins(size, rate, points, fmin, fmax)
-                    * (rate / size))
-            gains = [g for g in (sat.capture_gain(self.traces, ch, rate, grid)
+            # The recording on its own terms: its own rate and its own band
+            # grid (Overlay bands), so changing the test signal -- Tones,
+            # Rate, band -- never changes what the real data looks like.
+            gains = [g for g in (sat.capture_gain(
+                         self.traces, ch, self.info["rate"],
+                         points=overlay_points)
                                  for ch in channels) if g]
         if overlay in ("spectrum", "both"):
             full_scale = sat.wire_full_scale(self.traces, self.info)
             spectra = [s for s in
-                       (sat.capture_spectrum(self.traces, ch, rate, full_scale)
+                       (sat.capture_spectrum(self.traces, ch, self.info["rate"],
+                                             full_scale)
                         for ch in channels) if s]
 
         self._say(sat.format_report(self.info, [], [], responses, gains))
@@ -1279,9 +1403,10 @@ class SATWindow:
 
         for row, ch in enumerate(channels):
             ax_t, ax_f = self.axes[row][0], self.axes[row][1]
+            shown = self._show[0 if ch == "ch1" else 1].get()
             for direction, color in (("in", "tab:blue"), ("out", "tab:red")):
                 key = f"{ch}_{direction}"
-                if key in self.traces:
+                if shown in ("both", direction) and key in self.traces:
                     ax_t.plot(t, to_v(self.traces[key]),
                               color=color, lw=0.9, label=direction)
             m = model_by_ch.get(ch)
@@ -1297,7 +1422,7 @@ class SATWindow:
 
             for direction, color in (("in", "tab:blue"), ("out", "tab:red")):
                 curve_list = curves_by_ch.get(ch, {}).get(direction)
-                if not curve_list:
+                if not curve_list or shown not in ("both", direction):
                     continue
                 n_curves = len(curve_list)
                 for i, (f, db) in enumerate(curve_list):
@@ -1479,16 +1604,73 @@ class SATWindow:
         # Markers, not a smooth line: each point is one band of a five-second
         # record, and drawing it as a continuous curve would claim a
         # resolution the capture does not have.
+        # Every band is drawn; dot size and opacity follow the band's INPUT
+        # energy, so a band the signal barely excites is a small faint dot
+        # instead of a gap -- same idea as the capture view's phase dots.
+        def _dots(color, e):
+            norm = (e - e.min()) / max(e.max() - e.min(), 1e-9)
+            return (4.0 + 40.0 * norm,
+                    [matplotlib.colors.to_rgba(color, 0.25 + 0.7 * n)
+                     for n in norm])
+
+        show_below_db = self._show_below_threshold()
+        min_energy_db = self._min_energy_threshold()
+        unwrap_db = config.SAT_OVERLAY_UNWRAP_DB
+        trusted = []            # delay values worth scaling the axis by
         for g in gains:
             color = config.SAT_GAIN_COLORS.get(g["channel"], "0.3")
-            ax_mag.plot(g["freqs"], g["mag_db"], color=color, lw=1.1,
-                        marker=".", ms=3.5, alpha=0.9,
-                        label=f"{g['channel']} capture in→out")
+            e = np.asarray(g["energy_db"], dtype=float)
+            size, rgba = _dots(color, e)
+            # Same frequencies hidden on both plots: only gain at or below
+            # the field survives, i.e. what the filter really attenuates.
+            mag = np.asarray(g["mag_db"], dtype=float)
+            shown = np.ones(mag.size, dtype=bool)
+            if min_energy_db is not None:          # first: trustworthy bands
+                shown &= e >= min_energy_db
+            if show_below_db is not None:          # then: what is attenuated
+                shown &= mag <= show_below_db
+            label = f"{g['channel']} capture in→out (dot size = input energy)"
+            if not shown.all():
+                label += f", {int((~shown).sum())} hidden"
+            keep = np.flatnonzero(shown)
+            ax_mag.scatter(g["freqs"][keep], mag[keep],
+                           s=size[keep], c=[rgba[i] for i in keep],
+                           edgecolors="none", label=label)
             gx, gy, _lab = sat.phase_display(g["freqs"], g["phase_deg"],
                                              g.get("h"), units)
-            ax_ph.plot(gx, gy, color=color, lw=1.1,
-                       marker=".", ms=3.5, alpha=0.9,
-                       label=f"{g['channel']} capture in→out")
+            if units == "deg":
+                # Wrapped, not unwrapped: an absolute phase through a notch
+                # is only known modulo whole turns, so an unwrapped curve
+                # can sit any number of turns off the model. The wrapped
+                # angle is unambiguous and matches the curves modulo 360.
+                gy = np.angle(np.exp(1j * np.radians(gy)), deg=True)
+            # Group delay lives BETWEEN bins, so it has fewer points than
+            # the gain does: size each by the weaker of the pair it spans.
+            e_ph, shown_ph = e, shown
+            if len(gx) != len(e):
+                lag = len(e) - len(gx)
+                e_ph = np.minimum(e[:-lag], e[lag:])
+                shown_ph = shown[:-lag] & shown[lag:]
+            size_ph, rgba_ph = _dots(color, e_ph)
+            gy = np.asarray(gy, dtype=float)
+            keep_ph = np.flatnonzero(shown_ph)
+            ax_ph.scatter(np.asarray(gx)[keep_ph], gy[keep_ph],
+                          s=size_ph[keep_ph], c=[rgba_ph[i] for i in keep_ph],
+                          edgecolors="none")
+            trusted.append(gy[shown_ph & np.isfinite(gy) & (e_ph >= unwrap_db)])
+
+        # A delay in ms explodes toward DC (180 deg at 0.06 Hz is seconds)
+        # and the weak bins scatter without limit; scaling the axis by
+        # either flattens everything that matters into a line. Scale by the
+        # model curves and the trusted dots only, dropping the extremes --
+        # what falls outside is still drawn, just off the edge.
+        if gains and units != "deg":
+            vals = [np.asarray(l.get_ydata(), dtype=float) for l in ax_ph.lines]
+            vals = np.concatenate([v[np.isfinite(v)] for v in vals + trusted])
+            if vals.size > 4:
+                lo_y, hi_y = np.percentile(vals, [2, 98])
+                pad = 0.1 * (hi_y - lo_y) or 0.5
+                ax_ph.set_ylim(lo_y - pad, hi_y + pad)
 
         tops = ([float(r["ref_db"]) for r in responses]
                 + [float(np.max(g["mag_db"])) for g in gains])
@@ -1538,8 +1720,11 @@ class SATWindow:
         if units == "deg":
             span = [float(np.nanmax(r["phase_deg"]) - np.nanmin(r["phase_deg"]))
                     for r in responses if np.isfinite(r["phase_deg"]).any()]
-            if span and max(span) > 180.0:
+            if (span and max(span) > 180.0) or gains:
                 ax_ph.yaxis.set_major_locator(MultipleLocator(90))
+            if gains:
+                lo_y, hi_y = ax_ph.get_ylim()
+                ax_ph.set_ylim(min(lo_y, -190.0), max(hi_y, 190.0))
         _pad_delay_axis(ax_ph, units)
         ax_ph.axhline(0.0, color="0.5", lw=0.6)
 

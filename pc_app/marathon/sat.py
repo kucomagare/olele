@@ -445,6 +445,16 @@ def size_for_fmin(fs, fmin):
     return int(2 ** np.ceil(np.log2(max(fs / float(fmin), 2.0))))
 
 
+def response_period(size, samples, fs, fmin=0.0):
+    """The excitation period actually used. `size` 0 means the capture's own
+    length (`samples`); F min can only ever lengthen it, and the longest
+    offered period caps it. Shared by the window and the CLI so the two
+    cannot disagree."""
+    base = int(size) if size else int(samples or 16384)
+    base = max(base, 128, size_for_fmin(fs, fmin))
+    return min(base, config.SAT_RESPONSE_SIZE_CHOICES[-1])
+
+
 def param_freqs(params):
     """The frequencies a pipeline was actually configured with: any params
     key ending in _hz (see model_params). Generic on purpose -- a pipeline
@@ -689,16 +699,23 @@ def measure_response(algorithm, params, fs, size=config.SAT_RESPONSE_SIZE,
 # where the input had something to say, and the gate below is what keeps
 # the rest off the plot.
 
-def capture_gain(traces, ch, rate, grid, gate_db=config.SAT_CAPTURE_GATE_DB):
+def capture_gain(traces, ch, rate, grid=None, gate_db=None,
+                 points=config.SAT_OVERLAY_POINTS,
+                 unwrap_db=config.SAT_OVERLAY_UNWRAP_DB):
     """One channel's recorded in -> out as amplitude and phase on `grid`.
 
+    Every band is returned with its input energy ("energy_db", relative to
+    the strongest band), so the caller can show how much to trust each one
+    instead of hiding the weak ones. `gate_db` (None = off) drops bands that
+    far below the strongest instead.
+
     Returns None when the channel has no in/out pair or nothing survives
-    the gate. Magnitudes are gain in dB, directly comparable with
+    the gate. `grid` None builds the capture's own (see `points`). Magnitudes are gain in dB, directly comparable with
     measure_response; the wire's full scale cancels in the ratio, so unlike
     the dBFS spectrum this needs no reference level.
     """
     src, dst = f"{ch}_in", f"{ch}_out"
-    if src not in traces or dst not in traces or grid is None or len(grid) < 2:
+    if src not in traces or dst not in traces:
         return None
     x = np.asarray(traces[src], dtype=np.float64)
     y = np.asarray(traces[dst], dtype=np.float64)
@@ -706,6 +723,16 @@ def capture_gain(traces, ch, rate, grid, gate_db=config.SAT_CAPTURE_GATE_DB):
     if n < 64:
         return None
     x, y = x[:n], y[:n]
+    if grid is None:
+        # The recording's own grid, from `points` alone so nothing about a
+        # test signal moves it: "max" is every FFT bin (n/2 - 1, DC and
+        # Nyquist excluded); a number is that many log-spaced bands.
+        if points in ("max", None, 0):
+            grid = np.arange(1, n // 2) * (rate / n)
+        else:
+            grid = response_bins(n, rate, int(points)) * (rate / n)
+    if len(grid) < 2:
+        return None
 
     # DC out first: the wire centres on half full scale, and that offset is
     # a format artefact that would otherwise dominate the lowest bins.
@@ -739,21 +766,41 @@ def capture_gain(traces, ch, rate, grid, gate_db=config.SAT_CAPTURE_GATE_DB):
         return None
 
     energy = np.array(energy)
-    keep = energy >= energy.max() * (10.0 ** (gate_db / 10.0))
+    energy_db = 10.0 * np.log10(np.maximum(energy / energy.max(), 1e-30))
+    keep = (np.ones(energy.size, dtype=bool) if gate_db is None
+            else energy_db >= gate_db)
     if not keep.any():
         return None
     h = np.array(out_mag)[keep]
+    f_keep = np.array(out_f)[keep]
+
+    # Unwrap only where the input says something. A band it barely excites
+    # has a random phase, and np.unwrap chains a 2*pi step through every one
+    # of them -- thousands of bins later the curve is turns away from the
+    # signal. Weak bands are placed on the branch nearest the trend instead.
+    angle = np.angle(h)
+    phase_deg = np.degrees(angle)
+    reliable = energy_db[keep] >= unwrap_db
+    if reliable.sum() >= 2:
+        unwrapped = np.degrees(np.unwrap(angle[reliable]))
+        phase_deg[reliable] = unwrapped
+        trend = np.interp(f_keep, f_keep[reliable], unwrapped)
+        weak = ~reliable
+        phase_deg[weak] += 360.0 * np.round((trend[weak] - phase_deg[weak]) / 360.0)
+
     return {
         "channel": ch,
-        "freqs": np.array(out_f)[keep],
+        "freqs": f_keep,
         "mag_db": 20.0 * np.log10(np.maximum(np.abs(h), 1e-30)),
-        "phase_deg": np.degrees(np.unwrap(np.angle(h))),
+        "phase_deg": phase_deg,
+        "energy_db": energy_db[keep],
         # So the overlay follows the phase axis into delay units with the
         # curves it is drawn against, rather than staying in degrees.
         "h": h,
         "points": int(keep.sum()), "of": int(keep.size),
         "top_hz": float(np.array(out_f)[keep].max()),
-        "samples": n, "resolution": rate / n, "gate_db": float(gate_db),
+        "samples": n, "resolution": rate / n,
+        "gate_db": None if gate_db is None else float(gate_db),
     }
 
 
@@ -1056,8 +1103,10 @@ def format_report(info, results, models, responses=(), gains=(), phases=()):
         for g in gains:
             if not g:
                 continue
-            say(f"    {g['channel']:8} {g['points']} of {g['of']} bands above "
-                f"{g['gate_db']:.0f} dB gate, usable to {g['top_hz']:.4g} Hz"
+            gate = ("no gate; dot size = input energy" if g["gate_db"] is None
+                    else f"above the {g['gate_db']:.0f} dB gate")
+            say(f"    {g['channel']:8} {g['points']} of {g['of']} bands, "
+                f"{gate}, to {g['top_hz']:.4g} Hz"
                 f"   ({g['samples']} samples, {g['resolution']:.2f} Hz/bin)")
     return "\n".join(out)
 
@@ -1146,7 +1195,8 @@ def main(argv=None):
                          "Opens the window on the response view; with "
                          "--no-plot, prints the summary instead")
     ap.add_argument("--response-size", type=int, default=config.SAT_RESPONSE_SIZE,
-                    help="excitation period in samples -- resolution is "
+                    help="excitation period in samples, 0 = the capture's "
+                         "length (default: %(default)s) -- resolution is "
                          "rate/N, so the low end of the axis needs a big one")
     ap.add_argument("--response-points", type=int,
                     default=config.SAT_RESPONSE_POINTS,
@@ -1296,9 +1346,8 @@ def main(argv=None):
     params = model_params(shift, info["rate"], info.get("meta"), overrides)
     # Same as the window: a lower --response-fmin is really a request for a
     # longer period, so grow it rather than measure nothing down there.
-    response_size = min(max(args.response_size,
-                            size_for_fmin(info["rate"], args.response_fmin)),
-                        config.SAT_RESPONSE_SIZE_CHOICES[-1])
+    response_size = response_period(args.response_size, info.get("samples"),
+                                    info["rate"], args.response_fmin)
     responses = [measure_response(name, params, info["rate"],
                                   size=response_size,
                                   points=args.response_points,
@@ -1312,14 +1361,8 @@ def main(argv=None):
     # read off the same grid rather than two grids that nearly agree.
     gains = []
     if args.overlay in ("gain", "both"):
-        grid = next((r["freqs"] for r in responses if r), None)
-        if grid is None:
-            grid = response_bins(
-                response_size, info["rate"], args.response_points,
-                args.response_fmin,
-                args.response_fmax) * (info["rate"] / response_size)
         channels = ("ch1", "ch2") if args.overlay_ch == "both" else (args.overlay_ch,)
-        gains = [capture_gain(traces, ch, info["rate"], grid) for ch in channels]
+        gains = [capture_gain(traces, ch, info["rate"]) for ch in channels]
 
     phases = []
     if args.phase != "off":
