@@ -17,6 +17,7 @@ import adc_sim
 import config
 import guiutil
 import net
+import prof
 from packet_format import CH1_DTYPE, CH2_DTYPE
 from control_panel import GUI_SECTIONS, SignalControlPanel, PlotControlPanel
 
@@ -96,12 +97,15 @@ class DualPlot:
         # steps-mid: each sample is a flat segment, not a slope, so no
         # interpolated value is implied. Starting value only -- see
         # _apply_drawstyle(), which switches per frame by pixel density.
-        self.line_ch1_in,  = self.ax1.plot(self.ch1_in[-buffer_size:],  color="blue", label="in",  animated=True, drawstyle="steps-mid")
-        self.line_ch1_out, = self.ax1.plot(self.ch1_out[-buffer_size:], color="red",  label="out", animated=True, drawstyle="steps-mid")
-        self.line_ch2_in,  = self.ax2.plot(self.ch2_in[-buffer_size:],  color="blue", label="in",  animated=True, drawstyle="steps-mid")
-        self.line_ch2_out, = self.ax2.plot(self.ch2_out[-buffer_size:], color="red",  label="out", animated=True, drawstyle="steps-mid")
+        self.line_ch1_in,  = self.ax1.plot(self.ch1_in[-buffer_size:],  color="blue", label="in",  animated=True, drawstyle="steps-mid", lw=config.PLOT_LINE_WIDTH)
+        self.line_ch1_out, = self.ax1.plot(self.ch1_out[-buffer_size:], color="red",  label="out", animated=True, drawstyle="steps-mid", lw=config.PLOT_LINE_WIDTH)
+        self.line_ch2_in,  = self.ax2.plot(self.ch2_in[-buffer_size:],  color="blue", label="in",  animated=True, drawstyle="steps-mid", lw=config.PLOT_LINE_WIDTH)
+        self.line_ch2_out, = self.ax2.plot(self.ch2_out[-buffer_size:], color="red",  label="out", animated=True, drawstyle="steps-mid", lw=config.PLOT_LINE_WIDTH)
         self._lines_ax1 = (self.line_ch1_in, self.line_ch1_out)
         self._lines_ax2 = (self.line_ch2_in, self.line_ch2_out)
+        # (line, channel index, direction) -- for the show/width settings.
+        self._traces = ((self.line_ch1_in, 0, "in"), (self.line_ch1_out, 0, "out"),
+                        (self.line_ch2_in, 1, "in"), (self.line_ch2_out, 1, "out"))
 
         # In-axes label, not a title, to avoid reopening the inter-plot gap
         # we close below. Static, so blitting keeps it.
@@ -139,6 +143,7 @@ class DualPlot:
         # View settings as of the last full draw -- see refresh(). Blitting
         # only redraws line artists, so changes here need a full draw().
         self._last_time_rate = config.ECG_SAMPLING_RATE
+        self._last_traces = None    # (show ch1, show ch2, line width)
         self._last_ylim = (config.PLOT_MIN, config.PLOT_MAX)
         self._last_buffer_size = buffer_size
         self._last_grid = (config.PLOT_GRID, config.PLOT_GRID_MODE)
@@ -155,6 +160,26 @@ class DualPlot:
     def _format_time_tick(x, _pos):
         rate = config.ECG_SAMPLING_RATE
         return f"{x / rate:.2f}" if rate > 0 else ""
+
+    @staticmethod
+    def _shown(ch_index, direction):
+        mode = (config.PLOT_SHOW_CH1, config.PLOT_SHOW_CH2)[ch_index]
+        return mode == "both" or mode == direction
+
+    def _apply_traces(self):
+        """Visibility, width and legend from config. Legend lives in the
+        cached blit background, so the caller must follow with a full draw."""
+        for line, ch, direction in self._traces:
+            line.set_visible(self._shown(ch, direction))
+            line.set_linewidth(config.PLOT_LINE_WIDTH)
+        self._dirty = True      # a just-shown trace needs its data pushed
+        for ax, lines in ((self.ax1, self._lines_ax1), (self.ax2, self._lines_ax2)):
+            shown = [l for l in lines if l.get_visible()]
+            if shown:
+                ax.legend(handles=shown, loc="upper right", fontsize=8,
+                          framealpha=0.8)
+            elif ax.get_legend() is not None:
+                ax.get_legend().remove()
 
     def _apply_drawstyle(self):
         """Pick steps-mid or plain lines from the axes' current pixel width.
@@ -330,10 +355,14 @@ class DualPlot:
         off_in  = self._trigger_offset(self.ch1_in)
         off_out = self._trigger_offset(self.ch1_out)
         # Convert to volts only here, right before the line data is set.
-        self.line_ch1_in.set_ydata(adc_sim.to_volts(self.ch1_in[off_in:off_in + n]))
-        self.line_ch2_in.set_ydata(adc_sim.to_volts(self.ch2_in[off_in:off_in + n]))
-        self.line_ch1_out.set_ydata(adc_sim.to_volts(self.ch1_out[off_out:off_out + n]))
-        self.line_ch2_out.set_ydata(adc_sim.to_volts(self.ch2_out[off_out:off_out + n]))
+        for line, ch, direction in self._traces:
+            if not line.get_visible():
+                continue
+            buf, off = {
+                (0, "in"): (self.ch1_in, off_in), (1, "in"): (self.ch2_in, off_in),
+                (0, "out"): (self.ch1_out, off_out), (1, "out"): (self.ch2_out, off_out),
+            }[(ch, direction)]
+            line.set_ydata(adc_sim.to_volts(buf[off:off + n]))
         self._dirty = False
 
     def dump_buffers(self, out_dir=None):
@@ -477,18 +506,25 @@ class DualPlot:
 
     def refresh(self):
         self._apply_drawstyle()
-        self.sync()
+        with prof.span("sync"):
+            self.sync()
         # Driven from here (not its own timer), since this is already a
         # main-thread tick; self-skips when nothing new arrived.
-        self.signal_control_panel.poll_board()
-        # Re-derived every frame, not just on click, so a click that didn't
-        # land never leaves a stale label the user would trust.
-        self.signal_control_panel.poll_state()
+        with prof.span("poll"):
+            self.signal_control_panel.poll_board()
+            self.signal_control_panel.poll_state()
         canvas = self.fig.canvas
 
         # Live-editable but baked into the cached blit background -- any
         # change needs one full canvas.draw() to show and re-cache.
         needs_full_draw = False
+
+        traces = (config.PLOT_SHOW_CH1, config.PLOT_SHOW_CH2,
+                  config.PLOT_LINE_WIDTH)
+        if traces != self._last_traces:
+            self._last_traces = traces
+            self._apply_traces()
+            needs_full_draw = True
 
         time_rate = config.ECG_SAMPLING_RATE
         if time_rate != self._last_time_rate:
@@ -529,16 +565,18 @@ class DualPlot:
             canvas.draw()
             return
 
-        canvas.restore_region(self._bg1)
-        for line in self._lines_ax1:
-            self.ax1.draw_artist(line)
-        canvas.blit(self.ax1.bbox)
+        with prof.span("blit"):
+            canvas.restore_region(self._bg1)
+            for line in self._lines_ax1:
+                self.ax1.draw_artist(line)
+            canvas.blit(self.ax1.bbox)
 
-        canvas.restore_region(self._bg2)
-        for line in self._lines_ax2:
-            self.ax2.draw_artist(line)
-        canvas.blit(self.ax2.bbox)
+            canvas.restore_region(self._bg2)
+            for line in self._lines_ax2:
+                self.ax2.draw_artist(line)
+            canvas.blit(self.ax2.bbox)
 
         # flush_events() keeps the window responsive; plt.pause() did the
         # same plus a redundant redraw.
-        canvas.flush_events()
+        with prof.span("flush"):
+            canvas.flush_events()

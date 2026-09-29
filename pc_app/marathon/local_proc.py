@@ -7,6 +7,7 @@ import time
 
 import config
 import pipelines
+import prof
 import runctl
 from pipelines import has_implementations, label, new_state, resolve
 from sched import RateScheduler
@@ -108,7 +109,8 @@ def local_thread(plot_in_q, plot_out_q, stop_event):
             schedule.hold(now)
 
         if config.SEND_ENABLED and schedule.due(now):
-            ch1, ch2 = generate_ecg_chunk(counter)
+            with prof.span("gen"):
+                ch1, ch2 = generate_ecg_chunk(counter)
             try:
                 plot_in_q.put_nowait((ch1, ch2))
             except queue.Full:
@@ -119,8 +121,10 @@ def local_thread(plot_in_q, plot_out_q, stop_event):
             if config.RECEIVE_ENABLED:
                 # process_channel owns dispatch/state-reset/error-handling
                 # so this and net.py's substitution can't drift apart.
-                out1 = process_channel(ch1, 0, states[0])
-                out2 = process_channel(ch2, 1, states[1])
+                with prof.span("proc1"):
+                    out1 = process_channel(ch1, 0, states[0])
+                with prof.span("proc2"):
+                    out2 = process_channel(ch2, 1, states[1])
                 try:
                     plot_out_q.put_nowait((out1, out2))
                 except queue.Full:

@@ -126,6 +126,7 @@ GUI_SECTIONS = (
     ("Plot bar", (
         "PLOT_MIN", "PLOT_MAX", "PLOT_BUFFER", "FRAME_RATE",
         "PLOT_TRIGGER", "PLOT_TRIGGER_LEVEL",
+        "PLOT_SHOW_CH1", "PLOT_SHOW_CH2", "PLOT_LINE_WIDTH",
         "PLOT_GRID", "PLOT_GRID_MODE", "PLOT_HSPACE",
         "PLOT_STEPS_MIN_PX", "UI_POLL_RATE",
     )),
@@ -1411,6 +1412,9 @@ class PlotControlPanel:
         self._trigger_level = V(S, lambda: str(config.PLOT_TRIGGER_LEVEL))
         self._grid_on = V(B, lambda: bool(config.PLOT_GRID))
         self._grid_mode = V(S, lambda: config.PLOT_GRID_MODE)
+        self._line_width = V(S, lambda: f"{config.PLOT_LINE_WIDTH:g}")
+        self._show = [V(S, lambda: config.PLOT_SHOW_CH1),
+                      V(S, lambda: config.PLOT_SHOW_CH2)]
 
         # Two groups (buttons right, fields fill the rest), not one grid
         # row: in one grid, a narrow window used to clip the Apply button
@@ -1471,6 +1475,22 @@ class PlotControlPanel:
         col = self._entry_h(fields, col, "Level", self._trigger_level,
                                      self._apply_trigger)
 
+        for n, var in enumerate(self._show, start=1):
+            ttk.Label(fields, text=f"Ch{n}").grid(row=0, column=col,
+                                                  sticky="w", padx=(0, 3))
+            box = ttk.Combobox(fields, textvariable=var, width=5,
+                               values=list(config.PLOT_SHOW_CHOICES),
+                               state="readonly")
+            box.grid(row=0, column=col + 1, sticky="w", padx=(0, 8))
+            _Tooltip(box, f"Which of channel {n}'s traces to draw: in (blue), "
+                          f"out (red) or both.")
+            col += 2
+        self._commits.append(self._apply_show)
+        col = self._entry_h(fields, col, "Width", self._line_width,
+                            self._apply_line_width, width=5,
+                            help_text="Trace thickness in points. 0.8 is "
+                                      "thin, 1.5 is matplotlib's default.")
+
         # Writes the on-screen window of all four traces to a CSV under
         # build/logs/, with the settings that produced them.
         self._dump_button = ttk.Button(buttons, text="Log buffer",
@@ -1507,7 +1527,8 @@ class PlotControlPanel:
         # Same pending-change marker as the signal panel.
         for var in (self._plot_min, self._plot_max, self._plot_buffer,
                     self._frame_rate, self._trigger_on, self._trigger_level,
-                    self._grid_on, self._grid_mode):
+                    self._grid_on, self._grid_mode, self._line_width,
+                    *self._show):
             var.trace_add("write", lambda *_: self._mark_dirty())
         self._dirty = False
         _Tooltip(apply_btn,
@@ -1605,6 +1626,23 @@ class PlotControlPanel:
         self._trigger_level.set(f"{level:g}")
         config.PLOT_TRIGGER_LEVEL = level
 
+    def _apply_line_width(self):
+        try:
+            value = float(self._line_width.get())
+        except ValueError:
+            value = config.PLOT_LINE_WIDTH
+        value = min(max(value, 0.1), 5.0)
+        self._line_width.set(f"{value:g}")
+        config.PLOT_LINE_WIDTH = value
+
+    def _apply_show(self):
+        for n, var in enumerate(self._show, start=1):
+            mode = var.get()
+            if mode not in config.PLOT_SHOW_CHOICES:
+                mode = getattr(config, f"PLOT_SHOW_CH{n}")
+                var.set(mode)
+            setattr(config, f"PLOT_SHOW_CH{n}", mode)
+
     def _apply_grid(self):
         config.PLOT_GRID = bool(self._grid_on.get())
         mode = self._grid_mode.get()
@@ -1648,7 +1686,7 @@ class PlotControlPanel:
             value = int(self._frame_rate.get())
         except ValueError:
             value = config.FRAME_RATE
-        value = max(1, min(value, 60))  # 60fps cap avoids a CPU hog; see
-                                         # config.py's FRAME_RATE comment.
+        value = max(1, min(value, 240))  # ~5 ms/frame, so 240 is a full core;
+                                          # match SEND_RATE (64 default).
         self._frame_rate.set(str(value))
         config.FRAME_RATE = value
