@@ -23,8 +23,11 @@
 # 2. The following source(s) files that were local or imported into the original project.
 #    (Please see the '$orig_proj_dir' and '$origin_dir' variable setting below at the start of the script)
 #
+#    "$origin_dir/hdl/axil_pkg.vhd"
 #    "$origin_dir/hdl/fpga_top.v"
-#    "$origin_dir/hdl/my_axi.v"
+#    "$origin_dir/hdl/my_axi.vhd"
+#    "$origin_dir/hdl/csr_reg.vhd"
+#    "$origin_dir/hdl/csr_top.vhd"
 #    "$origin_dir/hdl/axi_processing_ch1.vhd"
 #    "$origin_dir/hdl/axi_processing_ch2.vhd"
 #    "$origin_dir/hdl/axi_tdm_filter.vhd"
@@ -40,8 +43,12 @@
 proc checkRequiredFiles { origin_dir} {
   set status true
   set files [list \
+ "[file normalize "$origin_dir/hdl/user_top.vhd"]"\
+ "[file normalize "$origin_dir/hdl/axil_pkg.vhd"]"\
  "[file normalize "$origin_dir/hdl/fpga_top.v"]"\
- "[file normalize "$origin_dir/hdl/my_axi.v"]"\
+ "[file normalize "$origin_dir/hdl/my_axi.vhd"]"\
+ "[file normalize "$origin_dir/hdl/csr_reg.vhd"]"\
+ "[file normalize "$origin_dir/hdl/csr_top.vhd"]"\
  "[file normalize "$origin_dir/hdl/axi_processing_ch1.vhd"]"\
  "[file normalize "$origin_dir/hdl/axi_processing_ch2.vhd"]"\
  "[file normalize "$origin_dir/hdl/axi_tdm_filter.vhd"]"\
@@ -179,18 +186,21 @@ if {[string equal [get_filesets -quiet sources_1] ""]} {
 
 # Set 'sources_1' fileset object
 set obj [get_filesets sources_1]
-# Import local files from the original project
+# Add local files as remote references -- hdl/ is the single source of
+# truth, so edits there are live in an existing project, not just after a
+# clean rebuild. Do not switch this back to import_files.
 set files [list \
  [file normalize "${origin_dir}/hdl/fpga_top.v" ]\
- [file normalize "${origin_dir}/hdl/my_axi.v" ]\
+ [file normalize "${origin_dir}/hdl/axil_pkg.vhd" ]\
+ [file normalize "${origin_dir}/hdl/user_top.vhd" ]\
+ [file normalize "${origin_dir}/hdl/my_axi.vhd" ]\
+ [file normalize "${origin_dir}/hdl/csr_reg.vhd" ]\
+ [file normalize "${origin_dir}/hdl/csr_top.vhd" ]\
  [file normalize "${origin_dir}/hdl/axi_processing_ch1.vhd" ]\
  [file normalize "${origin_dir}/hdl/axi_processing_ch2.vhd" ]\
  [file normalize "${origin_dir}/hdl/axi_tdm_filter.vhd" ]\
 ]
-set imported_files ""
-foreach f $files {
-  lappend imported_files [import_files -fileset sources_1 $f]
-}
+add_files -norecurse -fileset sources_1 $files
 
 # Set 'sources_1' fileset file properties for remote files
 # None
@@ -249,27 +259,51 @@ set obj [get_filesets utils_1]
 
 # Adding sources referenced in BDs, if not already added
 if { [get_files [list fpga_top.v]] == "" } {
-  import_files -quiet -fileset sources_1 $origin_dir/hdl/fpga_top.v
+  add_files -quiet -norecurse -fileset sources_1 $origin_dir/hdl/fpga_top.v
 }
-if { [get_files [list my_axi.v]] == "" } {
-  import_files -quiet -fileset sources_1 $origin_dir/hdl/my_axi.v
+if { [get_files [list my_axi.vhd]] == "" } {
+  add_files -quiet -norecurse -fileset sources_1 $origin_dir/hdl/my_axi.vhd
+}
+if { [get_files [list csr_reg.vhd]] == "" } {
+  add_files -quiet -norecurse -fileset sources_1 $origin_dir/hdl/csr_reg.vhd
+}
+if { [get_files [list csr_top.vhd]] == "" } {
+  add_files -quiet -norecurse -fileset sources_1 $origin_dir/hdl/csr_top.vhd
 }
 if { [get_files [list axi_processing_ch1.vhd]] == "" } {
-  import_files -quiet -fileset sources_1 $origin_dir/hdl/axi_processing_ch1.vhd
+  add_files -quiet -norecurse -fileset sources_1 $origin_dir/hdl/axi_processing_ch1.vhd
 }
 if { [get_files [list axi_processing_ch2.vhd]] == "" } {
-  import_files -quiet -fileset sources_1 $origin_dir/hdl/axi_processing_ch2.vhd
+  add_files -quiet -norecurse -fileset sources_1 $origin_dir/hdl/axi_processing_ch2.vhd
 }
 if { [get_files [list axi_tdm_filter.vhd]] == "" } {
-  import_files -quiet -fileset sources_1 $origin_dir/hdl/axi_tdm_filter.vhd
+  add_files -quiet -norecurse -fileset sources_1 $origin_dir/hdl/axi_tdm_filter.vhd
+}
+if { [get_files [list axil_pkg.vhd]] == "" } {
+  add_files -quiet -norecurse -fileset sources_1 $origin_dir/hdl/axil_pkg.vhd
+}
+if { [get_files [list user_top.vhd]] == "" } {
+  add_files -quiet -norecurse -fileset sources_1 $origin_dir/hdl/user_top.vhd
 }
 
-
-# Block design (proc cr_bd_CoraZ7_Eth) -- kept in its own file so a GUI
-# re-export is a straight overwrite, no manual merge. See bd_CoraZ7_Eth.tcl.
+# Block design -- kept in its own file so a GUI re-export is a straight
+# overwrite, no manual merge:
+#   write_bd_tcl -force [file normalize $origin_dir/bd_CoraZ7_Eth.tcl]
+# That script defines create_root_design and invokes it in its own MAIN
+# FLOW section, so sourcing it is enough -- no separate call here.
+# The module ref it needs (user_top, plus every file it instantiates:
+# csr_top, csr_reg, my_axi, axi_tdm_filter, axi_processing_ch1/ch2) is added
+# above, which is why that block must stay ahead of this line.
+#
+# Never source bd_CoraZ7_Eth.tcl on its own. write_bd_tcl emits a fallback
+# that runs "create_project project_1 myproj" when no project is open, so
+# sourcing it from a bare `vivado -mode tcl` or the GUI start screen
+# scatters a throwaway project into Vivado's cwd. Reached from here it is
+# unreachable, since create_project above has already run.
 source [file normalize "${origin_dir}/bd_CoraZ7_Eth.tcl"]
 
-cr_bd_CoraZ7_Eth ""
+close_bd_design CoraZ7_Eth
+
 set_property REGISTERED_WITH_MANAGER "1" [get_files CoraZ7_Eth.bd ] 
 set_property SYNTH_CHECKPOINT_MODE "Hierarchical" [get_files CoraZ7_Eth.bd ] 
 
@@ -619,3 +653,4 @@ move_dashboard_gadget -name {drc_1} -row 2 -col 0
 move_dashboard_gadget -name {timing_1} -row 0 -col 1
 move_dashboard_gadget -name {utilization_2} -row 1 -col 1
 move_dashboard_gadget -name {methodology_1} -row 2 -col 1
+

@@ -39,33 +39,17 @@
 #include "lwip/init.h"
 #include "lwip/inet.h"
 #include "lwip/sys.h"
-#include "lwip_comm_client_raw.h"
-#include "rx_ring.h"   /* rx_ring_used() -- ring occupancy for the metrics packet */
+#include "tcp_link.h"
+#include "comm_process.h"
+#include "comm_stats.h"
+#include "comm_log.h"
+#include "rx_ring.h"   /* rx_ring_used() -- peak ring occupancy for the metrics packet */
 #include "mono_clock.h"
+#include "board_config.h"
 
-/* Compact count for the [STATS] line: 873, 2.4k, 130k, 1.2M. Integer only
-   -- this toolchain's libc build has no float printf. */
-static void fmt_si(char *out, size_t n, uint32_t v)
-{
-    if (v < 1000U)
-        snprintf(out, n, "%lu", (unsigned long)v);
-    else if (v < 10000U)
-        snprintf(out, n, "%lu.%luk", (unsigned long)(v / 1000U),
-                                     (unsigned long)((v % 1000U) / 100U));
-    else if (v < 1000000U)
-        snprintf(out, n, "%luk", (unsigned long)(v / 1000U));
-    else
-        snprintf(out, n, "%lu.%luM", (unsigned long)(v / 1000000U),
-                                     (unsigned long)((v % 1000000U) / 100000U));
-}
-
-/* IPv4 + static IP only (LWIP_IPV6/LWIP_DHCP off, lwipopts.h). Fixed at
-   192.168.1.10 -- the PC relay identifies the board by source IP, so it
-   can't float. Stock template's IPv6/DHCP branches were dropped, not kept
-   as dead #if blocks. */
-#define DEFAULT_IP_ADDRESS	"192.168.1.10"
-#define DEFAULT_IP_MASK	  	"255.255.255.0"
-#define DEFAULT_GW_ADDRESS	"192.168.1.1"
+/* IPv4 + static IP only (LWIP_IPV6/LWIP_DHCP off, lwipopts.h), addresses in
+   board_config.h. Stock template's IPv6/DHCP branches were dropped, not
+   kept as dead #if blocks. */
 
 extern volatile int TcpFastTmrFlag;
 extern volatile int TcpSlowTmrFlag;
@@ -90,17 +74,17 @@ static void assign_default_ip(ip_addr_t *ip, ip_addr_t *mask, ip_addr_t *gw)
 {
 	int err;
 
-	xil_printf("\rConfiguring default IP %s \r\n", DEFAULT_IP_ADDRESS);
+	xil_printf("\rConfiguring default IP %s \r\n", BOARD_IP_ADDRESS);
 
-	err = inet_aton(DEFAULT_IP_ADDRESS, ip);
+	err = inet_aton(BOARD_IP_ADDRESS, ip);
 	if (!err)
 		xil_printf("\rInvalid default IP address: %d\r\n", err);
 
-	err = inet_aton(DEFAULT_IP_MASK, mask);
+	err = inet_aton(BOARD_IP_MASK, mask);
 	if (!err)
 		xil_printf("\rInvalid default IP MASK: %d\r\n", err);
 
-	err = inet_aton(DEFAULT_GW_ADDRESS, gw);
+	err = inet_aton(BOARD_GW_ADDRESS, gw);
 	if (!err)
 		xil_printf("\rInvalid default gateway address: %d\r\n", err);
 }
@@ -109,9 +93,7 @@ int main(void)
 {
 	struct netif *netif;
     
-	/* the mac address of the board. this should be unique per board */
-	unsigned char mac_ethernet_address[] = {
-		0x00, 0x0a, 0x35, 0x00, 0x01, 0x02 };
+	unsigned char mac_ethernet_address[] = BOARD_MAC_ADDRESS;
 
 	netif = &server_netif;
 
@@ -196,66 +178,9 @@ int main(void)
       uint32_t elapsed = (uint32_t)(stats_now - last_stats_ms);
 
       if (elapsed >= 1000) {
-        /* Normalize by the window that actually elapsed (it overshoots
-           1000ms by a varying amount) rather than assuming exactly 1000ms,
-           so rates stay accurate regardless of jitter. Integer fixed-point
-           throughout (no float printf here); *1000 done in 64 bits since
-           bytes-per-window*1000 overflows 32 bits above ~4 MB/s. */
-        uint32_t rx_pps = (uint32_t)(((uint64_t)packets_rx * 1000ULL) / elapsed);
-        uint32_t tx_pps = (uint32_t)(((uint64_t)packets_tx * 1000ULL) / elapsed);
-        uint32_t rx_sps = (uint32_t)(((uint64_t)samples_rx * 1000ULL) / elapsed);
-
-        uint64_t rx_bps = ((uint64_t)bytes_rx * 1000ULL) / elapsed;
-        uint32_t rx_mb_int  = (uint32_t)(rx_bps / 1000000ULL);
-        uint32_t rx_mb_frac = (uint32_t)((rx_bps % 1000000ULL) / 10000ULL);
-
-        uint32_t loops_ps = (uint32_t)(((uint64_t)loop_passes * 1000ULL) / elapsed);
-
-        /* Only anomalies get printed -- TX==RX and window==1000ms are the
-           normal case, so their absence told you nothing; presence is now
-           the signal. Every byte here is charged against comm_log's 512 B/s
-           budget (comm_log.c), ~1 us/byte at 115200 baud. */
-        char extra[40];
-        int  epos = 0;
-        extra[0] = '\0';
-        if (tx_pps != rx_pps)
-            epos += snprintf(extra + epos, sizeof(extra) - epos,
-                             " tx=%lu", (unsigned long)tx_pps);
-        if (elapsed < 990U || elapsed > 1010U)
-            snprintf(extra + epos, sizeof(extra) - epos,
-                     " w=%lu", (unsigned long)elapsed);
-
-        char smp[12], lps[12];
-        fmt_si(smp, sizeof(smp), rx_sps);
-        fmt_si(lps, sizeof(lps), loops_ps);
-
-        comm_log("[S] %lup/s %s smp/s %lu.%02luMB/s loop %s/s%s\r\n",
-                 (unsigned long)rx_pps, smp,
-                 (unsigned long)rx_mb_int, (unsigned long)rx_mb_frac,
-                 lps, extra);
-
-        /* Same numbers as [S] above, pushed to the GUI -- built once here so
-           console and PC can't disagree. Sent before counters clear. */
-        packet_metrics_t m;
-        m.uptime_s  = (uint32_t)(stats_now / 1000ULL);
-        m.window_ms = elapsed;
-        m.rx_pps    = rx_pps;
-        m.tx_pps    = tx_pps;
-        m.rx_sps    = rx_sps;
-        m.rx_bps    = (uint32_t)rx_bps;
-        m.loop_ps   = loops_ps;
-        m.ring_used = rx_ring_used();
-        m.ring_peak = ring_peak;
-        m.resyncs   = comm_resyncs;
-        comm_latency_take(&m.lat_min_us, &m.lat_mean_us, &m.lat_max_us);
-        comm_send_metrics(&m);
+        comm_stats_report(stats_now, elapsed, loop_passes, ring_peak);
 
         ring_peak = 0;
-
-        packets_rx = packets_tx = 0;
-        samples_rx = samples_tx = 0;
-        bytes_rx   = bytes_tx   = 0;
-
         loop_passes = 0;
         last_stats_ms = stats_now;
       }

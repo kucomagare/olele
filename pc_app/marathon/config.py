@@ -27,11 +27,10 @@ WIRE_FULL_SCALE = _WIRE_MAX
 WINDOW_W = 1280
 WINDOW_H = 540
 
-# Y-axis display range (a view), independent of ECG_AMPLITUDE (how much of
-# the wire range the generated signal actually occupies). Defaults to full
-# wire range; narrow to zoom.
-PLOT_MIN = 0
-PLOT_MAX = _WIRE_MAX
+# Y-axis display range, volts (adc_sim.to_volts() domain). Must match
+# VREF_MINUS/VREF_PLUS below (defined later, so literals not references).
+PLOT_MIN = 0.0
+PLOT_MAX = 3.3
 
 # "scope": most recent PLOT_BUFFER raw samples, full waveform detail --
 # right choice at real ECG rates, shows P-QRS-T shape.
@@ -54,10 +53,9 @@ PLOT_MODE = "scope"
 # to slide within; displayed length/x-axis/PLOT_BUFFER meaning unchanged.
 PLOT_TRIGGER = False
 
-# Trigger level, fraction of PLOT_MIN..PLOT_MAX. 0.6 sits above baseline but
-# below the R peak so it fires once per beat; lower if free-running, raise
-# if it locks onto a T wave or noise.
-PLOT_TRIGGER_LEVEL = 0.6
+# Trigger level, absolute volts (was a fraction of PLOT_MIN/MAX). 2.0V
+# sits above baseline (V_OFFSET_CH1) but below the R-wave peak by default.
+PLOT_TRIGGER_LEVEL = 2.0
 
 # History kept behind the displayed window, x PLOT_BUFFER. 2 lets the
 # trigger slide back up to one full window to find a crossing.
@@ -73,6 +71,15 @@ PLOT_GRID_MODE = "normal"
 PLOT_GRID_MODES = ("normal", "fine")
 PLOT_GRID_FINE_DIVISIONS = 5
 PLOT_HSPACE = 0.07
+
+# Which traces each channel's axes draw: "in", "out" or "both". Live-editable
+# from the plot bar; SAT keeps its own per-window copy of the choice.
+PLOT_SHOW_CHOICES = ("both", "in", "out")
+PLOT_SHOW_CH1 = "both"
+PLOT_SHOW_CH2 = "both"
+
+# Trace thickness in points (matplotlib's own default is 1.5). Live-editable.
+PLOT_LINE_WIDTH = 0.8
 
 # The live app deliberately has NO spectrum view -- a rolling-buffer FFT
 # costs every frame forever for a measurement that doesn't need to be live.
@@ -108,7 +115,8 @@ UI_POLL_RATE = 100.0
 # frozen at import). Real CPU cost even with blitting -- measured
 # 2026-08-17 pre-blitting: dropping to 2 took CPU 103%->36% with zero
 # throughput change (that was firmware-bound) -- a UI-smoothness knob only.
-FRAME_RATE = 60
+# Keep equal to SEND_RATE: else some frames get 2 chunks and the scroll jerks.
+FRAME_RATE = 32
 
 # SEND_RATE x CHUNK_SIZE is the effective ECG playback rate pulled from the
 # simulated buffer (see ECG_SAMPLING_RATE) -- both live-editable, these are
@@ -125,8 +133,8 @@ SEND_RATE = 64
 # packet per DMA buffer, so this is the frames-per-packet count.
 CHUNK_SIZE = 16
 
-# Mirrors MAX_SAMPLES in tcp_server_app.cpp / MAX_PAYLOAD_SAMPLES in
-# lwip_comm_client_raw.c -- the wire/firmware hard ceiling. Panel clamps to
+# Mirrors MAX_SAMPLES in tcp_server_app.cpp / MAX_PAYLOAD_SAMPLES in the
+# firmware's board_config.h -- the wire/firmware hard ceiling. Panel clamps to
 # this; also a multiple of 8.
 MAX_CHUNK_SIZE = 2000
 
@@ -171,7 +179,7 @@ ECG_TI = (-70, -15, 0, 15, 100)     # P,Q,R,S,T angular positions (degrees).
 ECG_AI = (1.2, -5, 30, -7.5, 0.75)  # P,Q,R,S,T relative heights. Scaling all
                                      # five uniformly has no effect (nk
                                      # renormalizes overall amplitude --
-                                     # that's what ECG_AMPLITUDE is for);
+                                     # that's what ECG_AMPLITUDE_MV is for);
                                      # changing ratios reshapes the waveform.
 ECG_BI = (0.25, 0.1, 0.1, 0.1, 0.4) # P,Q,R,S,T widths (Gaussian sigma).
 ECG_RANDOM_SEED = 1         # Base seed; ch2 uses +1 so channels stay
@@ -184,95 +192,102 @@ ECG_RANDOM_SEED = 1         # Base seed; ch2 uses +1 so channels stay
 # when toggled back on.
 ECG_ENABLED = True
 
-# DC offset, fraction of wire full scale, applied after ECG_AMPLITUDE. 0.0
-# centres the signal; a fraction (not raw counts) so it means the same
-# thing on marathon's 32-bit wire as sizif's 16-bit one. Pushing the band
-# outside [0, max] clips via _scale_to_wire()'s existing rounding guard.
-ECG_OFFSET = 0.0
-ECG_OFFSET_MIN = -0.5
-ECG_OFFSET_MAX = 0.5
-
 # Colored noise added on top of the simulated ECG via nk.signal_noise()
 # (distinct from ECG_NOISE, which is baked into ecg_simulate itself) -- see
 # signal_gen.py's _simulate_raw(). Five layers ((1/f)**beta: -2 violet,
 # -1 blue, 0 white, 1 pink, 2 brown), any combination enabled at its own
-# level. Each _LEVEL is that layer's peak-to-peak as a fraction of the
-# *clean* ECG's own peak-to-peak (measured once before noise is added, so
-# levels don't compound). Per channel, decorrelated (distinct random_state
-# per layer per channel) -- models e.g. one bad electrode rather than
-# uniform noise everywhere.
+# level. _LEVEL_MV is that layer's peak-to-peak in mV, absolute. Per
+# channel, decorrelated -- models e.g. one bad electrode.
 ECG_NOISE_VIOLET_CH1_ENABLED = False
-ECG_NOISE_VIOLET_CH1_LEVEL = 0.1
+ECG_NOISE_VIOLET_CH1_LEVEL_MV = 0.15
 ECG_NOISE_VIOLET_CH2_ENABLED = False
-ECG_NOISE_VIOLET_CH2_LEVEL = 0.1
+ECG_NOISE_VIOLET_CH2_LEVEL_MV = 0.15
 ECG_NOISE_BLUE_CH1_ENABLED = False
-ECG_NOISE_BLUE_CH1_LEVEL = 0.1
+ECG_NOISE_BLUE_CH1_LEVEL_MV = 0.15
 ECG_NOISE_BLUE_CH2_ENABLED = False
-ECG_NOISE_BLUE_CH2_LEVEL = 0.1
+ECG_NOISE_BLUE_CH2_LEVEL_MV = 0.15
 ECG_NOISE_WHITE_CH1_ENABLED = False
-ECG_NOISE_WHITE_CH1_LEVEL = 0.1
+ECG_NOISE_WHITE_CH1_LEVEL_MV = 0.15
 ECG_NOISE_WHITE_CH2_ENABLED = False
-ECG_NOISE_WHITE_CH2_LEVEL = 0.1
+ECG_NOISE_WHITE_CH2_LEVEL_MV = 0.15
 ECG_NOISE_PINK_CH1_ENABLED = False
-ECG_NOISE_PINK_CH1_LEVEL = 0.1
+ECG_NOISE_PINK_CH1_LEVEL_MV = 0.15
 ECG_NOISE_PINK_CH2_ENABLED = False
-ECG_NOISE_PINK_CH2_LEVEL = 0.1
+ECG_NOISE_PINK_CH2_LEVEL_MV = 0.15
 ECG_NOISE_BROWN_CH1_ENABLED = False
-ECG_NOISE_BROWN_CH1_LEVEL = 0.1
+ECG_NOISE_BROWN_CH1_LEVEL_MV = 0.15
 ECG_NOISE_BROWN_CH2_ENABLED = False
-ECG_NOISE_BROWN_CH2_LEVEL = 0.1
+ECG_NOISE_BROWN_CH2_LEVEL_MV = 0.15
 
-# Four independent sine-wave interference generators (powerline hum, other
-# discrete periodic artifacts vs. colored noise's broadband randomness) --
-# see signal_gen.py's _sine_contribution(). Per-channel enable/freq/phase/
-# level: real interference doesn't arrive identically on both leads, and a
-# phase difference is exactly what a rejection scheme must cope with; set
-# both channels the same for common-mode interference. Evaluated at
-# t = sample_index / ECG_SAMPLING_RATE (ECG time base), so frequency is
-# exact regardless of playback speed. _LEVEL is a fraction of ch1's clean
-# ECG peak-to-peak (same convention as noise _LEVEL above, so equal levels
-# = equal amplitudes on both channels). _PHASE in degrees.
+# Four independent sine-wave interference generators (mains hum etc), see
+# signal_gen.py's _sine_contribution(). Per-channel enable/freq/phase/
+# level; set both channels the same for common-mode. _LEVEL_MV is that
+# generator's own peak-to-peak in mV, absolute. _PHASE in degrees.
 ECG_SINE1_CH1_ENABLED = False
 ECG_SINE1_CH1_FREQ = 0.02     # Hz -- EU/UK/most-of-world mains
 ECG_SINE1_CH1_PHASE = 0.0     # degrees
-ECG_SINE1_CH1_LEVEL = 0.25
+ECG_SINE1_CH1_LEVEL_MV = 0.375
 ECG_SINE1_CH2_ENABLED = False
 ECG_SINE1_CH2_FREQ = 0.02
 ECG_SINE1_CH2_PHASE = 0.0
-ECG_SINE1_CH2_LEVEL = 0.25
+ECG_SINE1_CH2_LEVEL_MV = 0.375
 
 ECG_SINE2_CH1_ENABLED = False
 ECG_SINE2_CH1_FREQ = 30.0     # Hz -- US/North America mains
 ECG_SINE2_CH1_PHASE = 0.0
-ECG_SINE2_CH1_LEVEL = 0.15
+ECG_SINE2_CH1_LEVEL_MV = 0.225
 ECG_SINE2_CH2_ENABLED = False
 ECG_SINE2_CH2_FREQ = 30.0
 ECG_SINE2_CH2_PHASE = 0.0
-ECG_SINE2_CH2_LEVEL = 0.15
+ECG_SINE2_CH2_LEVEL_MV = 0.225
 
 ECG_SINE3_CH1_ENABLED = False
 ECG_SINE3_CH1_FREQ = 50.0    # Hz -- 2nd harmonic of 50, what a notch at the
 ECG_SINE3_CH1_PHASE = 0.0     # fundamental alone leaves behind
-ECG_SINE3_CH1_LEVEL = 0.20
+ECG_SINE3_CH1_LEVEL_MV = 0.3
 ECG_SINE3_CH2_ENABLED = False
 ECG_SINE3_CH2_FREQ = 50.0
 ECG_SINE3_CH2_PHASE = 0.0
-ECG_SINE3_CH2_LEVEL = 0.20
+ECG_SINE3_CH2_LEVEL_MV = 0.3
 
 ECG_SINE4_CH1_ENABLED = False
 ECG_SINE4_CH1_FREQ = 150.0    # Hz -- 3rd harmonic, and pipe2's LP corner
 ECG_SINE4_CH1_PHASE = 0.0
-ECG_SINE4_CH1_LEVEL = 0.05
+ECG_SINE4_CH1_LEVEL_MV = 0.075
 ECG_SINE4_CH2_ENABLED = False
 ECG_SINE4_CH2_FREQ = 150.0
 ECG_SINE4_CH2_PHASE = 0.0
-ECG_SINE4_CH2_LEVEL = 0.05
+ECG_SINE4_CH2_LEVEL_MV = 0.075
 
-# Fraction (0.0-1.0) of the wire dtype's range the signal's peak-to-peak
-# amplitude occupies, centered at the midpoint -- see signal_gen.py's
-# _scale_to_wire(). Tied to the wire dtype's own max so it can never
-# produce an out-of-range packet value.
-ECG_AMPLITUDE = 0.75
+# Peak-to-peak amplitude of the CLEAN ECG waveform, mV -- physical now,
+# not a fraction of the wire range. ~1-2 mV is a typical limb-lead R-wave.
+ECG_AMPLITUDE_MV = 1.5
+
+# ---------------------------------------------------------------------------
+# ADC front end: per-channel gain + offset, then one shared ADC
+# ---------------------------------------------------------------------------
+# Per-channel instrumentation-amp gain, then a level-shift into the ADC's
+# window, then ONE shared ADC (marathon's real hardware is a single ADC
+# multiplexed via TDM). See adc_sim.py for the transfer function.
+GAIN_CH1 = 1000.0
+GAIN_CH2 = 1000.0
+
+# DC bias added after gain, volts -- lifts the bipolar signal into
+# [VREF_MINUS, VREF_PLUS]. Per channel; default centres a 0..VREF_PLUS window.
+V_OFFSET_CH1 = 1.65
+V_OFFSET_CH2 = 1.65
+
+# The ADC's input range, volts. VREF_MINUS need not be 0. Must stay
+# matching PLOT_MIN/MAX above.
+VREF_PLUS = 3.3
+VREF_MINUS = 0.0
+
+# ADC resolution, bits -- sweep live to see quantisation noise appear.
+# Right-aligned in the 32-bit wire slot (see adc_sim.py): a lower value
+# here shrinks the sample's numeric magnitude too, not just its precision.
+ADC_BITS = 24
+ADC_BITS_MIN = 8
+ADC_BITS_MAX = 32
 
 # ---------------------------------------------------------------------------
 # Session control: what happens at launch, and where the processing runs
@@ -339,8 +354,8 @@ def all_local():
 #         integer arithmetic, what it WILL do as RTL -- the translated one.
 # A pipeline with only one implementation (iir is hardware-only) falls back
 # to that one rather than to passthrough.
-CH_PIPE = ["iir", "iir"]
-CH_IMPL = ["manual", "manual"]
+CH_PIPE = ["pipe2", "pipe2"]
+CH_IMPL = ["scipy", "manual"]
 
 # alpha = 1/2**LOCAL_SHIFT for the local filter -- local mode's counterpart
 # of the board's shift register, separate since there's no hardware to
@@ -405,16 +420,15 @@ SAT_PEAK_FMIN = 1.0         # ignore bins below this when locating the peak
 SAT_PHASE = "off"        # phase column: off / out-in / raw
 SAT_PHASE_UNITS = "deg"     # deg / phase ms / group ms; both views
 # Bins more than this many dB below the strongest bin (in EITHER trace) are
-# left out of the phase column -- "the phase of noise is noise". A GUI
-# field, separate from SAT_CAPTURE_GATE_DB below (that one gates the
-# response view's gain overlay, an unrelated feature with its own reasons
-# to want a different threshold).
+# left out of the capture view's phase column -- "the phase of noise is
+# noise". A GUI field (Phase gate). The response view's gain overlay has its
+# own filters instead (SAT_OVERLAY_* and the two hide fields).
 SAT_PHASE_GATE_DB = -60.0
 
 # The reference-model comparison. None leaves a channel unscored, and a
 # None shift takes whatever the board's register held, from the sidecar.
-SAT_MODEL = None
-SAT_MODEL_CH2 = None
+SAT_MODEL = "pipe2:scipy"
+SAT_MODEL_CH2 = "pipe2:manual"
 SAT_SHIFT = None
 SAT_SETTLE = 200            # samples skipped before scoring, for the
                             # model's zeroed start the board did not have
@@ -424,7 +438,8 @@ SAT_SETTLE = 200            # samples skipped before scoring, for the
 # pipeline's manual/scipy pair, which is the comparison the view exists for.
 SAT_CURVES = ()
 
-SAT_RESPONSE_SIZE = 16384       # excitation period, samples
+SAT_RESPONSE_SIZE = 0           # excitation period, samples; 0 = the loaded
+                                # capture's own length
 SAT_RESPONSE_POINTS = 96        # tones in the excitation, log-spaced
 SAT_RESPONSE_DRIVE = 0.25       # peak excitation as a fraction of full scale
 SAT_RESPONSE_AVERAGES = 4       # realisations averaged, fresh phases each
@@ -437,6 +452,17 @@ SAT_SHOW_DESIGN = False         # thin black curve straight from the sos
 SAT_OVERLAY = "none"            # capture on the response axes:
                                 # none / gain / spectrum / both
 SAT_OVERLAY_CH = "both"         # ch1 / ch2 / both
+# Bands the capture's own gain overlay is grouped into. Depends on the
+# recording only -- not on the test signal's Tones, band or Rate -- so the
+# overlay is one fixed view of the real data to compare the curves against.
+# "max" = one band per FFT bin (samples/2 - 1), the most the recording holds.
+SAT_OVERLAY_POINTS = "max"
+# Overlay phase is unwrapped only across bands at least this many dB (input
+# power, vs the strongest band) above nothing -- a band the input barely
+# excites has a random phase, and unwrapping through thousands of those
+# drifts the whole curve by many turns. Weaker bands are still drawn, each on
+# the branch nearest the trend, so they scatter within +-180 deg of it.
+SAT_OVERLAY_UNWRAP_DB = -60.0
 
 # --- what the dropdowns offer ---------------------------------------------
 SAT_VIEW_CHOICES = ("capture", "response")
@@ -445,6 +471,17 @@ SAT_PHASE_CHOICES = ("off", "out-in", "raw")
 SAT_PHASE_UNIT_CHOICES = ("deg", "phase ms", "group ms")
 SAT_OVERLAY_CHOICES = ("none", "gain", "spectrum", "both")
 SAT_OVERLAY_CH_CHOICES = ("ch1", "ch2", "both")
+# Response view axes, chosen independently: frequency log/linear, amplitude
+# dB (a logarithmic axis) / attenuation (a LINEAR axis in times cut: 0 = none,
+# -20 dB plots at -10, -40 dB at -100). Phase is unaffected.
+SAT_FREQ_SCALE = "log"
+SAT_AMP_SCALE = "dB"
+# The capture view's spectra take the same choices, set separately (a spectrum
+# is a LEVEL: attenuation is then times below full scale, 0 = full scale).
+SAT_CAPTURE_FREQ_SCALE = "linear"
+SAT_CAPTURE_AMP_SCALE = "dB"
+SAT_FREQ_SCALE_CHOICES = ("log", "linear")
+SAT_AMP_SCALE_CHOICES = ("dB", "attenuation")
 
 # The lowest frequency a measurement can reach is one bin, rate/size, so the
 # only way down the frequency axis is a longer period. At 2 kHz the top of
@@ -478,12 +515,6 @@ SAT_RESPONSE_SETTLE_PERIODS = 2
 # and is never windowed, so nothing correlates its neighbours and the maths
 # is exact there (verified against an analytic exp(-2i*pi*f*tau)).
 SAT_PHASE_GROUP_LAG = 4
-
-# How far below the strongest part of a trace a band may sit before it is
-# dropped from the phase and capture-gain measurements. Past this the answer
-# is noise over noise -- a confident line through the part of the capture
-# that says the least, which is worse than a gap.
-SAT_CAPTURE_GATE_DB = -60.0
 
 # --- appearance -----------------------------------------------------------
 SAT_FIGSIZE = (13, 7)

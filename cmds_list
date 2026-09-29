@@ -32,10 +32,6 @@ Both also use TCP port 5001, so stop one before starting the other.
   source ./bootenv.sh              Once per shell, before anything else.
                                    SOURCE it, do not execute it.
 
-  ./proj net apply                 Once per BOOT, before any throughput
-                                   work. Kernel state, so a reboot loses
-                                   it and the stream goes unstable again.
-
   ./proj run                       Flash + run the board, and start the
                                    PC app. Needs "proj build" done first.
                                    --no-board / --no-pc do just one half.
@@ -122,35 +118,32 @@ Both also use TCP port 5001, so stop one before starting the other.
 
 
 -----------------------------------------------------------------------
- NETWORK TUNING / DIAGNOSIS
+ NETWORK DIAGNOSIS (tuning is optional, not needed since 2026-09-15)
 -----------------------------------------------------------------------
 
-  ./proj net apply       Apply. Needs sudo. Existing TCP connections do
-                         NOT pick it up -- restart the PC side after.
-  ./proj net show        Is it applied? No sudo needed. FIRST THING TO
-                         CHECK if throughput is fluctuating.
-  ./proj net loss        Live packet loss to the board. ~0.85% is the
-                         known standing figure; rising means you are
-                         pushing past what the board's rx path absorbs.
-  ./proj net revert      Remove the flags.
+  ./proj net loss        Live packet loss to the board, no sudo. ~0.4%
+                         is normal; rising means you are pushing past
+                         what the board's rx path absorbs.
+  ./proj net apply|show|revert
+                         Optional host route tuning (needs sudo). The
+                         firmware fixes made it unnecessary; untuned
+                         1700x800 streams as well as tuned.
 
 
 -----------------------------------------------------------------------
  WHEN SOMETHING LOOKS WRONG -- CHECK IN THIS ORDER
 -----------------------------------------------------------------------
 
-  1. ./proj net show               untuned after a reboot is the most
-                                   likely cause of "it fluctuates"
-  2. ./proj pc logs                the client line tells you WHERE:
+  1. ./proj pc logs                the client line tells you WHERE:
                                      (dropped N late)  -> local PC stall
                                      (N send-stalls)   -> far end pushing
                                                           back
                                    both near zero and still short of the
                                    setpoint -> the limit is elsewhere
-  3. the board's PuTTY console     [E] lines, and the [S] rate; tx= shows
+  2. the board's PuTTY console     [E] lines, and the [S] rate; tx= shows
                                    only when it differs from rx, and +/-1
                                    is just a window-boundary straddle
-  4. ./proj net loss               link health
+  3. ./proj net loss               link health
 
-  Note the board has been the innocent party in every problem so far.
-  Suspect the PC and the link first.
+  If the board goes silent (no [S] lines, no ping), don't power-cycle
+  first: read the CPU state over JTAG (2026-09-15 crash was found that way).

@@ -54,7 +54,7 @@ set(USER_COMPILE_WARNINGS_INHIBIT_ALL )
 # -----------------------------------------
 
 # Optimization level   "-O0" [None] , "-O1" [Optimize] , "-O2" [Optimize More], "-O3" [Optimize Most] or "-Os" [Optimize Size]
-set(USER_COMPILE_OPTIMIZATION_LEVEL -O0)
+set(USER_COMPILE_OPTIMIZATION_LEVEL -O2)
 
 # Other flags related to optimization
 set(USER_COMPILE_OPTIMIZATION_OTHER_FLAGS )
@@ -116,7 +116,7 @@ set(USER_LINK_DIRECTORIES
 
 # -----------------------------------------
 
-set(USER_LINKER_SCRIPT "${CMAKE_SOURCE_DIR}/lscript.ld")
+set(USER_LINKER_SCRIPT "${CMAKE_SOURCE_DIR}/build_config/lscript.ld")
 
 # Add linker options to be passed, they will be added as extra linker options
 # Example : adding -s will pass -s to the linker.

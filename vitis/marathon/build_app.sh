@@ -31,15 +31,16 @@ if [[ ! -d "$EXPORT_DIR" ]]; then
     exit 1
 fi
 
-# Packet format header (generated from shared/$VARIANT/packet_format.json), picked
-# up via the plain #include "packet_format.h" in lwip_comm_client_raw.c
-# (quoted includes search the including file's own directory first).
-python3 "$SHARED_DIR/gen_packet_header.py" "$SHARED_DIR/$VARIANT/packet_format.json" "$APP_DIR/packet_format.h"
-
 export PATH="${ARM_GNU_TOOLCHAIN_BIN:-/tools/Xilinx/Vitis/2023.2/gnu/aarch32/lin/gcc-arm-none-eabi/bin}:$PATH"
 CMAKE_BIN="${SYSTEM_CMAKE:-cmake}"
 
 rm -rf "$BUILD_DIR"
+
+# Packet format header, generated from shared/$VARIANT/packet_format.json into
+# the build tree (never the source tree). Must come after the rm -rf above;
+# CMakeLists.txt puts build/app/generated/ on the include path.
+mkdir -p "$BUILD_DIR/generated"
+python3 "$SHARED_DIR/gen_packet_header.py" "$SHARED_DIR/$VARIANT/packet_format.json" "$BUILD_DIR/generated/packet_format.h"
 "$CMAKE_BIN" -S "$APP_DIR" -B "$BUILD_DIR" -G "Unix Makefiles" \
   -DCMAKE_TOOLCHAIN_FILE="$EXPORT_DIR/cortexa9_toolchain.cmake" \
   -DCMAKE_SPECS_FILE="$EXPORT_DIR/Xilinx.spec" \

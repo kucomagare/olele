@@ -6,18 +6,9 @@
 #   ./proj net revert      remove the flags this script adds
 #   ./proj net loss        measure the current packet loss to the board
 #
-# WHY THIS EXISTS
-# ---------------
-# Streaming marathon at 1400 pkt/s x 960 samples (16.1 MB/s each way) was
-# wildly unstable without this: the board saw anywhere from 196 to 1997 pkt/s
-# and the Python client logged continuous "dropped late" and "send-stalls".
-# With it, both ends lock to 1399-1401 pkt/s and 16.13 MB/s with zero drops
-# and zero stalls. Measured 2026-08-26.
-#
-# The settings are kernel state, not files, so they are LOST ON REBOOT. Re-run
-# this after every boot before doing any throughput work -- otherwise the
-# fluctuation comes back and looks like a board or firmware problem, which is
-# exactly the wrong place to go looking.
+# OPTIONAL. Tuning was once required, but it only masked two firmware bugs
+# fixed on 2026-09-15. Untuned 1700x800 now streams as well as tuned. `loss`
+# is still a handy link check. Settings are kernel state, lost on reboot.
 #
 # WHAT IT ACTUALLY DOES, AND WHAT IT DELIBERATELY DOES NOT
 # --------------------------------------------------------

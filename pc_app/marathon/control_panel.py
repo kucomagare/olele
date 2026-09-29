@@ -24,11 +24,11 @@ import signal_gen
 # working directory the app was launched from.
 SAT_SCRIPT = Path(__file__).resolve().parent / "sat.py"
 
-# Wire sample range, for the labels that quote it. Derived from the packet
-# format (and so from shared/marathon/packet_format.json) rather than written
-# into the text -- which is how the Amplitude field came to advertise sizif's
-# uint16 range long after marathon moved to 32-bit slots.
-_WIRE_MAX = int(np.iinfo(packet_format.CH1_DTYPE).max)
+# Wire width, for the ADC-bits tooltip that quotes it. Derived from the
+# packet format (and so from shared/marathon/packet_format.json) rather
+# than written into the text -- which is how the Amplitude field once came
+# to advertise sizif's uint16 range long after marathon moved to 32-bit
+# slots.
 _WIRE_BITS = np.dtype(packet_format.CH1_DTYPE).itemsize * 8
 
 
@@ -126,6 +126,7 @@ GUI_SECTIONS = (
     ("Plot bar", (
         "PLOT_MIN", "PLOT_MAX", "PLOT_BUFFER", "FRAME_RATE",
         "PLOT_TRIGGER", "PLOT_TRIGGER_LEVEL",
+        "PLOT_SHOW_CH1", "PLOT_SHOW_CH2", "PLOT_LINE_WIDTH",
         "PLOT_GRID", "PLOT_GRID_MODE", "PLOT_HSPACE",
         "PLOT_STEPS_MIN_PX", "UI_POLL_RATE",
     )),
@@ -138,7 +139,7 @@ GUI_SECTIONS = (
     )),
     ("Signal / Basic tab", (
         "SEND_RATE", "CHUNK_SIZE", "ECG_HEART_RATE", "ECG_SAMPLING_RATE",
-        "ECG_AMPLITUDE", "ECG_OFFSET", "ECG_ENABLED",
+        "ECG_AMPLITUDE_MV", "ECG_ENABLED",
         "SEND_ENABLED", "RECEIVE_ENABLED",
     )),
     ("Signal / Waveform tab", (
@@ -149,10 +150,14 @@ GUI_SECTIONS = (
         "ECG_NOISE",
     ) + tuple(f"ECG_NOISE_{colour}_CH{ch}_{field}"
               for colour in ("VIOLET", "BLUE", "WHITE", "PINK", "BROWN")
-              for ch in (1, 2) for field in ("ENABLED", "LEVEL")
+              for ch in (1, 2) for field in ("ENABLED", "LEVEL_MV")
               ) + tuple(f"ECG_SINE{n}_CH{ch}_{field}"
               for n in range(1, 5) for ch in (1, 2)
-              for field in ("ENABLED", "FREQ", "PHASE", "LEVEL"))),
+              for field in ("ENABLED", "FREQ", "PHASE", "LEVEL_MV"))),
+    ("Signal / ADC tab", (
+        "GAIN_CH1", "GAIN_CH2", "V_OFFSET_CH1", "V_OFFSET_CH2",
+        "VREF_PLUS", "VREF_MINUS", "ADC_BITS",
+    )),
 )
 
 # Which config names each Defaults button restores -- same ownership map,
@@ -259,7 +264,7 @@ class SignalControlPanel:
 
         notebook = ttk.Notebook(self.frame)
         tabs = {}
-        for name in ("Basic", "Waveform", "Noise", "Board", "Local"):
+        for name in ("Basic", "Waveform", "Noise", "ADC", "Board", "Local"):
             tab = guiutil.ScrollFrame(notebook)
             notebook.add(tab.outer, text=name)
             tabs[name] = tab.body
@@ -289,6 +294,7 @@ class SignalControlPanel:
         self._build_basic_tab(tabs["Basic"])
         self._build_waveform_tab(tabs["Waveform"])
         self._build_noise_tab(tabs["Noise"])
+        self._build_adc_tab(tabs["ADC"])
         self._build_board_tab(tabs["Board"])
         self._build_local_tab(tabs["Local"])
 
@@ -658,8 +664,13 @@ class SignalControlPanel:
         except ValueError:
             value = getattr(config, attr)
         nyquist = config.ECG_SAMPLING_RATE / 2.0
-        if value > 0:
-            value = min(value, nyquist)
+        if value >= nyquist:
+            # The pipelines skip any stage at or above Nyquist, so a clamp
+            # TO Nyquist would silently turn the stage off. Stay just below.
+            clamped = float(f"{nyquist * 0.99:.4g}")
+            print(f"[local] {attr} {value:g} Hz is at/above Nyquist "
+                  f"({nyquist:g} Hz) -- using {clamped:g} Hz")
+            value = clamped
         var.set(f"{value:g}")
         setattr(config, attr, value)
 
@@ -768,9 +779,8 @@ class SignalControlPanel:
         self._chunk_size = V(S, lambda: str(config.CHUNK_SIZE))
         self._heart_rate = V(S, lambda: str(config.ECG_HEART_RATE))
         self._ecg_sample_rate = V(S, lambda: str(config.ECG_SAMPLING_RATE))
-        self._amplitude = V(S, lambda: f"{config.ECG_AMPLITUDE * 100:g}")
+        self._amplitude = V(S, lambda: f"{config.ECG_AMPLITUDE_MV:g}")
         self._receive_enabled = V(B, lambda: config.RECEIVE_ENABLED)
-        self._offset = V(S, lambda: f"{config.ECG_OFFSET * 100:g}")
         self._ecg_enabled = V(B, lambda: config.ECG_ENABLED)
 
         row = 0
@@ -793,24 +803,14 @@ class SignalControlPanel:
                           help_text="Native rate the ECG waveform itself is generated at. This "
                                      "is what the plot's Time axis is calculated from -- not "
                                      "Send rate/Chunk size, which only control delivery speed.")
-        # Range read from the wire dtype (packet_format.json), not written
-        # into the text -- it once quoted sizif's 16-bit range after
-        # marathon moved to 32-bit slots. Can't go stale again this way.
-        row = self._entry(frame, row, "Amplitude (% of FS)", self._amplitude,
+        row = self._entry(frame, row, "Amplitude (mV pp)", self._amplitude,
                           self._apply_amplitude,
-                          help_text=f"How much of the wire format's range "
-                                     f"({_WIRE_BITS}-bit, 0-{_WIRE_MAX}) the signal's "
-                                     f"peak-to-peak occupies, centered at the midpoint. "
-                                     f"A pure wire/display scale -- it does not change "
-                                     f"the waveform's shape, only its size.")
-
-        row = self._entry(frame, row, "Offset (% of FS)", self._offset,
-                          self._apply_offset,
-                          help_text="DC shift of the whole signal, as a percentage of the wire "
-                                     "format's full scale. 0 centres it; +25 puts it at "
-                                     "three-quarter scale. Independent of Amplitude -- this moves "
-                                     "the band, that sizes it. Push it far enough and the signal "
-                                     "clips at the range ends.")
+                          help_text="Peak-to-peak amplitude of the CLEAN ECG waveform, "
+                                     "in mV (~1-2 mV is a typical limb-lead R-wave). "
+                                     "Combines with the Noise tab's levels (also mV) "
+                                     "and then the ADC tab's per-channel Gain/Offset "
+                                     "and shared VREF/ADC bits before becoming a wire "
+                                     "code -- see the ADC tab.")
 
         ecg_on = ttk.Checkbutton(frame, text="ECG enabled", variable=self._ecg_enabled)
         self._commits.append(self._apply_ecg_enabled)
@@ -818,7 +818,7 @@ class SignalControlPanel:
         ecg_on.grid(row=row, column=0, columnspan=2, sticky="w", pady=2)
         _Tooltip(ecg_on, "Off removes the heartbeat and leaves only the noise and sine "
                           "generators from the Noise tab, at exactly the levels they already "
-                          "had -- their amplitudes stay referenced to the ECG's own swing, so "
+                          "had -- their levels are absolute mV now, independent of the ECG, so "
                           "nothing jumps when you toggle this.")
         row += 1
 
@@ -919,7 +919,7 @@ class SignalControlPanel:
 
         # One row per colour, both channels: independent, sum together --
         # see signal_gen's _simulate_raw().
-        for col, head in enumerate(("", "Ch1", "%", "Ch2", "%")):
+        for col, head in enumerate(("", "Ch1", "mV", "Ch2", "mV")):
             ttk.Label(frame, text=head, foreground="#777",
                       font=("", 8)).grid(row=row, column=col, sticky="w")
         row += 1
@@ -934,7 +934,7 @@ class SignalControlPanel:
                     tk.BooleanVar, lambda a=enabled_attr: getattr(config, a))
                 level_var = self._cvar(
                     tk.StringVar,
-                    lambda a=level_attr: f"{getattr(config, a) * 100:g}")
+                    lambda a=level_attr: f"{getattr(config, a):g}")
                 self._noise_vars[(colour, ch)] = (enabled_var, level_var)
 
                 cb = ttk.Checkbutton(frame, variable=enabled_var)
@@ -952,12 +952,11 @@ class SignalControlPanel:
                 self._cell(frame, row, 2 + (ch - 1) * 2, level_var,
                            lambda a=level_attr, v=level_var:
                            self._apply_noise_level(a, v),
-                           f"{name} noise on ch{ch}, as a percentage of the "
-                           f"ECG's OWN peak-to-peak swing -- so a given "
-                           f"percentage means the same thing regardless of "
-                           f"heart rate, Amplitude, or how many other layers "
-                           f"are active. Only applies while its box is "
-                           f"ticked.")
+                           f"{name} noise on ch{ch}, peak-to-peak in mV -- an "
+                           f"absolute physical quantity now, picked up at the "
+                           f"electrode alongside the ECG (so it's amplified by "
+                           f"the same ADC-tab Gain). Only applies while its "
+                           f"box is ticked.")
             row += 1
 
         ttk.Separator(frame, orient="horizontal").grid(
@@ -975,7 +974,7 @@ class SignalControlPanel:
             ttk.Label(frame, text=f"Sine {n}", font=("", 9, "bold")).grid(
                 row=row, column=0, columnspan=5, sticky="w", pady=(6, 0))
             row += 1
-            for col, head in enumerate(("", "Hz", "deg", "%")):
+            for col, head in enumerate(("", "Hz", "deg", "mV")):
                 ttk.Label(frame, text=head, foreground="#777",
                           font=("", 8)).grid(row=row, column=col, sticky="w")
             row += 1
@@ -991,7 +990,7 @@ class SignalControlPanel:
                 phase_var = V(tk.StringVar,
                               lambda a=phase_attr: f"{getattr(config, a):g}")
                 level_var = V(tk.StringVar,
-                              lambda a=level_attr: f"{getattr(config, a) * 100:g}")
+                              lambda a=level_attr: f"{getattr(config, a):g}")
                 self._sine_vars[(n, ch)] = (enabled_var, freq_var,
                                             phase_var, level_var)
 
@@ -1022,12 +1021,137 @@ class SignalControlPanel:
                 self._cell(frame, row, 3, level_var,
                            lambda a=level_attr, v=level_var:
                            self._apply_sine_level(a, v),
-                           f"Amplitude as a percentage of the clean ECG's own "
-                           f"peak-to-peak (same convention as the noise levels "
-                           f"above), referenced to ch1 for both channels so "
-                           f"equal numbers mean equal amplitudes. Only applies "
+                           f"Peak-to-peak amplitude in mV, absolute -- equal "
+                           f"numbers on both channels mean equal amplitude "
+                           f"with no shared reference needed. Only applies "
                            f"while Ch{ch} is ticked.")
                 row += 1
+
+    # ADC tab: per-channel gain/offset, then the shared ADC's VREF/bits.
+    def _build_adc_tab(self, frame):
+        V, S = self._cvar, tk.StringVar
+        self._gain_ch1 = V(S, lambda: f"{config.GAIN_CH1:g}")
+        self._gain_ch2 = V(S, lambda: f"{config.GAIN_CH2:g}")
+        self._v_offset_ch1 = V(S, lambda: f"{config.V_OFFSET_CH1:g}")
+        self._v_offset_ch2 = V(S, lambda: f"{config.V_OFFSET_CH2:g}")
+        self._vref_plus = V(S, lambda: f"{config.VREF_PLUS:g}")
+        self._vref_minus = V(S, lambda: f"{config.VREF_MINUS:g}")
+        self._adc_bits = V(S, lambda: str(config.ADC_BITS))
+
+        row = 0
+        ttk.Label(frame, text="Per-channel analog front end", font=("", 9, "bold")
+                  ).grid(row=row, column=0, columnspan=2, sticky="w", pady=(0, 4))
+        row += 1
+        row = self._entry(frame, row, "Gain Ch1 (V/V)", self._gain_ch1,
+                          self._apply_gain_ch1,
+                          help_text="Analog gain applied to channel 1's physical "
+                                     "signal (ECG + noise + sine, already summed in "
+                                     "mV) before the ADC -- models an "
+                                     "instrumentation-amplifier stage. Noise/sine are "
+                                     "picked up at the electrode too, so they're "
+                                     "amplified along with the ECG.")
+        row = self._entry(frame, row, "Gain Ch2 (V/V)", self._gain_ch2,
+                          self._apply_gain_ch2,
+                          help_text="Same as Gain Ch1, independent per channel.")
+        row = self._entry(frame, row, "Offset Ch1 (V)", self._v_offset_ch1,
+                          self._apply_v_offset_ch1,
+                          help_text="DC bias added AFTER Gain Ch1, volts -- lifts "
+                                     "the amplified (naturally bipolar) signal into "
+                                     "the shared ADC's [VREF-, VREF+] input window.")
+        row = self._entry(frame, row, "Offset Ch2 (V)", self._v_offset_ch2,
+                          self._apply_v_offset_ch2,
+                          help_text="Same as Offset Ch1, independent per channel.")
+
+        ttk.Separator(frame, orient="horizontal").grid(
+            row=row, column=0, columnspan=2, sticky="ew", pady=6)
+        row += 1
+        ttk.Label(frame, text="Shared ADC", font=("", 9, "bold")
+                  ).grid(row=row, column=0, columnspan=2, sticky="w", pady=(0, 4))
+        row += 1
+        row = self._entry(frame, row, "VREF+ (V)", self._vref_plus,
+                          self._apply_vref_plus,
+                          help_text="The ADC's positive reference -- the highest "
+                                     "voltage it can digitize. One shared ADC for "
+                                     "both channels (matches marathon's real "
+                                     "hardware, a single physical ADC multiplexed "
+                                     "via TDM). Anything above this clips, exactly "
+                                     "like real hardware -- also the plot's Y-axis "
+                                     "upper bound.")
+        row = self._entry(frame, row, "VREF- (V)", self._vref_minus,
+                          self._apply_vref_minus,
+                          help_text="The ADC's negative reference. Need not be 0 -- "
+                                     "some real ADCs reference below ground. Must "
+                                     "stay below VREF+.")
+        row = self._entry(frame, row, "ADC bits", self._adc_bits,
+                          self._apply_adc_bits,
+                          help_text=f"ADC resolution. Real ECG AFEs top out around "
+                                     f"24-bit (TI ADS1298); the wire slot stays "
+                                     f"{_WIRE_BITS}-bit regardless, right-aligned -- "
+                                     f"the upper bits are zero, so a lower value here "
+                                     f"also gives a numerically smaller sample, not "
+                                     f"just a less precise one. Sweep this down live "
+                                     f"to see quantisation noise appear on the plot.")
+
+    def _apply_gain_ch1(self):
+        try:
+            value = float(self._gain_ch1.get())
+        except ValueError:
+            value = config.GAIN_CH1
+        value = max(0.0, value)
+        self._gain_ch1.set(f"{value:g}")
+        config.GAIN_CH1 = value
+
+    def _apply_gain_ch2(self):
+        try:
+            value = float(self._gain_ch2.get())
+        except ValueError:
+            value = config.GAIN_CH2
+        value = max(0.0, value)
+        self._gain_ch2.set(f"{value:g}")
+        config.GAIN_CH2 = value
+
+    def _apply_v_offset_ch1(self):
+        try:
+            value = float(self._v_offset_ch1.get())
+        except ValueError:
+            value = config.V_OFFSET_CH1
+        self._v_offset_ch1.set(f"{value:g}")
+        config.V_OFFSET_CH1 = value
+
+    def _apply_v_offset_ch2(self):
+        try:
+            value = float(self._v_offset_ch2.get())
+        except ValueError:
+            value = config.V_OFFSET_CH2
+        self._v_offset_ch2.set(f"{value:g}")
+        config.V_OFFSET_CH2 = value
+
+    def _apply_vref_plus(self):
+        try:
+            value = float(self._vref_plus.get())
+        except ValueError:
+            value = config.VREF_PLUS
+        value = max(value, config.VREF_MINUS + 1e-6)
+        self._vref_plus.set(f"{value:g}")
+        config.VREF_PLUS = value
+
+    def _apply_vref_minus(self):
+        try:
+            value = float(self._vref_minus.get())
+        except ValueError:
+            value = config.VREF_MINUS
+        value = min(value, config.VREF_PLUS - 1e-6)
+        self._vref_minus.set(f"{value:g}")
+        config.VREF_MINUS = value
+
+    def _apply_adc_bits(self):
+        try:
+            value = int(self._adc_bits.get())
+        except ValueError:
+            value = config.ADC_BITS
+        value = max(config.ADC_BITS_MIN, min(value, config.ADC_BITS_MAX))
+        self._adc_bits.set(str(value))
+        config.ADC_BITS = value
 
     def _cell(self, frame, row, col, var, on_commit, help_text=None):
         """Bare entry at a grid position (no own label, for tables with
@@ -1068,10 +1192,10 @@ class SignalControlPanel:
         try:
             value = float(var.get())
         except ValueError:
-            value = getattr(config, attr) * 100
-        value = max(0.0, min(value, 200.0))
+            value = getattr(config, attr)
+        value = max(0.0, min(value, 50.0))  # mV; ceiling just catches typos
         var.set(f"{value:g}")
-        setattr(config, attr, value / 100.0)
+        setattr(config, attr, value)
 
     def _apply_noise_enabled(self, attr, var):
         setattr(config, attr, var.get())
@@ -1080,11 +1204,10 @@ class SignalControlPanel:
         try:
             value = float(var.get())
         except ValueError:
-            value = getattr(config, attr) * 100
-        value = max(0.0, min(value, 200.0))  # up to 2x ECG ptp per layer,
-                                              # for a noise-dominated signal
+            value = getattr(config, attr)
+        value = max(0.0, min(value, 50.0))  # mV; ceiling just catches typos
         var.set(f"{value:g}")
-        setattr(config, attr, value / 100.0)
+        setattr(config, attr, value)
 
     def _update_rate_status(self):
         effective = config.SEND_RATE * config.CHUNK_SIZE
@@ -1147,10 +1270,10 @@ class SignalControlPanel:
         try:
             value = float(self._amplitude.get())
         except ValueError:
-            value = config.ECG_AMPLITUDE * 100
-        value = max(0.0, min(value, 100.0))
+            value = config.ECG_AMPLITUDE_MV
+        value = max(0.0, value)
         self._amplitude.set(f"{value:g}")
-        config.ECG_AMPLITUDE = value / 100.0
+        config.ECG_AMPLITUDE_MV = value
 
     # Waveform tab apply methods
     def _apply_method(self, _event=None):
@@ -1216,15 +1339,6 @@ class SignalControlPanel:
     def _toggle_pause(self):
         config.SEND_ENABLED = not config.SEND_ENABLED
         self.poll_state()
-
-    def _apply_offset(self):
-        try:
-            value = float(self._offset.get()) / 100.0
-        except ValueError:
-            value = config.ECG_OFFSET
-        value = max(config.ECG_OFFSET_MIN, min(config.ECG_OFFSET_MAX, value))
-        self._offset.set(f"{value * 100:g}")
-        config.ECG_OFFSET = value
 
     def _apply_ecg_enabled(self):
         config.ECG_ENABLED = bool(self._ecg_enabled.get())
@@ -1303,6 +1417,9 @@ class PlotControlPanel:
         self._trigger_level = V(S, lambda: str(config.PLOT_TRIGGER_LEVEL))
         self._grid_on = V(B, lambda: bool(config.PLOT_GRID))
         self._grid_mode = V(S, lambda: config.PLOT_GRID_MODE)
+        self._line_width = V(S, lambda: f"{config.PLOT_LINE_WIDTH:g}")
+        self._show = [V(S, lambda: config.PLOT_SHOW_CH1),
+                      V(S, lambda: config.PLOT_SHOW_CH2)]
 
         # Two groups (buttons right, fields fill the rest), not one grid
         # row: in one grid, a narrow window used to clip the Apply button
@@ -1318,15 +1435,14 @@ class PlotControlPanel:
             row=0, column=col, sticky="w", padx=(0, 16))
         col += 1
 
-        # Wider than the rest: full scale is 10 digits (4294967295), an
-        # 8-char box would show a truncated, wrong-looking number.
-        ylim_help = (f"Y-axis range, in RAW SAMPLE COUNTS -- not millivolts "
-                     f"and not a percentage. Full scale is 0.."
-                     f"{config.WIRE_FULL_SCALE}, and the ECG sits around "
-                     f"mid-scale ({config.WIRE_FULL_SCALE // 2}), so a "
-                     f"small range like 0..100 is valid but puts the trace "
-                     f"far off screen. Max must be greater than min or the "
-                     f"pair is rejected.")
+        ylim_help = (f"Y-axis range, in VOLTS -- the ADC's own input voltage "
+                     f"(see the Signal panel's ADC tab), not raw wire codes "
+                     f"and not millivolts. No wire code can ever represent a "
+                     f"voltage outside [VREF-, VREF+] "
+                     f"({config.VREF_MINUS:g}..{config.VREF_PLUS:g} by "
+                     f"default), so that's the full range; narrow it to "
+                     f"zoom. Max must be greater than min or the pair is "
+                     f"rejected.")
         col = self._entry_h(fields, col, "Y min", self._plot_min,
                             self._apply_plot_ylim, width=11,
                             help_text=ylim_help)
@@ -1364,6 +1480,22 @@ class PlotControlPanel:
         col = self._entry_h(fields, col, "Level", self._trigger_level,
                                      self._apply_trigger)
 
+        for n, var in enumerate(self._show, start=1):
+            ttk.Label(fields, text=f"Ch{n}").grid(row=0, column=col,
+                                                  sticky="w", padx=(0, 3))
+            box = ttk.Combobox(fields, textvariable=var, width=5,
+                               values=list(config.PLOT_SHOW_CHOICES),
+                               state="readonly")
+            box.grid(row=0, column=col + 1, sticky="w", padx=(0, 8))
+            _Tooltip(box, f"Which of channel {n}'s traces to draw: in (blue), "
+                          f"out (red) or both.")
+            col += 2
+        self._commits.append(self._apply_show)
+        col = self._entry_h(fields, col, "Width", self._line_width,
+                            self._apply_line_width, width=5,
+                            help_text="Trace thickness in points. 0.8 is "
+                                      "thin, 1.5 is matplotlib's default.")
+
         # Writes the on-screen window of all four traces to a CSV under
         # build/logs/, with the settings that produced them.
         self._dump_button = ttk.Button(buttons, text="Log buffer",
@@ -1400,7 +1532,8 @@ class PlotControlPanel:
         # Same pending-change marker as the signal panel.
         for var in (self._plot_min, self._plot_max, self._plot_buffer,
                     self._frame_rate, self._trigger_on, self._trigger_level,
-                    self._grid_on, self._grid_mode):
+                    self._grid_on, self._grid_mode, self._line_width,
+                    *self._show):
             var.trace_add("write", lambda *_: self._mark_dirty())
         self._dirty = False
         _Tooltip(apply_btn,
@@ -1492,11 +1625,28 @@ class PlotControlPanel:
             level = float(self._trigger_level.get())
         except ValueError:
             level = config.PLOT_TRIGGER_LEVEL
-        # Clamped inside (0,1), not to the exact edges -- a level sitting
-        # on a limit can never be crossed, so it'd silently free-run.
-        level = min(max(level, 0.01), 0.99)
+        # Clamp strictly inside the rails -- a level ON a rail never crosses.
+        eps = (config.VREF_PLUS - config.VREF_MINUS) * 0.01
+        level = min(max(level, config.VREF_MINUS + eps), config.VREF_PLUS - eps)
         self._trigger_level.set(f"{level:g}")
         config.PLOT_TRIGGER_LEVEL = level
+
+    def _apply_line_width(self):
+        try:
+            value = float(self._line_width.get())
+        except ValueError:
+            value = config.PLOT_LINE_WIDTH
+        value = min(max(value, 0.1), 5.0)
+        self._line_width.set(f"{value:g}")
+        config.PLOT_LINE_WIDTH = value
+
+    def _apply_show(self):
+        for n, var in enumerate(self._show, start=1):
+            mode = var.get()
+            if mode not in config.PLOT_SHOW_CHOICES:
+                mode = getattr(config, f"PLOT_SHOW_CH{n}")
+                var.set(mode)
+            setattr(config, f"PLOT_SHOW_CH{n}", mode)
 
     def _apply_grid(self):
         config.PLOT_GRID = bool(self._grid_on.get())
@@ -1517,13 +1667,13 @@ class PlotControlPanel:
             # wrong; say so, or it reads as the button being broken.
             print(f"[plot] Y min/Y max rejected "
                   f"({self._plot_min.get()!r}, {self._plot_max.get()!r}) -- "
-                  f"need two numbers with max > min; "
-                  f"full scale is 0..{config.WIRE_FULL_SCALE}")
+                  f"need two numbers with max > min, volts; full ADC range "
+                  f"is {config.VREF_MINUS:g}..{config.VREF_PLUS:g}")
             self._plot_min.set(_fmt_limit(config.PLOT_MIN))
             self._plot_max.set(_fmt_limit(config.PLOT_MAX))
             return
-        # Stored as int when integral -- these are sample counts and end
-        # up in the log sidecar's settings snapshot.
+        # Stored as int when integral -- purely cosmetic (no trailing
+        # ".0" for e.g. VREF_MINUS=0) in the log sidecar's settings snapshot.
         config.PLOT_MIN = int(lo) if lo.is_integer() else lo
         config.PLOT_MAX = int(hi) if hi.is_integer() else hi
 
@@ -1541,7 +1691,7 @@ class PlotControlPanel:
             value = int(self._frame_rate.get())
         except ValueError:
             value = config.FRAME_RATE
-        value = max(1, min(value, 60))  # 60fps cap avoids a CPU hog; see
-                                         # config.py's FRAME_RATE comment.
+        value = max(1, min(value, 240))  # ~5 ms/frame, so 240 is a full core;
+                                          # match SEND_RATE (64 default).
         self._frame_rate.set(str(value))
         config.FRAME_RATE = value

@@ -13,9 +13,11 @@ matplotlib.use("TkAgg")
 import matplotlib.pyplot as plt
 from matplotlib.ticker import AutoMinorLocator, FuncFormatter, NullLocator
 
+import adc_sim
 import config
 import guiutil
 import net
+import prof
 from packet_format import CH1_DTYPE, CH2_DTYPE
 from control_panel import GUI_SECTIONS, SignalControlPanel, PlotControlPanel
 
@@ -84,7 +86,8 @@ class DualPlot:
             child.pack(**info)
 
         # Capture buffers are PLOT_CAPTURE_FACTOR x the displayed window, so
-        # the trigger has room to slide the window back to.
+        # the trigger has room to slide the window back to. Raw wire codes;
+        # converted to volts only in sync(), via adc_sim.to_volts().
         self._cap_size = buffer_size * config.PLOT_CAPTURE_FACTOR
         self.ch1_in  = np.zeros(self._cap_size, dtype=CH1_DTYPE)
         self.ch2_in  = np.zeros(self._cap_size, dtype=CH2_DTYPE)
@@ -94,12 +97,15 @@ class DualPlot:
         # steps-mid: each sample is a flat segment, not a slope, so no
         # interpolated value is implied. Starting value only -- see
         # _apply_drawstyle(), which switches per frame by pixel density.
-        self.line_ch1_in,  = self.ax1.plot(self.ch1_in[-buffer_size:],  color="blue", label="in",  animated=True, drawstyle="steps-mid")
-        self.line_ch1_out, = self.ax1.plot(self.ch1_out[-buffer_size:], color="red",  label="out", animated=True, drawstyle="steps-mid")
-        self.line_ch2_in,  = self.ax2.plot(self.ch2_in[-buffer_size:],  color="blue", label="in",  animated=True, drawstyle="steps-mid")
-        self.line_ch2_out, = self.ax2.plot(self.ch2_out[-buffer_size:], color="red",  label="out", animated=True, drawstyle="steps-mid")
+        self.line_ch1_in,  = self.ax1.plot(self.ch1_in[-buffer_size:],  color="blue", label="in",  animated=True, drawstyle="steps-mid", lw=config.PLOT_LINE_WIDTH)
+        self.line_ch1_out, = self.ax1.plot(self.ch1_out[-buffer_size:], color="red",  label="out", animated=True, drawstyle="steps-mid", lw=config.PLOT_LINE_WIDTH)
+        self.line_ch2_in,  = self.ax2.plot(self.ch2_in[-buffer_size:],  color="blue", label="in",  animated=True, drawstyle="steps-mid", lw=config.PLOT_LINE_WIDTH)
+        self.line_ch2_out, = self.ax2.plot(self.ch2_out[-buffer_size:], color="red",  label="out", animated=True, drawstyle="steps-mid", lw=config.PLOT_LINE_WIDTH)
         self._lines_ax1 = (self.line_ch1_in, self.line_ch1_out)
         self._lines_ax2 = (self.line_ch2_in, self.line_ch2_out)
+        # (line, channel index, direction) -- for the show/width settings.
+        self._traces = ((self.line_ch1_in, 0, "in"), (self.line_ch1_out, 0, "out"),
+                        (self.line_ch2_in, 1, "in"), (self.line_ch2_out, 1, "out"))
 
         # In-axes label, not a title, to avoid reopening the inter-plot gap
         # we close below. Static, so blitting keeps it.
@@ -115,7 +121,7 @@ class DualPlot:
             self._style_grid(ax)
             # Engineering suffixes (2.1G) instead of matplotlib's shared
             # "1e9" offset text, which would sit in the gap we closed.
-            ax.yaxis.set_major_formatter(FuncFormatter(self._format_count_tick))
+            ax.yaxis.set_major_formatter(FuncFormatter(self._format_volts_tick))
             # x-data stays the plain buffer index; ticks reinterpret it as
             # time via ECG_SAMPLING_RATE, deliberately not SEND_RATE*CHUNK_SIZE
             # -- each slot is one ECG sample, and ECG time only matches
@@ -137,6 +143,7 @@ class DualPlot:
         # View settings as of the last full draw -- see refresh(). Blitting
         # only redraws line artists, so changes here need a full draw().
         self._last_time_rate = config.ECG_SAMPLING_RATE
+        self._last_traces = None    # (show ch1, show ch2, line width)
         self._last_ylim = (config.PLOT_MIN, config.PLOT_MAX)
         self._last_buffer_size = buffer_size
         self._last_grid = (config.PLOT_GRID, config.PLOT_GRID_MODE)
@@ -153,6 +160,26 @@ class DualPlot:
     def _format_time_tick(x, _pos):
         rate = config.ECG_SAMPLING_RATE
         return f"{x / rate:.2f}" if rate > 0 else ""
+
+    @staticmethod
+    def _shown(ch_index, direction):
+        mode = (config.PLOT_SHOW_CH1, config.PLOT_SHOW_CH2)[ch_index]
+        return mode == "both" or mode == direction
+
+    def _apply_traces(self):
+        """Visibility, width and legend from config. Legend lives in the
+        cached blit background, so the caller must follow with a full draw."""
+        for line, ch, direction in self._traces:
+            line.set_visible(self._shown(ch, direction))
+            line.set_linewidth(config.PLOT_LINE_WIDTH)
+        self._dirty = True      # a just-shown trace needs its data pushed
+        for ax, lines in ((self.ax1, self._lines_ax1), (self.ax2, self._lines_ax2)):
+            shown = [l for l in lines if l.get_visible()]
+            if shown:
+                ax.legend(handles=shown, loc="upper right", fontsize=8,
+                          framealpha=0.8)
+            elif ax.get_legend() is not None:
+                ax.get_legend().remove()
 
     def _apply_drawstyle(self):
         """Pick steps-mid or plain lines from the axes' current pixel width.
@@ -232,12 +259,9 @@ class DualPlot:
             ax.grid(False, which="minor")
 
     @staticmethod
-    def _format_count_tick(y, _pos):
-        """Sample counts as 0 / 1.1G / 2.1G rather than 0..4 over a "1e9"."""
-        for scale, suffix in ((1e9, "G"), (1e6, "M"), (1e3, "k")):
-            if abs(y) >= scale:
-                return f"{y / scale:.3g}{suffix}"
-        return f"{y:.0f}"
+    def _format_volts_tick(y, _pos):
+        """Plain decimal volts -- axis is a small span now, not raw counts."""
+        return f"{y:.3g}V"
 
     def invalidate_view(self):
         """Force the next refresh() to re-apply every view setting, even
@@ -302,15 +326,13 @@ class DualPlot:
         most recent upward crossing of the trigger level with a full window
         left after it (last, not first, since a repeating waveform's phase
         is the same at any crossing). Falls back to the newest window when
-        triggering is off, the range is degenerate, or it never crosses."""
+        triggering is off or it never crosses."""
         newest = self._cap_size - self.buffer_size
         if not config.PLOT_TRIGGER:
             return newest
 
-        lo, hi = config.PLOT_MIN, config.PLOT_MAX
-        if hi <= lo:
-            return newest
-        level = lo + config.PLOT_TRIGGER_LEVEL * (hi - lo)
+        # ref is still raw wire codes -- convert the volts threshold instead.
+        level = adc_sim.from_volts(config.PLOT_TRIGGER_LEVEL)
 
         # float64 avoids the buffers' big-endian wire dtype byte-order/
         # overflow surprises; not a hot path.
@@ -328,14 +350,19 @@ class DualPlot:
         if not self._dirty:
             return
         n = self.buffer_size
-        # One offset per direction (in/out have separate triggers, delayed by
-        # link RTT); ch1/ch2 share a time base, so reuse ch1's offset.
-        off_in  = self._trigger_offset(self.ch1_in)
-        off_out = self._trigger_offset(self.ch1_out)
-        self.line_ch1_in.set_ydata(self.ch1_in[off_in:off_in + n])
-        self.line_ch2_in.set_ydata(self.ch2_in[off_in:off_in + n])
-        self.line_ch1_out.set_ydata(self.ch1_out[off_out:off_out + n])
-        self.line_ch2_out.set_ydata(self.ch2_out[off_out:off_out + n])
+        # One offset for all four: in and out are sample-aligned in the
+        # buffers (net.py/local_proc.py pair them), so triggering on the
+        # input keeps each output under the input that produced it.
+        off_in = off_out = self._trigger_offset(self.ch1_in)
+        # Convert to volts only here, right before the line data is set.
+        for line, ch, direction in self._traces:
+            if not line.get_visible():
+                continue
+            buf, off = {
+                (0, "in"): (self.ch1_in, off_in), (1, "in"): (self.ch2_in, off_in),
+                (0, "out"): (self.ch1_out, off_out), (1, "out"): (self.ch2_out, off_out),
+            }[(ch, direction)]
+            line.set_ydata(adc_sim.to_volts(buf[off:off + n]))
         self._dirty = False
 
     def dump_buffers(self, out_dir=None):
@@ -344,8 +371,8 @@ class DualPlot:
         to a CSV, return the path. Runs on the Tk callback thread, same as
         update_*(), so no locking needed."""
         n = self.buffer_size
-        off_in  = self._trigger_offset(self.ch1_in)
-        off_out = self._trigger_offset(self.ch1_out)
+        # Same offset for in and out -- SAT pairs them sample by sample.
+        off_in = off_out = self._trigger_offset(self.ch1_in)
 
         # Widen to uint64 or csv emits numpy scalar reprs, not plain ints.
         cols = {
@@ -370,12 +397,12 @@ class DualPlot:
             # '#' lines: skippable by genfromtxt/read_csv, harmless to a
             # bare csv reader.
             f.write(f"# samples={n} trigger={config.PLOT_TRIGGER} "
-                    f"level={config.PLOT_TRIGGER_LEVEL}\n")
+                    f"level_v={config.PLOT_TRIGGER_LEVEL}\n")
             f.write(f"# send_rate={config.SEND_RATE} chunk={config.CHUNK_SIZE} "
                     f"effective_sps={config.SEND_RATE * config.CHUNK_SIZE}\n")
             f.write(f"# ecg_rate={config.ECG_SAMPLING_RATE} "
-                    f"amplitude={config.ECG_AMPLITUDE} hr={config.ECG_HEART_RATE}\n")
-            f.write(f"# plot_min={config.PLOT_MIN} plot_max={config.PLOT_MAX} "
+                    f"amplitude_mv={config.ECG_AMPLITUDE_MV} hr={config.ECG_HEART_RATE}\n")
+            f.write(f"# plot_min_v={config.PLOT_MIN} plot_max_v={config.PLOT_MAX} "
                     f"dtype={self.ch1_in.dtype}\n")
             w = csv.writer(f)
             w.writerow(["index", "time_s", *cols.keys()])
@@ -397,8 +424,11 @@ class DualPlot:
             ("displayed_samples",       n),
             ("capture_samples",         self._cap_size),
             ("wire_dtype",              str(self.ch1_in.dtype)),
-            ("trigger_offset_in",       off_in),
-            ("trigger_offset_out",      off_out),
+            ("trigger_offset",          off_in),
+            ("in_out_alignment",        "paired sample by sample"),
+            ("link_rtt_ms",             "local" if config.all_local()
+                                        else "n/a (no echo yet)" if net.rtt_s is None
+                                        else f"{net.rtt_s * 1e3:.2f}"),
         ]
         settings = {}
         for name in sorted(dir(config)):
@@ -479,18 +509,25 @@ class DualPlot:
 
     def refresh(self):
         self._apply_drawstyle()
-        self.sync()
+        with prof.span("sync"):
+            self.sync()
         # Driven from here (not its own timer), since this is already a
         # main-thread tick; self-skips when nothing new arrived.
-        self.signal_control_panel.poll_board()
-        # Re-derived every frame, not just on click, so a click that didn't
-        # land never leaves a stale label the user would trust.
-        self.signal_control_panel.poll_state()
+        with prof.span("poll"):
+            self.signal_control_panel.poll_board()
+            self.signal_control_panel.poll_state()
         canvas = self.fig.canvas
 
         # Live-editable but baked into the cached blit background -- any
         # change needs one full canvas.draw() to show and re-cache.
         needs_full_draw = False
+
+        traces = (config.PLOT_SHOW_CH1, config.PLOT_SHOW_CH2,
+                  config.PLOT_LINE_WIDTH)
+        if traces != self._last_traces:
+            self._last_traces = traces
+            self._apply_traces()
+            needs_full_draw = True
 
         time_rate = config.ECG_SAMPLING_RATE
         if time_rate != self._last_time_rate:
@@ -531,16 +568,18 @@ class DualPlot:
             canvas.draw()
             return
 
-        canvas.restore_region(self._bg1)
-        for line in self._lines_ax1:
-            self.ax1.draw_artist(line)
-        canvas.blit(self.ax1.bbox)
+        with prof.span("blit"):
+            canvas.restore_region(self._bg1)
+            for line in self._lines_ax1:
+                self.ax1.draw_artist(line)
+            canvas.blit(self.ax1.bbox)
 
-        canvas.restore_region(self._bg2)
-        for line in self._lines_ax2:
-            self.ax2.draw_artist(line)
-        canvas.blit(self.ax2.bbox)
+            canvas.restore_region(self._bg2)
+            for line in self._lines_ax2:
+                self.ax2.draw_artist(line)
+            canvas.blit(self.ax2.bbox)
 
         # flush_events() keeps the window responsive; plt.pause() did the
         # same plus a redundant redraw.
-        canvas.flush_events()
+        with prof.span("flush"):
+            canvas.flush_events()

@@ -7,6 +7,7 @@ import runctl
 from plot import DualPlot
 from net import tcp_thread
 from local_proc import local_thread
+import prof
 
 
 def main():
@@ -57,6 +58,7 @@ def main():
     threading.Thread(target=_warm, name="warmup", daemon=True).start()
 
     next_frame = time.perf_counter()
+    last_frame = next_frame
     next_ui = next_frame
 
     try:
@@ -72,8 +74,10 @@ def main():
 
             try:
                 while True:
-                    ch1, ch2 = plot_out_q.get_nowait()
-                    plotter.update_output(ch1, ch2)
+                    item = plot_out_q.get_nowait()
+                    if len(item) == 4:          # (out1, out2, in1, in2)
+                        plotter.update_input(item[2], item[3])
+                    plotter.update_output(item[0], item[1])
             except queue.Empty:
                 pass
 
@@ -87,7 +91,11 @@ def main():
                     next_ui = now + ui_period
 
             if now >= next_frame:
-                plotter.refresh()
+                if prof.ENABLED:
+                    prof.add("frame_gap", now - last_frame)
+                    last_frame = now
+                with prof.span("refresh"):
+                    plotter.refresh()
                 # Read live each cycle so a FRAME_RATE change takes effect
                 # next frame -- same pattern as net.py's SEND_RATE.
                 period = 1.0 / config.FRAME_RATE
@@ -98,6 +106,7 @@ def main():
                 if now - next_frame > period:
                     next_frame = now + period
 
+            prof.report()
             time.sleep(0.001)
 
         print("workers stopped, exiting.")

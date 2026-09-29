@@ -6,12 +6,9 @@
 #include "xaxidma.h"
 #include "xil_cache.h"
 #include "xil_io.h"
+#include "board_config.h"
 
-/* Hardware addresses -- must match assign_bd_address in
-   vivado/marathon/bd_CoraZ7_Eth.tcl. Real-time group kept contiguous in
-   0x40000000-0x4001FFFF on purpose, see research_info/dma-architecture.md
-   "AMP-ready block design". */
-#define TDM_FILTER_BASE   0x40000000u
+/* axi_tdm_filter register offsets from TDM_FILTER_BASE (board_config.h). */
 #define TDM_REG_NCHAN     0x0u   /* channels per frame (frame = 1 + N slots) */
 #define TDM_REG_SHIFT     0x4u   /* alpha = 1/2**SHIFT; 0 == bypass          */
 #define TDM_REG_CTRL      0x8u   /* bit0 byte-swap in fabric, bit1 clear     */

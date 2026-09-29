@@ -18,8 +18,8 @@
 #include "packet_format.h"
 
 constexpr int SERVER_PORT = 5001;
-constexpr const char *PCB_IP = "192.168.1.10";
-constexpr int MAX_SAMPLES = 2000;     // must match MAX_PAYLOAD_SAMPLES in lwip_comm_client_raw.c
+constexpr const char *PCB_IP = "192.168.1.10";  // must match BOARD_IP_ADDRESS in vitis/marathon/app/src/board_config.h
+constexpr int MAX_SAMPLES = 2000;     // must match MAX_PAYLOAD_SAMPLES in board_config.h
                                        // (bounds record count, not bytes -- record size is per-type,
                                        // see packet_format.h)
 constexpr int RECV_TIMEOUT_SEC = 30;  // reap peers that go silent without closing the TCP connection
